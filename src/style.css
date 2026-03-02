@@ -177,7 +177,7 @@ button:focus-visible {
 }
 
 .table-wrap {
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 
 table {
