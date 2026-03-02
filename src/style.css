@@ -1,19 +1,19 @@
 :root {
   color-scheme: light;
   font-family: 'Franklin Gothic Medium', 'Arial Narrow', 'Nimbus Sans Narrow', sans-serif;
-  background: #121820;
-  color: #f6f8fb;
+  background: #f4f6f8;
+  color: #0f1822;
   line-height: 1.5;
   font-size: 18px;
 
-  --bg: #121820;
-  --panel: #1d2733;
-  --panel-strong: #2a394b;
-  --border: #f4f1de;
-  --accent: #ffd447;
-  --text: #f6f8fb;
-  --muted: #d7dee6;
-  --danger: #ff8484;
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --panel-strong: #e9eef2;
+  --border: #0f1822;
+  --accent: #ffd22a;
+  --text: #0f1822;
+  --muted: #3e4c5d;
+  --danger: #af1f1f;
 }
 
 * {
@@ -23,7 +23,7 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: radial-gradient(circle at top right, #2e4057, var(--bg) 55%);
+  background: radial-gradient(circle at top right, #dae4ec, var(--bg) 60%);
   color: var(--text);
 }
 
@@ -53,18 +53,48 @@ body {
 }
 
 .hero-panel {
-  background: linear-gradient(135deg, #1f2f40, #2f455b);
+  background: linear-gradient(135deg, #ffffff, #e7edf3);
 }
 
 .panel-accent {
-  background: #3d2f0f;
+  background: #fff6cc;
   border-color: var(--accent);
 }
 
-.best-runway-value {
-  font-size: 2rem;
+.panel-subtle {
+  border-width: 2px;
+  border-color: #627487;
+  background: #f7fafc;
+}
+
+.panel-subtle h2 {
+  font-size: 1.1rem;
+}
+
+.panel-subtle p {
   margin: 0.25rem 0;
-  color: var(--accent);
+}
+
+.panel-spotlight {
+  border-width: 4px;
+  box-shadow: 0 0 0 3px #000;
+}
+
+.best-runway-value {
+  font-size: 2.5rem;
+  margin: 0.25rem 0;
+  color: #141414;
+}
+
+.best-runway-components {
+  border: 2px solid #000;
+  background: #fff;
+  padding: 0.5rem 0.65rem;
+}
+
+.best-runway-components p {
+  margin: 0.2rem 0;
+  font-weight: 700;
 }
 
 label {
@@ -86,7 +116,7 @@ button {
 input,
 textarea {
   padding: 0.6rem;
-  background: #0f151d;
+  background: #fff;
   color: var(--text);
 }
 
@@ -103,10 +133,16 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: wait;
+  background: #e1e1e1;
+  color: #313131;
+}
+
 button:hover,
 button:focus-visible {
   filter: brightness(1.05);
-  outline: 2px solid #fff;
+  outline: 2px solid #111;
   outline-offset: 1px;
 }
 

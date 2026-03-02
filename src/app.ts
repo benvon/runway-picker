@@ -3,6 +3,8 @@ import { parseWindInput } from './domain/metarParser';
 import { parseRunwayEndsInput } from './domain/runwayParser';
 import type { EvaluationResult, RunwayWindComponentValue } from './domain/types';
 
+const MIN_FEEDBACK_MS = 250;
+
 function formatHeadingValue(headwindKt: number): string {
   if (headwindKt < 0) {
     return `Tailwind ${Math.abs(headwindKt)} kt`;
@@ -23,6 +25,23 @@ function formatCrosswindValue(component: RunwayWindComponentValue): string {
   return `Crosswind ${component.crosswindKt} kt (${component.crosswindFrom})`;
 }
 
+function formatHeadwindArrow(headwindKt: number): string {
+  if (headwindKt < 0) {
+    return `↑ ${Math.abs(headwindKt)} kt tailwind`;
+  }
+
+  return `↓ ${headwindKt} kt headwind`;
+}
+
+function formatCrosswindArrow(component: RunwayWindComponentValue): string {
+  if (component.crosswindFrom === 'none') {
+    return '↔ 0 kt crosswind';
+  }
+
+  const directionArrow = component.crosswindFrom === 'left' ? '←' : '→';
+  return `${directionArrow} ${component.crosswindKt} kt crosswind`;
+}
+
 function renderParsedWindSummary(result: EvaluationResult): string {
   const wind = result.parsedWind;
   const directionLabel =
@@ -31,7 +50,7 @@ function renderParsedWindSummary(result: EvaluationResult): string {
   const gustLabel = wind.gustKt !== null ? `${wind.gustKt} kt` : 'None';
 
   return `
-    <section class="panel" aria-labelledby="parsed-wind-title">
+    <section class="panel panel-subtle" aria-labelledby="parsed-wind-title">
       <h2 id="parsed-wind-title">Parsed Wind Summary</h2>
       <div class="grid-two">
         <p><strong>Raw Group:</strong> ${wind.raw}</p>
@@ -46,11 +65,26 @@ function renderParsedWindSummary(result: EvaluationResult): string {
 
 function renderBestRunway(result: EvaluationResult): string {
   const bestLabel = result.bestRunwayId ? `Runway ${result.bestRunwayId}` : 'Not Determinable';
+  const bestRunway = result.bestRunwayId
+    ? result.runwayResults.find((runway) => runway.runwayId === result.bestRunwayId) ?? null
+    : null;
+
+  const sustained = bestRunway?.sustained
+    ? `<p><strong>Sustained:</strong> ${formatHeadwindArrow(bestRunway.sustained.headwindKt)} | ${formatCrosswindArrow(bestRunway.sustained)}</p>`
+    : '<p><strong>Sustained:</strong> Not available</p>';
+
+  const gust = bestRunway?.gust
+    ? `<p><strong>Gust:</strong> ${formatHeadwindArrow(bestRunway.gust.headwindKt)} | ${formatCrosswindArrow(bestRunway.gust)}</p>`
+    : '<p><strong>Gust:</strong> None</p>';
 
   return `
-    <section class="panel panel-accent" aria-labelledby="best-runway-title">
+    <section class="panel panel-accent panel-spotlight" aria-labelledby="best-runway-title">
       <h2 id="best-runway-title">Best Runway</h2>
       <p class="best-runway-value">${bestLabel}</p>
+      <div class="best-runway-components">
+        ${sustained}
+        ${gust}
+      </div>
       <p>${result.bestReason}</p>
     </section>
   `;
@@ -152,6 +186,7 @@ export function mountApp(root: HTMLElement): void {
         </form>
       </section>
 
+      <section id="best-runway-spotlight" class="results-stack" aria-live="polite"></section>
       <section id="results" class="results-stack" aria-live="polite"></section>
     </div>
   `;
@@ -160,31 +195,43 @@ export function mountApp(root: HTMLElement): void {
   const runwaysInput = root.querySelector<HTMLInputElement>('#runways');
   const metarInput = root.querySelector<HTMLTextAreaElement>('#metar');
   const errorNode = root.querySelector<HTMLElement>('#form-error');
+  const submitButton = root.querySelector<HTMLButtonElement>('button[type="submit"]');
+  const bestSpotlightNode = root.querySelector<HTMLElement>('#best-runway-spotlight');
   const resultsNode = root.querySelector<HTMLElement>('#results');
 
-  if (!form || !runwaysInput || !metarInput || !errorNode || !resultsNode) {
+  if (!form || !runwaysInput || !metarInput || !errorNode || !submitButton || !bestSpotlightNode || !resultsNode) {
     throw new Error('App failed to initialize required form elements.');
   }
 
-  form.addEventListener('submit', (event) => {
+  form.addEventListener('submit', async (event) => {
     event.preventDefault();
     errorNode.textContent = '';
+    submitButton.disabled = true;
+    submitButton.textContent = 'Calculating...';
+    const startedAt = Date.now();
 
     try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const runways = parseRunwayEndsInput(runwaysInput.value);
       const parsedWind = parseWindInput(metarInput.value);
       const evaluation = evaluateRunways(runways, parsedWind.wind, parsedWind.notes);
 
-      resultsNode.innerHTML = [
-        renderParsedWindSummary(evaluation),
-        renderBestRunway(evaluation),
-        renderRunwayTable(evaluation),
-        renderGlobalNotes(evaluation.globalNotes)
-      ].join('');
+      bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
+      resultsNode.innerHTML = [renderRunwayTable(evaluation), renderParsedWindSummary(evaluation), renderGlobalNotes(evaluation.globalNotes)].join('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
       errorNode.textContent = message;
+      bestSpotlightNode.innerHTML = '';
       resultsNode.innerHTML = '';
+    } finally {
+      const elapsedMs = Date.now() - startedAt;
+      const remainingMs = Math.max(0, MIN_FEEDBACK_MS - elapsedMs);
+      if (remainingMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+      }
+
+      submitButton.disabled = false;
+      submitButton.textContent = 'Calculate Runway Components';
     }
   });
 }
