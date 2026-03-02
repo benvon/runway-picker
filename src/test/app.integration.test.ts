@@ -25,7 +25,8 @@ describe('app integration', () => {
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise<void>((resolve) => setTimeout(resolve, 350));
 
-    expect(root.textContent).toContain('Runway 22');
+    expect(root.textContent).toContain('Best runway:');
+    expect(root.textContent).toContain('22');
     expect(root.textContent).toContain('All Runway Components');
   });
 });

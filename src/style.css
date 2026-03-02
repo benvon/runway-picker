@@ -80,21 +80,27 @@ body {
   box-shadow: 0 0 0 3px #000;
 }
 
-.best-runway-value {
-  font-size: 2.5rem;
-  margin: 0.25rem 0;
-  color: #141414;
+#best-runway-spotlight:empty {
+  display: none;
 }
 
-.best-runway-components {
-  border: 2px solid #000;
+.best-runway-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+  align-items: stretch;
+}
+
+.best-runway-cell {
+  margin: 0;
+  border: 2px solid #111;
   background: #fff;
-  padding: 0.5rem 0.65rem;
-}
-
-.best-runway-components p {
-  margin: 0.2rem 0;
+  padding: 0.55rem 0.5rem;
+  text-align: center;
+  font-size: clamp(1rem, 2vw, 1.2rem);
   font-weight: 700;
+  min-width: 0;
+  line-height: 1.35;
 }
 
 label {
@@ -194,6 +200,15 @@ th {
 .notes-list {
   margin: 0;
   padding-left: 1.1rem;
+}
+
+.info-box summary {
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.info-box[open] summary {
+  margin-bottom: 0.6rem;
 }
 
 @media (min-width: 860px) {

@@ -25,21 +25,32 @@ function formatCrosswindValue(component: RunwayWindComponentValue): string {
   return `Crosswind ${component.crosswindKt} kt (${component.crosswindFrom})`;
 }
 
-function formatHeadwindArrow(headwindKt: number): string {
-  if (headwindKt < 0) {
-    return `↑ ${Math.abs(headwindKt)} kt tailwind`;
+function formatBestHeadwindSummary(
+  sustained: RunwayWindComponentValue | null,
+  gust: RunwayWindComponentValue | null
+): string {
+  if (!sustained) {
+    return 'Direction variable';
   }
 
-  return `↓ ${headwindKt} kt headwind`;
+  const arrow = sustained.headwindKt < 0 ? '↑' : '↓';
+  const sustainedValue = Math.abs(sustained.headwindKt);
+  const gustValue = gust ? ` Gust ${Math.abs(gust.headwindKt)} kt` : '';
+  return `${arrow} ${sustainedValue} kt${gustValue}`;
 }
 
-function formatCrosswindArrow(component: RunwayWindComponentValue): string {
-  if (component.crosswindFrom === 'none') {
-    return '↔ 0 kt crosswind';
+function formatBestCrosswindSummary(
+  sustained: RunwayWindComponentValue | null,
+  gust: RunwayWindComponentValue | null
+): string {
+  if (!sustained) {
+    return 'Direction variable';
   }
 
-  const directionArrow = component.crosswindFrom === 'left' ? '←' : '→';
-  return `${directionArrow} ${component.crosswindKt} kt crosswind`;
+  const arrow =
+    sustained.crosswindFrom === 'left' ? '←' : sustained.crosswindFrom === 'right' ? '→' : '↔';
+  const gustValue = gust ? ` gust ${gust.crosswindKt} kt` : '';
+  return `${arrow} ${sustained.crosswindKt} kt${gustValue}`;
 }
 
 function renderParsedWindSummary(result: EvaluationResult): string {
@@ -64,28 +75,21 @@ function renderParsedWindSummary(result: EvaluationResult): string {
 }
 
 function renderBestRunway(result: EvaluationResult): string {
-  const bestLabel = result.bestRunwayId ? `Runway ${result.bestRunwayId}` : 'Not Determinable';
   const bestRunway = result.bestRunwayId
     ? result.runwayResults.find((runway) => runway.runwayId === result.bestRunwayId) ?? null
     : null;
 
-  const sustained = bestRunway?.sustained
-    ? `<p><strong>Sustained:</strong> ${formatHeadwindArrow(bestRunway.sustained.headwindKt)} | ${formatCrosswindArrow(bestRunway.sustained)}</p>`
-    : '<p><strong>Sustained:</strong> Not available</p>';
-
-  const gust = bestRunway?.gust
-    ? `<p><strong>Gust:</strong> ${formatHeadwindArrow(bestRunway.gust.headwindKt)} | ${formatCrosswindArrow(bestRunway.gust)}</p>`
-    : '<p><strong>Gust:</strong> None</p>';
+  const runwayDisplay = bestRunway?.runwayId ?? 'Not determinable';
+  const headwindSummary = formatBestHeadwindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
+  const crosswindSummary = formatBestCrosswindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
 
   return `
-    <section class="panel panel-accent panel-spotlight" aria-labelledby="best-runway-title">
-      <h2 id="best-runway-title">Best Runway</h2>
-      <p class="best-runway-value">${bestLabel}</p>
-      <div class="best-runway-components">
-        ${sustained}
-        ${gust}
+    <section class="panel panel-accent panel-spotlight" aria-label="Best runway summary">
+      <div class="best-runway-row">
+        <p class="best-runway-cell"><strong>Best runway:</strong> ${runwayDisplay}</p>
+        <p class="best-runway-cell">${headwindSummary}</p>
+        <p class="best-runway-cell">${crosswindSummary}</p>
       </div>
-      <p>${result.bestReason}</p>
     </section>
   `;
 }
@@ -134,18 +138,22 @@ function renderRunwayTable(result: EvaluationResult): string {
   `;
 }
 
-function renderGlobalNotes(notes: string[]): string {
-  if (!notes.length) {
-    return '';
-  }
+function renderCalculationInfo(result: EvaluationResult): string {
+  const notes = [
+    result.bestReason,
+    ...result.globalNotes,
+    'Advisory only: wind component output does not account for runway condition, runway length, traffic flow, NOTAMs, or ATC instructions.'
+  ];
+
+  const dedupedNotes = [...new Set(notes)];
 
   return `
-    <section class="panel" aria-labelledby="global-notes-title">
-      <h2 id="global-notes-title">Notes</h2>
+    <details class="panel panel-subtle info-box">
+      <summary>Calculation Notes & Disclaimer</summary>
       <ul class="notes-list">
-        ${notes.map((note) => `<li>${note}</li>`).join('')}
+        ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
       </ul>
-    </section>
+    </details>
   `;
 }
 
@@ -156,6 +164,8 @@ export function mountApp(root: HTMLElement): void {
         <h1>Runway Picker</h1>
         <p>Enter runway ends and METAR wind data to compute headwind and crosswind components.</p>
       </header>
+
+      <section id="best-runway-spotlight" class="results-stack" aria-live="polite"></section>
 
       <section class="panel" aria-labelledby="input-title">
         <h2 id="input-title">Inputs</h2>
@@ -186,7 +196,6 @@ export function mountApp(root: HTMLElement): void {
         </form>
       </section>
 
-      <section id="best-runway-spotlight" class="results-stack" aria-live="polite"></section>
       <section id="results" class="results-stack" aria-live="polite"></section>
     </div>
   `;
@@ -217,7 +226,11 @@ export function mountApp(root: HTMLElement): void {
       const evaluation = evaluateRunways(runways, parsedWind.wind, parsedWind.notes);
 
       bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
-      resultsNode.innerHTML = [renderRunwayTable(evaluation), renderParsedWindSummary(evaluation), renderGlobalNotes(evaluation.globalNotes)].join('');
+      resultsNode.innerHTML = [
+        renderRunwayTable(evaluation),
+        renderParsedWindSummary(evaluation),
+        renderCalculationInfo(evaluation)
+      ].join('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
       errorNode.textContent = message;
