@@ -1,0 +1,152 @@
+name: Deploy Preview
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  checks: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  wait-for-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI validate check to pass
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = context.payload.pull_request.head.sha;
+            const targetCheckNames = new Set(['validate', 'CI / validate']);
+            const maxAttempts = 40;
+            const delayMs = 15000;
+
+            function sleep(ms) {
+              return new Promise((resolve) => setTimeout(resolve, ms));
+            }
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              const { data } = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref,
+                per_page: 100,
+              });
+
+              const checkRun = data.check_runs.find((run) => targetCheckNames.has(run.name));
+
+              if (checkRun?.status === 'completed') {
+                if (checkRun.conclusion === 'success') {
+                  core.info(`CI validate check succeeded for ${ref}.`);
+                  return;
+                }
+
+                core.setFailed(
+                  `CI validate check completed with conclusion '${checkRun.conclusion}' for ${ref}.`
+                );
+                return;
+              }
+
+              core.info(
+                `Attempt ${attempt}/${maxAttempts}: CI validate check not completed yet for ${ref}.`
+              );
+              await sleep(delayMs);
+            }
+
+            core.setFailed(
+              `Timed out waiting for CI validate check to complete for ${ref}.`
+            );
+
+  deploy-preview:
+    needs: wait-for-ci
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.fork == false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate Cloudflare configuration
+        shell: bash
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
+            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_PROJECT_NAME."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy preview to Cloudflare Pages
+        id: deploy
+        shell: bash
+        run: |
+          alias_name="pr-${{ github.event.pull_request.number }}"
+          npx wrangler pages deploy dist \
+            --project-name "$CLOUDFLARE_PROJECT_NAME" \
+            --branch "$alias_name" \
+            --commit-hash "${{ github.event.pull_request.head.sha }}" \
+            | tee deploy-output.txt
+
+          preview_url="$(grep -Eo 'https://[^ ]+\.pages\.dev[^ ]*' deploy-output.txt | tail -n1)"
+          if [ -z "$preview_url" ]; then
+            echo "Could not extract preview URL from wrangler output."
+            exit 1
+          fi
+
+          echo "preview_url=$preview_url" >> "$GITHUB_OUTPUT"
+
+      - name: Post or update PR comment
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_URL: ${{ steps.deploy.outputs.preview_url }}
+        with:
+          script: |
+            const marker = '<!-- runway-picker-preview -->';
+            const body = `${marker}\nPreview deployment ready: ${process.env.PREVIEW_URL}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find((comment) =>
+              comment.user?.type === 'Bot' && comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

@@ -1,0 +1,80 @@
+name: Release Tag
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Find latest semver tag
+        id: latest
+        shell: bash
+        run: |
+          latest_tag="$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1)"
+          if [ -z "$latest_tag" ]; then
+            echo "No baseline tag found. Create and push v0.1.0 before enabling automated tagging."
+            exit 1
+          fi
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next tag
+        id: next
+        env:
+          BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
+          LATEST_TAG: ${{ steps.latest.outputs.latest_tag }}
+        shell: bash
+        run: |
+          next_tag="$(node scripts/semver.js --branch "$BRANCH_NAME" --current-tag "$LATEST_TAG")"
+          echo "next_tag=$next_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag does not already exist
+        env:
+          NEXT_TAG: ${{ steps.next.outputs.next_tag }}
+        shell: bash
+        run: |
+          if git rev-parse -q --verify "refs/tags/$NEXT_TAG" >/dev/null; then
+            echo "Tag $NEXT_TAG already exists."
+            exit 1
+          fi
+
+      - name: Create and push annotated tag
+        env:
+          NEXT_TAG: ${{ steps.next.outputs.next_tag }}
+        run: |
+          git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG"
+          git push origin "$NEXT_TAG"
+
+      - name: Create GitHub release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.next.outputs.next_tag }}
+        with:
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: process.env.RELEASE_TAG,
+              name: process.env.RELEASE_TAG,
+              generate_release_notes: true
+            });
