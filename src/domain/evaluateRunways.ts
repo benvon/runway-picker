@@ -9,17 +9,17 @@ import { calculateWindComponent } from './windMath';
 
 interface RankedRunway {
   runwayId: string;
-  rawHeadwindKt: number;
-  rawCrosswindKt: number;
+  headwindKt: number;
+  crosswindKt: number;
 }
 
 function sortRunwaysForBest(a: RankedRunway, b: RankedRunway): number {
-  if (b.rawHeadwindKt !== a.rawHeadwindKt) {
-    return b.rawHeadwindKt - a.rawHeadwindKt;
+  if (b.headwindKt !== a.headwindKt) {
+    return b.headwindKt - a.headwindKt;
   }
 
-  if (a.rawCrosswindKt !== b.rawCrosswindKt) {
-    return a.rawCrosswindKt - b.rawCrosswindKt;
+  if (a.crosswindKt !== b.crosswindKt) {
+    return a.crosswindKt - b.crosswindKt;
   }
 
   return a.runwayId.localeCompare(b.runwayId);
@@ -83,8 +83,8 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
     const sustainedRaw = calculateWindComponent(wind.speedKt, wind.directionDegTrue!, runway.headingDegMag);
     ranking.push({
       runwayId: runway.id,
-      rawHeadwindKt: sustainedRaw.rawHeadwindKt,
-      rawCrosswindKt: Math.abs(sustainedRaw.rawCrosswindSignedKt)
+      headwindKt: sustainedRaw.headwindKt,
+      crosswindKt: sustainedRaw.crosswindKt
     });
 
     const gustRaw = wind.gustKt !== null
