@@ -1,0 +1,91 @@
+name: Deploy METAR Worker Production
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  checks: read
+  contents: read
+
+jobs:
+  wait-for-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI validate check to pass
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = context.sha;
+            const targetCheckNames = new Set(['validate', 'CI / validate']);
+            const maxAttempts = 40;
+            const delayMs = 15000;
+
+            function sleep(ms) {
+              return new Promise((resolve) => setTimeout(resolve, ms));
+            }
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              const { data } = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref,
+                per_page: 100,
+              });
+
+              const checkRun = data.check_runs.find((run) => targetCheckNames.has(run.name));
+
+              if (checkRun?.status === 'completed') {
+                if (checkRun.conclusion === 'success') {
+                  core.info(`CI validate check succeeded for ${ref}.`);
+                  return;
+                }
+
+                core.setFailed(
+                  `CI validate check completed with conclusion '${checkRun.conclusion}' for ${ref}.`
+                );
+                return;
+              }
+
+              core.info(
+                `Attempt ${attempt}/${maxAttempts}: CI validate check not completed yet for ${ref}.`
+              );
+              await sleep(delayMs);
+            }
+
+            core.setFailed(
+              `Timed out waiting for CI validate check to complete for ${ref}.`
+            );
+
+  deploy-worker:
+    needs: wait-for-ci
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate Cloudflare configuration
+        shell: bash
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy METAR Worker
+        run: npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc

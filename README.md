@@ -2,10 +2,12 @@
 
 Runway Picker is a high-contrast, mobile-first web app for pilots to compare runway headwind and crosswind components from METAR wind data.
 
-## Phase 1 features
+## Features
 
 - Manual runway-end input (`09`, `27`, `18L`, etc.)
-- METAR or standalone wind-group parsing (`22012KT`, `22012G20KT`, `VRB05KT`, `00000KT`)
+- ICAO lookup input for METAR retrieval (Release 2)
+- METAR lookup via local API proxy (`/api/metar`) backed by a dedicated Cloudflare Worker
+- Shared 30-minute METAR caching in Worker KV for multi-user cache reuse
 - Sustained and gust component calculations for each runway
 - Best-runway selection by:
   1. greatest headwind
@@ -32,7 +34,12 @@ npm run build
 
 - Static frontend served by Cloudflare Pages (`dist`)
 - Pages Functions API boundary under `functions/api/`
-- Starter endpoint: `/api/health`
+- API endpoints:
+  - `/api/health`
+  - `/api/metar?icao=KJFK`
+- Dedicated Worker API backend:
+  - `workers/metar-proxy/` (service name: `runway-picker-metar-api`)
+  - Uses KV namespace binding `METAR_CACHE`
 
 See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
 
@@ -45,6 +52,7 @@ See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
   - other => patch
 - `Deploy Preview`: deploy PR preview to Cloudflare Pages and comment URL
 - `Deploy Production`: deploy on pushed tags (`v*.*.*`)
+- `Deploy METAR Worker Production`: deploy METAR Worker on pushed tags (`v*.*.*`)
 
 ## Bootstrap release tag
 
