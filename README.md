@@ -50,7 +50,7 @@ See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
   - `release/*` => major
   - `feature/*` => minor
   - other => patch
-- `Deploy Preview`: deploy PR preview to Cloudflare Pages and comment URL
+- `Deploy Preview`: deploy Worker preview env + Pages preview and comment URL
 - `Deploy Production`: deploy on pushed tags (`v*.*.*`)
 - `Deploy METAR Worker Production`: deploy METAR Worker on pushed tags (`v*.*.*`)
 

@@ -5,8 +5,17 @@
   "kv_namespaces": [
     {
       "binding": "METAR_CACHE",
-      "id": "98b4d5d8e9f44e8cb3396e4cefbce840",
-      "preview_id": "48cf343ef00147c79fcf841dcf8b850f"
+      "id": "98b4d5d8e9f44e8cb3396e4cefbce840"
     }
-  ]
+  ],
+  "env": {
+    "preview": {
+      "kv_namespaces": [
+        {
+          "binding": "METAR_CACHE",
+          "id": "48cf343ef00147c79fcf841dcf8b850f"
+        }
+      ]
+    }
+  }
 }

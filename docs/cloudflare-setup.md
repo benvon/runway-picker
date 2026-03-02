@@ -21,12 +21,16 @@ npx wrangler kv namespace create METAR_CACHE --preview
 ```
 2. Copy the returned IDs into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `kv_namespaces[].id`
-   - `kv_namespaces[].preview_id`
+   - `env.preview.kv_namespaces[].id`
 3. Deploy the worker:
 ```bash
 npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc
 ```
-4. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
+4. Deploy the preview worker environment:
+```bash
+npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview
+```
+5. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
 
 Worker behavior:
 - Upstream source: `https://aviationweather.gov/api/data/metar`
@@ -41,6 +45,8 @@ Worker behavior:
   - `compatibility_date: 2026-03-02`
   - `services` binding:
     - `METAR_API` -> `runway-picker-metar-api`
+  - `env.preview.services` binding:
+    - `METAR_API` -> `runway-picker-metar-api` (environment `preview`)
 
 ## 5) Create API token and account settings
 In Cloudflare:
@@ -71,7 +77,10 @@ Open local URL and verify:
 ## 7) CI and preview deployment
 - Open a PR to `main`.
 - `CI` workflow runs typecheck/lint/test/build.
-- `Deploy Preview` workflow deploys to Cloudflare and comments preview URL on the PR.
+- `Deploy Preview` workflow:
+  - deploys Worker env `preview`
+  - deploys Pages preview
+  - comments preview URL on the PR
 
 ## 8) Bootstrap release baseline
 Before automated version tagging, create baseline tag once:
