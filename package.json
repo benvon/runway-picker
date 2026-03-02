@@ -1,0 +1,38 @@
+{
+  "name": "runway-picker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Simple web app to help you choose which runway to use.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cf:typegen": "wrangler types --path='./functions/types.d.ts'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benvon/runway-picker.git"
+  },
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/benvon/runway-picker/issues"
+  },
+  "homepage": "https://github.com/benvon/runway-picker#readme",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.3.3",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "eslint": "^10.0.2",
+    "jsdom": "^28.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18",
+    "wrangler": "^4.69.0"
+  }
+}

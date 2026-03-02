@@ -1,0 +1,71 @@
+name: Release Tag
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Find latest semver tag
+        id: latest
+        shell: bash
+        run: |
+          latest_tag="$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1)"
+          if [ -z "$latest_tag" ]; then
+            echo "No baseline tag found. Create and push v0.1.0 before enabling automated tagging."
+            exit 1
+          fi
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next tag
+        id: next
+        shell: bash
+        run: |
+          branch_name="${{ github.event.pull_request.head.ref }}"
+          next_tag="$(node scripts/semver.js --branch "$branch_name" --current-tag "${{ steps.latest.outputs.latest_tag }}")"
+          echo "next_tag=$next_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag does not already exist
+        shell: bash
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.next.outputs.next_tag }}" >/dev/null; then
+            echo "Tag ${{ steps.next.outputs.next_tag }} already exists."
+            exit 1
+          fi
+
+      - name: Create and push annotated tag
+        run: |
+          git tag -a "${{ steps.next.outputs.next_tag }}" -m "Release ${{ steps.next.outputs.next_tag }}"
+          git push origin "${{ steps.next.outputs.next_tag }}"
+
+      - name: Create GitHub release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: '${{ steps.next.outputs.next_tag }}',
+              name: '${{ steps.next.outputs.next_tag }}',
+              generate_release_notes: true
+            });
