@@ -162,7 +162,6 @@ export function mountApp(root: HTMLElement): void {
     <div class="app-shell">
       <header class="panel hero-panel">
         <h1>Runway Picker</h1>
-        <p>Enter runway ends and METAR wind data to compute headwind and crosswind components.</p>
       </header>
 
       <section id="best-runway-spotlight" class="results-stack" aria-live="polite"></section>
