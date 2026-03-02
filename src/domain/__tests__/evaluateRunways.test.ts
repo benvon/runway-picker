@@ -81,6 +81,11 @@ describe('evaluateRunways', () => {
     };
 
     const result = evaluateRunways(runways, wind);
+
+    // Ensure gust components are calculated and present in runway results
+    for (const runwayResult of result.runwayResults) {
+      expect(runwayResult.gust).not.toBeNull();
+    }
     expect(result.bestRunwayId).toBe('09');
   });
 });
