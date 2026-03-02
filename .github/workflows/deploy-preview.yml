@@ -99,18 +99,49 @@ jobs:
         run: npm run build
 
       - name: Deploy METAR Worker preview environment
-        run: npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview
+        shell: bash
+        run: |
+          attempts=5
+          for attempt in $(seq 1 "$attempts"); do
+            if npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "Worker preview deploy failed after $attempts attempts."
+              exit 1
+            fi
+
+            sleep_seconds=$((attempt * 10))
+            echo "Retrying worker preview deploy in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
 
       - name: Deploy preview to Cloudflare Pages
         id: deploy
         shell: bash
         run: |
           alias_name="pr-${{ github.event.pull_request.number }}"
-          npx wrangler pages deploy dist \
-            --project-name "$CLOUDFLARE_PROJECT_NAME" \
-            --branch "$alias_name" \
-            --commit-hash "${{ github.event.pull_request.head.sha }}" \
-            | tee deploy-output.txt
+          attempts=5
+          for attempt in $(seq 1 "$attempts"); do
+            set -o pipefail
+            if npx wrangler pages deploy dist \
+              --project-name "$CLOUDFLARE_PROJECT_NAME" \
+              --branch "$alias_name" \
+              --commit-hash "${{ github.event.pull_request.head.sha }}" \
+              | tee deploy-output.txt; then
+              break
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "Pages preview deploy failed after $attempts attempts."
+              exit 1
+            fi
+
+            sleep_seconds=$((attempt * 10))
+            echo "Retrying pages preview deploy in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
 
           preview_url="$(grep -Eo 'https://[^ ]+\.pages\.dev[^ ]*' deploy-output.txt | tail -n1)"
           if [ -z "$preview_url" ]; then

@@ -95,8 +95,23 @@ jobs:
         run: npm run build
 
       - name: Deploy production to Cloudflare Pages
+        shell: bash
         run: |
-          npx wrangler pages deploy dist \
-            --project-name "$CLOUDFLARE_PROJECT_NAME" \
-            --branch main \
-            --commit-hash "${{ github.sha }}"
+          attempts=5
+          for attempt in $(seq 1 "$attempts"); do
+            if npx wrangler pages deploy dist \
+              --project-name "$CLOUDFLARE_PROJECT_NAME" \
+              --branch main \
+              --commit-hash "${{ github.sha }}"; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "Pages production deploy failed after $attempts attempts."
+              exit 1
+            fi
+
+            sleep_seconds=$((attempt * 10))
+            echo "Retrying pages production deploy in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done

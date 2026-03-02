@@ -88,4 +88,20 @@ jobs:
         run: npm ci
 
       - name: Deploy METAR Worker
-        run: npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc
+        shell: bash
+        run: |
+          attempts=5
+          for attempt in $(seq 1 "$attempts"); do
+            if npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "Worker production deploy failed after $attempts attempts."
+              exit 1
+            fi
+
+            sleep_seconds=$((attempt * 10))
+            echo "Retrying worker production deploy in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
