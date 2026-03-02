@@ -2,6 +2,16 @@
 import { describe, expect, it } from 'vitest';
 import { mountApp } from '../app';
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error('waitFor timed out');
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe('app integration', () => {
   it('calculates and renders best runway', async () => {
     document.body.innerHTML = '<main id="app"></main>';
@@ -23,7 +33,7 @@ describe('app integration', () => {
     runwayInput.value = '22 04';
     metarInput.value = '22012G20KT';
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+    await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
 
     expect(root.textContent).toContain('Best runway:');
     expect(root.textContent).toContain('22');
