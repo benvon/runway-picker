@@ -31,6 +31,16 @@ describe('metar worker helpers', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('X-Cache')).toBe('HIT');
+    expect(response.headers.get('Cache-Control')).toContain('s-maxage=1800');
     expect(put).not.toHaveBeenCalled();
+  });
+
+  it('sets Cache-Control: no-store on error responses', async () => {
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=ABC'), {
+      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() }
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
 });

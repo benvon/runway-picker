@@ -62,12 +62,15 @@ function buildUpstreamUrl(icao: string): string {
 }
 
 function buildJsonResponse(payload: unknown, status: number, cacheState?: 'HIT' | 'MISS'): Response {
-  const headers: Record<string, string> = {
-    'Cache-Control': `public, max-age=60, s-maxage=${CACHE_TTL_SECONDS}`
-  };
+  const headers: Record<string, string> = {};
 
-  if (cacheState) {
-    headers['X-Cache'] = cacheState;
+  if (status === 200) {
+    headers['Cache-Control'] = `public, max-age=60, s-maxage=${CACHE_TTL_SECONDS}`;
+    if (cacheState) {
+      headers['X-Cache'] = cacheState;
+    }
+  } else {
+    headers['Cache-Control'] = 'no-store';
   }
 
   return Response.json(payload, {
