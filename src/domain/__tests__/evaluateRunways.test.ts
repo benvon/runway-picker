@@ -55,4 +55,32 @@ describe('evaluateRunways', () => {
     expect(result.bestRunwayId).toBeNull();
     expect(result.runwayResults[0].sustained).toBeNull();
   });
+
+  it('handles calm winds without error', () => {
+    const wind: ParsedWind = {
+      raw: '00000KT',
+      directionType: 'calm',
+      directionDegTrue: null,
+      speedKt: 0,
+      gustKt: null,
+      source: 'wind_group'
+    };
+
+    const result = evaluateRunways(runways, wind);
+    expect(result.runwayResults).toHaveLength(runways.length);
+  });
+
+  it('considers gusts for fixed winds while selecting best runway', () => {
+    const wind: ParsedWind = {
+      raw: '09010G20KT',
+      directionType: 'fixed',
+      directionDegTrue: 90,
+      speedKt: 10,
+      gustKt: 20,
+      source: 'wind_group'
+    };
+
+    const result = evaluateRunways(runways, wind);
+    expect(result.bestRunwayId).toBe('09');
+  });
 });
