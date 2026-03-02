@@ -35,7 +35,7 @@ function formatBestHeadwindSummary(
 
   const arrow = sustained.headwindKt < 0 ? '↑' : '↓';
   const sustainedValue = Math.abs(sustained.headwindKt);
-  const gustValue = gust ? ` Gust ${Math.abs(gust.headwindKt)} kt` : '';
+  const gustValue = gust ? ` G${Math.abs(gust.headwindKt)} kt` : '';
   return `${arrow} ${sustainedValue} kt${gustValue}`;
 }
 
@@ -49,7 +49,7 @@ function formatBestCrosswindSummary(
 
   const arrow =
     sustained.crosswindFrom === 'left' ? '←' : sustained.crosswindFrom === 'right' ? '→' : '↔';
-  const gustValue = gust ? ` gust ${gust.crosswindKt} kt` : '';
+  const gustValue = gust ? ` G${gust.crosswindKt} kt` : '';
   return `${arrow} ${sustained.crosswindKt} kt${gustValue}`;
 }
 
