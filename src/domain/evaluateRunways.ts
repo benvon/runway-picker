@@ -87,7 +87,7 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
       rawCrosswindKt: Math.abs(sustainedRaw.rawCrosswindSignedKt)
     });
 
-    const gustRaw = wind.gustKt
+    const gustRaw = wind.gustKt !== null
       ? calculateWindComponent(wind.gustKt, wind.directionDegTrue!, runway.headingDegMag)
       : null;
 
