@@ -86,7 +86,7 @@ body {
 
 .best-runway-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 0.6rem;
   align-items: stretch;
 }
@@ -101,6 +101,7 @@ body {
   font-weight: 700;
   min-width: 0;
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 label {
@@ -176,13 +177,13 @@ button:focus-visible {
 }
 
 .table-wrap {
-  overflow-x: auto;
+  overflow-x: hidden;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 760px;
+  table-layout: fixed;
 }
 
 th,
@@ -191,6 +192,8 @@ td {
   padding: 0.5rem;
   vertical-align: top;
   text-align: left;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 th {
@@ -228,5 +231,9 @@ th {
 
   .grid-two {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .best-runway-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
