@@ -10,7 +10,7 @@ describe('metarApi service', () => {
     await expect(fetchMetarByIcao('KSF')).rejects.toBeInstanceOf(MetarLookupError);
   });
 
-  it('calls local API and returns payload', async () => {
+  it('calls local API and returns structured cache metadata', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -19,10 +19,21 @@ describe('metarApi service', () => {
             icao: 'KJFK',
             metarRaw: 'METAR KJFK 022051Z 12008KT 10SM FEW040 05/M02 A3016',
             source: 'aviationweather',
-            fetchedAt: '2026-03-02T00:00:00.000Z'
+            fetchedAt: '2026-03-02T00:00:00.000Z',
+            cache: {
+              status: 'kv_hit',
+              source: 'kv',
+              ageSeconds: 18,
+              fetchedAt: '2026-03-02T00:00:00.000Z',
+              servedAt: '2026-03-02T00:00:18.000Z',
+              ttlSeconds: 1800,
+              key: 'v1:metar:KJFK',
+              resource: 'metar'
+            }
           },
           {
             headers: {
+              'X-Runway-Cache-Status': 'kv_hit',
               'X-Cache': 'HIT'
             }
           }
@@ -33,10 +44,38 @@ describe('metarApi service', () => {
     const payload = await fetchMetarByIcao('kjfk');
     expect(fetch).toHaveBeenCalledWith('/api/metar?icao=KJFK', {
       method: 'GET',
+      cache: 'no-store',
       headers: { Accept: 'application/json' }
     });
     expect(payload.icao).toBe('KJFK');
-    expect(payload.cacheState).toBe('cached');
+    expect(payload.cache.status).toBe('kv_hit');
+    expect(payload.cache.source).toBe('kv');
+    expect(payload.cache.key).toBe('v1:metar:KJFK');
+  });
+
+  it('falls back to legacy cache headers when cache payload is missing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            icao: 'KMCI',
+            metarRaw: 'METAR KMCI 022051Z 12008KT 10SM FEW040 05/M02 A3016',
+            source: 'aviationweather',
+            fetchedAt: '2026-03-02T00:00:00.000Z'
+          },
+          {
+            headers: {
+              'X-Cache': 'MISS'
+            }
+          }
+        )
+      )
+    );
+
+    const payload = await fetchMetarByIcao('kmci');
+    expect(payload.cache.status).toBe('upstream_refresh');
+    expect(payload.cache.source).toBe('upstream');
   });
 
   it('surfaces user-friendly message for unknown ICAO', async () => {
@@ -77,6 +116,7 @@ describe('metarApi service', () => {
     });
     expect(fetch).toHaveBeenCalledWith('/api/metar?icao=KJFK', {
       method: 'GET',
+      cache: 'no-store',
       headers: { Accept: 'application/json' }
     });
   });

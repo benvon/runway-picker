@@ -120,17 +120,22 @@ function renderRunwayTable(result: EvaluationResult): string {
 }
 
 function renderCalculationInfo(result: EvaluationResult, metarLookup: MetarLookupResponse): string {
-  const freshnessNote =
-    metarLookup.cacheState === 'cached'
-      ? 'Data freshness: Cached METAR data'
-      : metarLookup.cacheState === 'fresh'
-        ? 'Data freshness: Fresh METAR data'
-        : 'Data freshness: Unknown (cache header not provided)';
+  const freshnessNote = `Data freshness: ${metarLookup.cache.status} via ${metarLookup.cache.source}`;
+  const ageNote = `Cache age: ${metarLookup.cache.ageSeconds}s (TTL ${metarLookup.cache.ttlSeconds}s)`;
+  const fetchedAtNote = `Cache fetched at: ${metarLookup.cache.fetchedAt}`;
+  const servedAtNote = `Cache served at: ${metarLookup.cache.servedAt}`;
+  const cacheKeyNote = metarLookup.cache.key
+    ? `Cache key: ${metarLookup.cache.key}`
+    : 'Cache key: not provided';
 
   const notes = [
     result.bestReason,
     ...result.globalNotes,
     freshnessNote,
+    ageNote,
+    fetchedAtNote,
+    servedAtNote,
+    cacheKeyNote,
     `Raw METAR: ${metarLookup.metarRaw}`,
     'Advisory only: wind component output does not account for runway condition, runway length, traffic flow, NOTAMs, or ATC instructions.'
   ];
