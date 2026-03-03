@@ -83,4 +83,43 @@ describe('metar worker helpers', () => {
     });
     vi.unstubAllGlobals();
   });
+
+  it('fetches upstream, stores to KV with TTL 1800, and returns X-Cache: MISS on cache miss', async () => {
+    const metarLine = 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(metarLine, { status: 200 })));
+
+    const put = vi.fn().mockResolvedValue(undefined);
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put }
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Cache')).toBe('MISS');
+    expect(response.headers.get('Cache-Control')).toContain('s-maxage=1800');
+
+    expect(put).toHaveBeenCalledOnce();
+    const [putKey, putValue, putOptions] = put.mock.calls[0];
+    expect(putKey).toBe('metar:KMCI');
+    expect(putOptions).toEqual({ expirationTtl: 1800 });
+    const stored = JSON.parse(putValue as string);
+    expect(stored).toMatchObject({ icao: 'KMCI', metarRaw: metarLine, source: 'aviationweather' });
+    expect(typeof stored.fetchedAt).toBe('string');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('returns 502 when upstream METAR provider responds with a non-OK status', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('Service Unavailable', { status: 503 })));
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() }
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'METAR provider returned status 503.'
+    });
+    vi.unstubAllGlobals();
+  });
 });
