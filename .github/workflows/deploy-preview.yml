@@ -172,11 +172,11 @@ jobs:
         id: deploy
         shell: bash
         run: |
+          cp "${{ steps.preview-config.outputs.preview_pages_config }}" wrangler.jsonc
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
             set -o pipefail
             if npx wrangler pages deploy dist \
-              --config "${{ steps.preview-config.outputs.preview_pages_config }}" \
               --project-name "$CLOUDFLARE_PROJECT_NAME" \
               --branch "${{ github.event.pull_request.head.ref }}" \
               --commit-hash "${{ github.event.pull_request.head.sha }}" \
