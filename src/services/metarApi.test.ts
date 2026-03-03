@@ -33,8 +33,7 @@ describe('metarApi service', () => {
           },
           {
             headers: {
-              'X-Runway-Cache-Status': 'kv_hit',
-              'X-Cache': 'HIT'
+              'X-Runway-Cache-Status': 'kv_hit'
             }
           }
         )
@@ -53,7 +52,7 @@ describe('metarApi service', () => {
     expect(payload.cache.key).toBe('v1:metar:KJFK');
   });
 
-  it('falls back to legacy cache headers when cache payload is missing', async () => {
+  it('falls back to X-Runway-Cache-Status when cache payload is missing', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -66,7 +65,7 @@ describe('metarApi service', () => {
           },
           {
             headers: {
-              'X-Cache': 'MISS'
+              'X-Runway-Cache-Status': 'upstream_refresh'
             }
           }
         )

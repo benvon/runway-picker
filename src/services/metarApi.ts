@@ -56,19 +56,10 @@ function isCacheSource(value: unknown): value is MetarCacheSource {
   return value === 'edge' || value === 'kv' || value === 'upstream' || value === 'stale' || value === 'unknown';
 }
 
-function statusFromLegacyHeader(headers: Headers): MetarCacheStatus {
+function statusFromHeaders(headers: Headers): MetarCacheStatus {
   const runwayHeader = headers.get('X-Runway-Cache-Status')?.trim();
   if (runwayHeader && isCacheStatus(runwayHeader)) {
     return runwayHeader;
-  }
-
-  const cacheHeader = headers.get('X-Cache')?.trim().toUpperCase();
-  if (cacheHeader === 'HIT') {
-    return 'kv_hit';
-  }
-
-  if (cacheHeader === 'MISS') {
-    return 'upstream_refresh';
   }
 
   return 'unknown';
@@ -103,7 +94,7 @@ function normalizeCacheMetadata(
 
   if (cacheCandidate && typeof cacheCandidate === 'object') {
     const candidate = cacheCandidate as Partial<MetarCacheMetadata>;
-    const status = isCacheStatus(candidate.status) ? candidate.status : statusFromLegacyHeader(headers);
+    const status = isCacheStatus(candidate.status) ? candidate.status : statusFromHeaders(headers);
     const source = isCacheSource(candidate.source) ? candidate.source : sourceFromStatus(status);
 
     return {
@@ -118,7 +109,7 @@ function normalizeCacheMetadata(
     };
   }
 
-  const status = statusFromLegacyHeader(headers);
+  const status = statusFromHeaders(headers);
   return {
     status,
     source: sourceFromStatus(status),

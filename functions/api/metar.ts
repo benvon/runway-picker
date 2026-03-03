@@ -31,7 +31,6 @@ export const onRequestGet: PagesFunction<MetarProxyEnv> = async ({ request, env 
     const headerNames = [
       'Content-Type',
       'Cache-Control',
-      'X-Cache',
       'X-Runway-Cache-Status'
     ];
 

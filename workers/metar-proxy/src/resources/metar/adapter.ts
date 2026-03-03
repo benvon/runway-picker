@@ -144,12 +144,16 @@ function deserializeMetar(value: unknown): MetarResourceData | null {
     return null;
   }
 
-  const withEnvelopeData = (value as { data?: unknown }).data;
-  if (withEnvelopeData) {
-    return toMetarData(withEnvelopeData);
+  const candidate = value as Partial<CacheEnvelope<unknown>>;
+  if (
+    typeof candidate.schemaVersion !== 'number' ||
+    typeof candidate.resource !== 'string' ||
+    typeof candidate.key !== 'string'
+  ) {
+    return null;
   }
 
-  return toMetarData(value);
+  return toMetarData(candidate.data);
 }
 
 export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, string, MetarResourceData> = {

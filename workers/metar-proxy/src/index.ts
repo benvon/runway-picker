@@ -19,14 +19,6 @@ interface MetarApiSuccessPayload extends MetarResourceData {
   cache: CacheProvenance;
 }
 
-function mapCacheStatusToLegacyXCache(status: CacheProvenance['status']): 'HIT' | 'MISS' {
-  if (status === 'upstream_refresh') {
-    return 'MISS';
-  }
-
-  return 'HIT';
-}
-
 function buildJsonResponse(payload: unknown, status: number, cache?: CacheProvenance): Response {
   const headers: Record<string, string> = {
     'Cache-Control': status === 200 ? `public, max-age=60, s-maxage=${metarResourceAdapter.policy.ttlSeconds}` : 'no-store'
@@ -34,7 +26,6 @@ function buildJsonResponse(payload: unknown, status: number, cache?: CacheProven
 
   if (cache && status === 200) {
     headers['X-Runway-Cache-Status'] = cache.status;
-    headers['X-Cache'] = mapCacheStatusToLegacyXCache(cache.status);
   }
 
   return Response.json(payload, {

@@ -73,28 +73,30 @@ function toCachedRecord<TInput, TUpstream, TData>(
   cacheKey: string,
   now: Date
 ): CachedRecord<TData> | null {
-  const data = adapter.deserialize(raw);
-  if (!data) {
+  if (!raw || typeof raw !== 'object') {
     return null;
   }
 
   const candidate = raw as Partial<CacheEnvelope<TData>>;
-  if (candidate && typeof candidate === 'object' && 'schemaVersion' in candidate) {
-    if (typeof candidate.schemaVersion !== 'number') {
-      return null;
-    }
+  if (typeof candidate.schemaVersion !== 'number') {
+    return null;
+  }
 
-    if (candidate.schemaVersion !== adapter.schemaVersion && candidate.schemaVersion !== adapter.schemaVersion - 1) {
-      return null;
-    }
+  if (candidate.schemaVersion !== adapter.schemaVersion) {
+    return null;
+  }
 
-    if (typeof candidate.resource === 'string' && candidate.resource !== adapter.resource) {
-      return null;
-    }
+  if (typeof candidate.resource !== 'string' || candidate.resource !== adapter.resource) {
+    return null;
+  }
 
-    if (typeof candidate.key === 'string' && candidate.key !== cacheKey) {
-      return null;
-    }
+  if (typeof candidate.key !== 'string' || candidate.key !== cacheKey) {
+    return null;
+  }
+
+  const data = adapter.deserialize(raw);
+  if (!data) {
+    return null;
   }
 
   const fetchedAt =

@@ -62,7 +62,6 @@ describe('metar worker', () => {
     });
 
     expect(response.status).toBe(200);
-    expect(response.headers.get('X-Cache')).toBe('HIT');
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
 
     const payload = (await response.json()) as {
@@ -98,9 +97,7 @@ describe('metar worker', () => {
     });
 
     expect(fetchUpstream).toHaveBeenCalledTimes(1);
-    expect(firstResponse.headers.get('X-Cache')).toBe('MISS');
     expect(firstResponse.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
-    expect(secondResponse.headers.get('X-Cache')).toBe('HIT');
     expect(secondResponse.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
 
     const firstPayload = (await firstResponse.json()) as { metarRaw: string; cache: { source: string } };
@@ -111,23 +108,26 @@ describe('metar worker', () => {
     expect(secondPayload.cache.source).toBe('kv');
   });
 
-  it('supports previous cache shape for backward-compatible reads', async () => {
+  it('hard-cuts legacy cache entry shapes and refreshes upstream', async () => {
     const kv = new MemoryKv();
-    const fetchedAt = new Date(Date.now() - 30_000).toISOString();
     kv.seed('v1:metar:KDEN', {
       icao: 'KDEN',
       metarRaw: 'METAR KDEN 021953Z 11010KT 10SM FEW020 08/03 A3012 RMK AO2',
       source: 'aviationweather',
-      fetchedAt
+      fetchedAt: new Date(Date.now() - 30_000).toISOString()
     });
+
+    const metarLine = 'METAR KDEN 021953Z 18012KT 10SM FEW120 11/M01 A3004 RMK AO2';
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(new Response(`${metarLine}\n`, { status: 200 }));
+    vi.stubGlobal('fetch', fetchUpstream);
 
     const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KDEN'), {
       METAR_CACHE: kv
     });
 
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
     expect(response.status).toBe(200);
-    expect(response.headers.get('X-Cache')).toBe('HIT');
-    expect(response.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
   });
 
   it('returns 502 when upstream provider responds with non-2xx status', async () => {

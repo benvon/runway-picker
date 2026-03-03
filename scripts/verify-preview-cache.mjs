@@ -67,10 +67,8 @@ function validateCacheContract(lookup, label) {
   assert(lookup.body && typeof lookup.body === 'object', `${label} response body must be JSON object`);
 
   const statusHeader = lookup.response.headers.get('X-Runway-Cache-Status');
-  const legacyHeader = lookup.response.headers.get('X-Cache');
 
   assert(statusHeader && ALLOWED_STATUSES.has(statusHeader), `${label} invalid X-Runway-Cache-Status: ${statusHeader}`);
-  assert(legacyHeader === 'HIT' || legacyHeader === 'MISS', `${label} invalid X-Cache header: ${legacyHeader}`);
 
   const cache = lookup.body.cache;
   assert(cache && typeof cache === 'object', `${label} body.cache must exist`);
@@ -102,9 +100,8 @@ async function ensureRepeatedRequestShowsCacheReuse(baseUrl, icao) {
     validateCacheContract(lookup, `repeat attempt ${attempt}`);
 
     const status = lookup.body.cache.status;
-    const legacy = lookup.response.headers.get('X-Cache');
 
-    if (status !== 'upstream_refresh' && legacy === 'HIT') {
+    if (status !== 'upstream_refresh') {
       return;
     }
 
@@ -112,7 +109,7 @@ async function ensureRepeatedRequestShowsCacheReuse(baseUrl, icao) {
   }
 
   fail(
-    `Repeated requests for ${icao} never showed cache reuse. Expected a non-upstream_refresh status with X-Cache=HIT.`
+    `Repeated requests for ${icao} never showed cache reuse. Expected a non-upstream_refresh status.`
   );
 }
 

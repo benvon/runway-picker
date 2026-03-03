@@ -41,8 +41,7 @@ describe('app integration', () => {
           },
           {
             headers: {
-              'X-Runway-Cache-Status': 'upstream_refresh',
-              'X-Cache': 'MISS'
+              'X-Runway-Cache-Status': 'upstream_refresh'
             }
           }
         )

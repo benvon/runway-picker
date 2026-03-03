@@ -38,7 +38,6 @@ Successful API responses include a `cache` object with:
 Headers:
 
 - `X-Runway-Cache-Status`: canonical status header.
-- `X-Cache`: legacy compatibility header (`HIT`/`MISS`, transitional).
 
 ## Adapter model
 

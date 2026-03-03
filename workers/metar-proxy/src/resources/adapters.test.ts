@@ -29,8 +29,8 @@ describe('resource adapters', () => {
         metarRaw: 'METAR KJFK 021953Z 11010KT 10SM FEW020 08/03 A3012 RMK AO2',
         source: 'aviationweather',
         fetchedAt: '2026-03-03T12:00:00.000Z'
-      })?.icao
-    ).toBe('KJFK');
+      })
+    ).toBeNull();
   });
 
   it('provides airport adapter contract while upstream implementation is pending', async () => {

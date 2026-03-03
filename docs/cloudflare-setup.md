@@ -79,7 +79,7 @@ Open local URL and verify:
 - UI renders
 - calculator works
 - `/api/health` returns JSON
-- `/api/metar?icao=KJFK` returns METAR JSON with `cache` metadata and cache headers (`X-Runway-Cache-Status`, `X-Cache`)
+- `/api/metar?icao=KJFK` returns METAR JSON with `cache` metadata and `X-Runway-Cache-Status`
 
 ## 7) CI and preview deployment
 - Open a PR to `main`.

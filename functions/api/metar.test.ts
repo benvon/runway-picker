@@ -37,7 +37,6 @@ describe('pages metar proxy', () => {
         {
           headers: {
             'Cache-Control': 'public, max-age=60, s-maxage=1800',
-            'X-Cache': 'HIT',
             'X-Runway-Cache-Status': 'kv_hit'
           }
         }
@@ -57,7 +56,6 @@ describe('pages metar proxy', () => {
 
     expect(response.status).toBe(200);
     expect(fetch).toHaveBeenCalled();
-    expect(response.headers.get('X-Cache')).toBe('HIT');
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
     expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=1800');
   });
