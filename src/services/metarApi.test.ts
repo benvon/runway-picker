@@ -10,12 +10,19 @@ describe('metarApi service', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        Response.json({
-          icao: 'KJFK',
-          metarRaw: 'METAR KJFK 022051Z 12008KT 10SM FEW040 05/M02 A3016',
-          source: 'aviationweather',
-          fetchedAt: '2026-03-02T00:00:00.000Z'
-        })
+        Response.json(
+          {
+            icao: 'KJFK',
+            metarRaw: 'METAR KJFK 022051Z 12008KT 10SM FEW040 05/M02 A3016',
+            source: 'aviationweather',
+            fetchedAt: '2026-03-02T00:00:00.000Z'
+          },
+          {
+            headers: {
+              'X-Cache': 'HIT'
+            }
+          }
+        )
       )
     );
 
@@ -25,6 +32,7 @@ describe('metarApi service', () => {
       headers: { Accept: 'application/json' }
     });
     expect(payload.icao).toBe('KJFK');
+    expect(payload.cacheState).toBe('cached');
     vi.unstubAllGlobals();
   });
 });

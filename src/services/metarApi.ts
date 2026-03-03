@@ -1,8 +1,11 @@
+export type MetarCacheState = 'fresh' | 'cached' | 'unknown';
+
 export interface MetarLookupResponse {
   icao: string;
   metarRaw: string;
   source: 'aviationweather';
   fetchedAt: string;
+  cacheState: MetarCacheState;
 }
 
 export class MetarLookupError extends Error {
@@ -17,6 +20,19 @@ export class MetarLookupError extends Error {
 
 function normalizeIcaoInput(value: string): string {
   return value.trim().toUpperCase();
+}
+
+function parseCacheState(headers: Headers): MetarCacheState {
+  const cacheHeader = headers.get('X-Cache')?.trim().toUpperCase();
+  if (cacheHeader === 'HIT') {
+    return 'cached';
+  }
+
+  if (cacheHeader === 'MISS') {
+    return 'fresh';
+  }
+
+  return 'unknown';
 }
 
 export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupResponse> {
@@ -45,5 +61,9 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
     throw new MetarLookupError(message, response.status);
   }
 
-  return (await response.json()) as MetarLookupResponse;
+  const payload = (await response.json()) as Omit<MetarLookupResponse, 'cacheState'>;
+  return {
+    ...payload,
+    cacheState: parseCacheState(response.headers)
+  };
 }

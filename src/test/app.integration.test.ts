@@ -18,12 +18,19 @@ describe('app integration', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        Response.json({
-          icao: 'KMCI',
-          metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
-          source: 'aviationweather',
-          fetchedAt: '2026-03-02T00:00:00.000Z'
-        })
+        Response.json(
+          {
+            icao: 'KMCI',
+            metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+            source: 'aviationweather',
+            fetchedAt: '2026-03-02T00:00:00.000Z'
+          },
+          {
+            headers: {
+              'X-Cache': 'MISS'
+            }
+          }
+        )
       )
     );
 
@@ -54,6 +61,9 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Best runway:');
     expect(root.textContent).toContain('22');
     expect(root.textContent).toContain('All Runway Components');
+    expect(root.textContent).toContain('Raw METAR: METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2');
+    expect(root.textContent).toContain('Data freshness: Fresh METAR data');
+    expect(root.textContent).not.toContain('Parsed Wind Summary');
     vi.unstubAllGlobals();
   });
 });

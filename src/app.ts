@@ -2,6 +2,7 @@ import { evaluateRunways } from './domain/evaluateRunways';
 import { parseWindInput } from './domain/metarParser';
 import { parseRunwayEndsInput } from './domain/runwayParser';
 import { fetchMetarByIcao } from './services/metarApi';
+import type { MetarLookupResponse } from './services/metarApi';
 import type { EvaluationResult, RunwayWindComponentValue } from './domain/types';
 
 const MIN_FEEDBACK_MS = 250;
@@ -52,27 +53,6 @@ function formatBestCrosswindSummary(
     sustained.crosswindFrom === 'left' ? '←' : sustained.crosswindFrom === 'right' ? '→' : '↔';
   const gustValue = gust ? ` G${gust.crosswindKt} kt` : '';
   return `${arrow} ${sustained.crosswindKt} kt${gustValue}`;
-}
-
-function renderParsedWindSummary(result: EvaluationResult): string {
-  const wind = result.parsedWind;
-  const directionLabel =
-    wind.directionType === 'fixed' ? `${wind.directionDegTrue?.toString().padStart(3, '0')}°` : wind.directionType;
-
-  const gustLabel = wind.gustKt !== null ? `${wind.gustKt} kt` : 'None';
-
-  return `
-    <section class="panel panel-subtle" aria-labelledby="parsed-wind-title">
-      <h2 id="parsed-wind-title">Parsed Wind Summary</h2>
-      <div class="grid-two">
-        <p><strong>Raw Group:</strong> ${wind.raw}</p>
-        <p><strong>Source:</strong> ${wind.source === 'metar' ? 'Full METAR' : 'Wind Group'}</p>
-        <p><strong>Direction:</strong> ${directionLabel}</p>
-        <p><strong>Speed:</strong> ${wind.speedKt} kt</p>
-        <p><strong>Gust:</strong> ${gustLabel}</p>
-      </div>
-    </section>
-  `;
 }
 
 function renderBestRunway(result: EvaluationResult): string {
@@ -139,10 +119,19 @@ function renderRunwayTable(result: EvaluationResult): string {
   `;
 }
 
-function renderCalculationInfo(result: EvaluationResult): string {
+function renderCalculationInfo(result: EvaluationResult, metarLookup: MetarLookupResponse): string {
+  const freshnessNote =
+    metarLookup.cacheState === 'cached'
+      ? 'Data freshness: Cached METAR data'
+      : metarLookup.cacheState === 'fresh'
+        ? 'Data freshness: Fresh METAR data'
+        : 'Data freshness: Unknown (cache header not provided)';
+
   const notes = [
     result.bestReason,
     ...result.globalNotes,
+    freshnessNote,
+    `Raw METAR: ${metarLookup.metarRaw}`,
     'Advisory only: wind component output does not account for runway condition, runway length, traffic flow, NOTAMs, or ATC instructions.'
   ];
 
@@ -231,8 +220,7 @@ export function mountApp(root: HTMLElement): void {
       bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
       resultsNode.innerHTML = [
         renderRunwayTable(evaluation),
-        renderParsedWindSummary(evaluation),
-        renderCalculationInfo(evaluation)
+        renderCalculationInfo(evaluation, metarLookup)
       ].join('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
