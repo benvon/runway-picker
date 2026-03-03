@@ -105,8 +105,8 @@ jobs:
         shell: bash
         run: |
           worker_name="${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}"
-          preview_worker_config="$RUNNER_TEMP/wrangler.worker.preview.generated.json"
-          preview_pages_config="$RUNNER_TEMP/wrangler.pages.preview.generated.json"
+          preview_worker_config="workers/metar-proxy/wrangler.preview.generated.json"
+          preview_pages_config="wrangler.preview.generated.json"
 
           PREVIEW_WORKER_CONFIG="$preview_worker_config" \
           PREVIEW_PAGES_CONFIG="$preview_pages_config" \
