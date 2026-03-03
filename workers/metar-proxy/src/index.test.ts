@@ -44,6 +44,55 @@ describe('metar worker helpers', () => {
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
 
+  it('fetches from upstream on KV miss, stores result, and returns X-Cache: MISS', async () => {
+    const metarLine = 'METAR KJFK 021953Z 18015KT 10SM FEW250 10/M01 A3004 RMK AO2';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(new Response(`${metarLine}\n`, { status: 200 }))
+    );
+
+    const put = vi.fn();
+    const response = await handleMetarRequest(
+      new Request('https://metar.internal/api/metar?icao=KJFK'),
+      { METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put } }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Cache')).toBe('MISS');
+    expect(response.headers.get('Cache-Control')).toContain('s-maxage=1800');
+
+    const body = await response.json() as { icao: string; metarRaw: string; source: string };
+    expect(body.icao).toBe('KJFK');
+    expect(body.metarRaw).toBe(metarLine);
+    expect(body.source).toBe('aviationweather');
+
+    expect(put).toHaveBeenCalledOnce();
+    expect(put.mock.calls[0][0]).toBe('metar:KJFK');
+    const stored = JSON.parse(put.mock.calls[0][1] as string);
+    expect(stored.metarRaw).toBe(metarLine);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('returns 502 when upstream METAR provider responds with a non-2xx status', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(new Response('Service Unavailable', { status: 503 }))
+    );
+
+    const response = await handleMetarRequest(
+      new Request('https://metar.internal/api/metar?icao=KJFK'),
+      { METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() } }
+    );
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'METAR provider returned status 503.'
+    });
+
+    vi.unstubAllGlobals();
+  });
+
   it('returns user-friendly message when ICAO is not found by provider', async () => {
     vi.stubGlobal(
       'fetch',
