@@ -1,7 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fetchMetarByIcao, MetarLookupError } from './metarApi';
 
 describe('metarApi service', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('rejects invalid ICAO values', async () => {
     await expect(fetchMetarByIcao('KSF')).rejects.toBeInstanceOf(MetarLookupError);
   });
@@ -33,7 +37,6 @@ describe('metarApi service', () => {
     });
     expect(payload.icao).toBe('KJFK');
     expect(payload.cacheState).toBe('cached');
-    vi.unstubAllGlobals();
   });
 
   it('surfaces user-friendly message for unknown ICAO', async () => {
@@ -53,7 +56,6 @@ describe('metarApi service', () => {
       message: 'ICAO code ZZZZ was not found. Check the code and try again.',
       status: 404
     });
-    vi.unstubAllGlobals();
   });
 
   it('surfaces user-friendly message for missing METAR on valid ICAO', async () => {
@@ -77,6 +79,5 @@ describe('metarApi service', () => {
       method: 'GET',
       headers: { Accept: 'application/json' }
     });
-    vi.unstubAllGlobals();
   });
 });
