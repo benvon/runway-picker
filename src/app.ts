@@ -2,6 +2,7 @@ import { evaluateRunways } from './domain/evaluateRunways';
 import { fetchAirportByIcao } from './services/airportApi';
 import type { AirportLookupResponse } from './services/airportApi';
 import { fetchMetarByIcao } from './services/metarApi';
+import { MetarLookupError } from './services/metarApi';
 import type { MetarLookupResponse } from './services/metarApi';
 import type { EvaluationResult, ParsedWind, RunwayWindComponentValue } from './domain/types';
 
@@ -217,6 +218,28 @@ function renderTechnicalDetails(resolution: LookupResolution): string {
       <ul class="notes-list">
         ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
       </ul>
+    </details>
+  `;
+}
+
+function renderErrorTechnicalDetails(error: unknown): string {
+  if (!(error instanceof MetarLookupError)) {
+    return '';
+  }
+
+  if (!error.debug || typeof error.debug !== 'object') {
+    return '';
+  }
+
+  const debugJson = JSON.stringify(error.debug, null, 2);
+  if (!debugJson) {
+    return '';
+  }
+
+  return `
+    <details class="panel panel-subtle info-box" open>
+      <summary>Technical Details</summary>
+      <pre class="debug-json">${debugJson}</pre>
     </details>
   `;
 }
@@ -501,7 +524,7 @@ export function mountApp(root: HTMLElement): void {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
       errorNode.textContent = message;
       bestSpotlightNode.innerHTML = '';
-      resultsNode.innerHTML = '';
+      resultsNode.innerHTML = renderErrorTechnicalDetails(error);
     } finally {
       const elapsedMs = Date.now() - startedAt;
       const remainingMs = Math.max(0, MIN_FEEDBACK_MS - elapsedMs);

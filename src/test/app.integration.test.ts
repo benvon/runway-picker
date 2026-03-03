@@ -301,4 +301,63 @@ describe('app integration', () => {
     );
     expect(root.textContent).not.toContain('All Runway Components');
   });
+
+  it('shows debug output in Technical Details when METAR lookup fails with debug payload', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KJVL') {
+        return Promise.resolve(Response.json(airportPayload('KJVL')));
+      }
+
+      if (url === '/api/metar?icao=KJVL') {
+        return Promise.resolve(
+          Response.json(
+            {
+              error: 'Unable to parse wind data from METAR provider for ICAO KJVL.',
+              debug: {
+                rawObPresent: true,
+                rawWindToken: null,
+                candidates: {
+                  directionField: null,
+                  speedField: null,
+                  gustField: null
+                }
+              }
+            },
+            { status: 502 }
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KJVL';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() =>
+      (root.textContent?.includes('Unable to parse wind data from METAR provider for ICAO KJVL.') ?? false)
+    );
+
+    expect(root.textContent).toContain('Technical Details');
+    expect(root.textContent).toContain('"rawObPresent": true');
+    expect(root.textContent).toContain('"rawWindToken": null');
+    expect(root.textContent).not.toContain('All Runway Components');
+  });
 });
