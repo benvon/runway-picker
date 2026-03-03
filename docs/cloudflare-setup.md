@@ -70,7 +70,7 @@ In GitHub repo settings:
 - Secrets:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
-  - `AIRPORTDB_API_TOKEN`
+  - `AIRPORT_IO_TOKEN` (CI maps this into Worker secret key `AIRPORTDB_API_TOKEN`)
 - Variables:
   - `CLOUDFLARE_PROJECT_NAME` (exact Pages project name)
   - `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (preview KV namespace ID from `wrangler kv namespace create ... --preview`)
