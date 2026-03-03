@@ -1,9 +1,8 @@
 import { evaluateRunways } from './domain/evaluateRunways';
-import { parseWindInput } from './domain/metarParser';
 import { parseRunwayEndsInput } from './domain/runwayParser';
 import { fetchMetarByIcao } from './services/metarApi';
 import type { MetarLookupResponse } from './services/metarApi';
-import type { EvaluationResult, RunwayWindComponentValue } from './domain/types';
+import type { EvaluationResult, ParsedWind, RunwayWindComponentValue } from './domain/types';
 
 const MIN_FEEDBACK_MS = 250;
 
@@ -76,15 +75,24 @@ function renderBestRunway(result: EvaluationResult): string {
 }
 
 function renderRunwayTable(result: EvaluationResult): string {
+  const variableSustainedLabel =
+    result.parsedWind.directionType === 'variable'
+      ? `Variable direction ${result.parsedWind.speedKt} kt`
+      : 'Not available (variable winds)';
+  const variableGustLabel =
+    result.parsedWind.directionType === 'variable' && result.parsedWind.gustKt !== null
+      ? `Variable direction G${result.parsedWind.gustKt} kt`
+      : 'None';
+
   const rows = result.runwayResults
     .map((runway) => {
       const sustained = runway.sustained
         ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}`
-        : 'Not available (variable winds)';
+        : variableSustainedLabel;
 
       const gust = runway.gust
         ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}`
-        : 'None';
+        : variableGustLabel;
 
       const notes = runway.notes.length ? runway.notes.join(' ') : 'None';
 
@@ -119,19 +127,21 @@ function renderRunwayTable(result: EvaluationResult): string {
   `;
 }
 
-function renderCalculationInfo(result: EvaluationResult, metarLookup: MetarLookupResponse): string {
-  const freshnessNote =
-    metarLookup.cacheState === 'cached'
-      ? 'Data freshness: Cached METAR data'
-      : metarLookup.cacheState === 'fresh'
-        ? 'Data freshness: Fresh METAR data'
-        : 'Data freshness: Unknown (cache header not provided)';
+function toParsedWindFromLookup(metarLookup: MetarLookupResponse): ParsedWind {
+  return {
+    raw: metarLookup.wind.raw,
+    directionType: metarLookup.wind.directionType,
+    directionDegTrue: metarLookup.wind.directionDegTrue,
+    speedKt: metarLookup.wind.speedKt,
+    gustKt: metarLookup.wind.gustKt,
+    source: 'metar_api'
+  };
+}
 
+function renderCalculationInfo(result: EvaluationResult): string {
   const notes = [
     result.bestReason,
     ...result.globalNotes,
-    freshnessNote,
-    `Raw METAR: ${metarLookup.metarRaw}`,
     'Advisory only: wind component output does not account for runway condition, runway length, traffic flow, NOTAMs, or ATC instructions.'
   ];
 
@@ -140,6 +150,36 @@ function renderCalculationInfo(result: EvaluationResult, metarLookup: MetarLooku
   return `
     <details class="panel panel-subtle info-box">
       <summary>Calculation Notes & Disclaimer</summary>
+      <ul class="notes-list">
+        ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
+      </ul>
+    </details>
+  `;
+}
+
+function renderTechnicalDetails(metarLookup: MetarLookupResponse): string {
+  const freshnessNote = `Data freshness: ${metarLookup.cache.status} via ${metarLookup.cache.source}`;
+  const ageNote = `Cache age: ${metarLookup.cache.ageSeconds}s (TTL ${metarLookup.cache.ttlSeconds}s)`;
+  const fetchedAtNote = `Cache fetched at: ${metarLookup.cache.fetchedAt}`;
+  const servedAtNote = `Cache served at: ${metarLookup.cache.servedAt}`;
+  const cacheKeyNote = metarLookup.cache.key
+    ? `Cache key: ${metarLookup.cache.key}`
+    : 'Cache key: not provided';
+
+  const notes = [
+    freshnessNote,
+    ageNote,
+    fetchedAtNote,
+    servedAtNote,
+    cacheKeyNote,
+    `Raw METAR: ${metarLookup.metarRaw}`
+  ];
+
+  const dedupedNotes = [...new Set(notes)];
+
+  return `
+    <details class="panel panel-subtle info-box">
+      <summary>Technical Details</summary>
       <ul class="notes-list">
         ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
       </ul>
@@ -214,13 +254,22 @@ export function mountApp(root: HTMLElement): void {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const runways = parseRunwayEndsInput(runwaysInput.value);
       const metarLookup = await fetchMetarByIcao(icaoInput.value);
-      const parsedWind = parseWindInput(metarLookup.metarRaw);
-      const evaluation = evaluateRunways(runways, parsedWind.wind, parsedWind.notes);
+      const parsedWind = toParsedWindFromLookup(metarLookup);
+      const parserNotes =
+        parsedWind.directionType === 'variable'
+          ? [
+              `Variable winds reported at ${parsedWind.speedKt} kt${
+                parsedWind.gustKt !== null ? ` (gust ${parsedWind.gustKt} kt)` : ''
+              }.`
+            ]
+          : [];
+      const evaluation = evaluateRunways(runways, parsedWind, parserNotes);
 
       bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
       resultsNode.innerHTML = [
         renderRunwayTable(evaluation),
-        renderCalculationInfo(evaluation, metarLookup)
+        renderCalculationInfo(evaluation),
+        renderTechnicalDetails(metarLookup)
       ].join('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';

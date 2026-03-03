@@ -37,18 +37,23 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
   const globalNotes = [...parserNotes];
 
   if (wind.directionType === 'variable') {
+    const variableSpeedNote =
+      wind.gustKt !== null
+        ? `Variable wind direction (VRB) at ${wind.speedKt} kt with gusts to ${wind.gustKt} kt prevents per-runway component calculations.`
+        : `Variable wind direction (VRB) at ${wind.speedKt} kt prevents per-runway component calculations.`;
+
     const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
       runwayId: runway.id,
       sustained: null,
       gust: null,
-      notes: ['Variable wind direction (VRB) prevents per-runway component calculations.']
+      notes: [variableSpeedNote]
     }));
 
     return {
       parsedWind: wind,
       runwayResults,
       bestRunwayId: null,
-      bestReason: 'Variable winds reported; no deterministic best runway.',
+      bestReason: `Variable winds reported at ${wind.speedKt} kt; no deterministic best runway.`,
       globalNotes
     };
   }

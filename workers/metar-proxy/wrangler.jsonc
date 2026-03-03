@@ -8,13 +8,35 @@
       "id": "98b4d5d8e9f44e8cb3396e4cefbce840"
     }
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CACHE_COORDINATOR",
+        "class_name": "CacheSingleFlightCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-cache-coordinator",
+      "new_sqlite_classes": ["CacheSingleFlightCoordinator"]
+    }
+  ],
   "env": {
     "preview": {
       "kv_namespaces": [
         {
           "binding": "METAR_CACHE"
         }
-      ]
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "CACHE_COORDINATOR",
+            "class_name": "CacheSingleFlightCoordinator"
+          }
+        ]
+      }
     }
   }
 }

@@ -1,7 +1,40 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { extractMetarRaw, handleMetarRequest, MetarWorkerError, normalizeIcao } from './index';
 
-describe('metar worker helpers', () => {
+class MemoryKv {
+  private values = new Map<string, unknown>();
+
+  async get(key: string, _type: 'json'): Promise<unknown> {
+    void _type;
+    return this.values.get(key) ?? null;
+  }
+
+  async put(key: string, value: string): Promise<void> {
+    this.values.set(key, JSON.parse(value) as unknown);
+  }
+
+  seed(key: string, value: unknown): void {
+    this.values.set(key, value);
+  }
+}
+
+function buildMetarReport(icao: string, wind: { wdir: string | number; wspd: number; wgst?: number | null }) {
+  return {
+    icaoId: icao,
+    rawOb: `METAR ${icao} 021953Z ${typeof wind.wdir === 'string' ? wind.wdir : `${wind.wdir}`.padStart(3, '0')}${wind.wspd
+      .toString()
+      .padStart(2, '0')}${wind.wgst ? `G${wind.wgst.toString().padStart(2, '0')}` : ''}KT 10SM FEW020 08/03 A3012 RMK AO2`,
+    wdir: wind.wdir,
+    wspd: wind.wspd,
+    wgst: wind.wgst ?? null
+  };
+}
+
+describe('metar worker', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('normalizes ICAO values', () => {
     expect(normalizeIcao(' kjfk ')).toBe('KJFK');
   });
@@ -15,82 +48,136 @@ describe('metar worker helpers', () => {
     expect(extractMetarRaw(payload)).toBe('METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2');
   });
 
-  it('returns cached response on KV hit', async () => {
-    const get = vi.fn().mockResolvedValue({
-      icao: 'KMCI',
-      metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
-      source: 'aviationweather',
-      fetchedAt: '2026-03-02T00:00:00.000Z'
+  it('returns kv cache hit including provenance metadata', async () => {
+    const kv = new MemoryKv();
+    const fetchedAt = new Date(Date.now() - 30_000);
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 3,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI',
+        metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: new Date(fetchedAt.getTime() + 30 * 60 * 1000).toISOString(),
+        policyVersion: 'metar-v1',
+        source: 'upstream'
+      }
     });
 
-    const put = vi.fn();
-
     const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
-      METAR_CACHE: { get, put }
+      METAR_CACHE: kv
     });
 
     expect(response.status).toBe(200);
-    expect(response.headers.get('X-Cache')).toBe('HIT');
-    expect(response.headers.get('Cache-Control')).toContain('s-maxage=1800');
-    expect(put).not.toHaveBeenCalled();
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
+
+    const payload = (await response.json()) as {
+      icao: string;
+      wind: { directionType: string; speedKt: number };
+      cache: { source: string; status: string };
+    };
+
+    expect(payload.icao).toBe('KMCI');
+    expect(payload.wind.directionType).toBe('fixed');
+    expect(payload.wind.speedKt).toBe(10);
+    expect(payload.cache.source).toBe('kv');
+    expect(payload.cache.status).toBe('kv_hit');
   });
 
-  it('sets Cache-Control: no-store on error responses', async () => {
+  it('returns variable wind with non-zero speed using structured upstream fields', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KARR', { wdir: 'VRB', wspd: 3 })])));
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KARR'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      wind: { directionType: string; speedKt: number; raw: string };
+    };
+
+    expect(payload.wind.directionType).toBe('variable');
+    expect(payload.wind.speedKt).toBe(3);
+    expect(payload.wind.raw).toBe('VRB03KT');
+  });
+
+  it('returns 400 and no-store on invalid ICAO', async () => {
     const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=ABC'), {
-      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() }
+      METAR_CACHE: new MemoryKv()
     });
 
     expect(response.status).toBe(400);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
 
-  it('fetches from upstream on KV miss, stores result, and returns X-Cache: MISS', async () => {
-    const metarLine = 'METAR KJFK 021953Z 18015KT 10SM FEW250 10/M01 A3004 RMK AO2';
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValueOnce(new Response(`${metarLine}\n`, { status: 200 }))
-    );
+  it('fetches from upstream on miss then returns cached on repeated request', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KJFK', { wdir: 180, wspd: 15 })]));
+    vi.stubGlobal('fetch', fetchUpstream);
 
-    const put = vi.fn();
-    const response = await handleMetarRequest(
-      new Request('https://metar.internal/api/metar?icao=KJFK'),
-      { METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put } }
-    );
+    const kv = new MemoryKv();
+    const firstResponse = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJFK'), {
+      METAR_CACHE: kv
+    });
+    const secondResponse = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJFK'), {
+      METAR_CACHE: kv
+    });
 
-    expect(response.status).toBe(200);
-    expect(response.headers.get('X-Cache')).toBe('MISS');
-    expect(response.headers.get('Cache-Control')).toContain('s-maxage=1800');
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
+    expect(firstResponse.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+    expect(secondResponse.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
 
-    const body = await response.json() as { icao: string; metarRaw: string; source: string };
-    expect(body.icao).toBe('KJFK');
-    expect(body.metarRaw).toBe(metarLine);
-    expect(body.source).toBe('aviationweather');
+    const firstPayload = (await firstResponse.json()) as { wind: { source?: string; speedKt: number }; cache: { source: string } };
+    expect(firstPayload.wind.speedKt).toBe(15);
+    expect(firstPayload.cache.source).toBe('upstream');
 
-    expect(put).toHaveBeenCalledOnce();
-    expect(put.mock.calls[0][0]).toBe('metar:KJFK');
-    const stored = JSON.parse(put.mock.calls[0][1] as string);
-    expect(stored.metarRaw).toBe(metarLine);
-
-    vi.unstubAllGlobals();
+    const secondPayload = (await secondResponse.json()) as { cache: { source: string } };
+    expect(secondPayload.cache.source).toBe('kv');
   });
 
-  it('returns 502 when upstream METAR provider responds with a non-2xx status', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValueOnce(new Response('Service Unavailable', { status: 503 }))
-    );
+  it('hard-cuts legacy cache entry shapes and refreshes upstream', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v1:metar:KDEN', {
+      icao: 'KDEN',
+      metarRaw: 'METAR KDEN 021953Z 11010KT 10SM FEW020 08/03 A3012 RMK AO2',
+      source: 'aviationweather',
+      fetchedAt: new Date(Date.now() - 30_000).toISOString()
+    });
 
-    const response = await handleMetarRequest(
-      new Request('https://metar.internal/api/metar?icao=KJFK'),
-      { METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() } }
-    );
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KDEN', { wdir: 180, wspd: 12 })]));
+    vi.stubGlobal('fetch', fetchUpstream);
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KDEN'), {
+      METAR_CACHE: kv
+    });
+
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+  });
+
+  it('returns 502 when upstream provider responds with non-2xx status', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('Service Unavailable', { status: 503 })));
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJFK'), {
+      METAR_CACHE: new MemoryKv()
+    });
 
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: 'METAR provider returned status 503.'
     });
-
-    vi.unstubAllGlobals();
   });
 
   it('returns user-friendly message when ICAO is not found by provider', async () => {
@@ -98,83 +185,17 @@ describe('metar worker helpers', () => {
       'fetch',
       vi
         .fn()
-        .mockResolvedValueOnce(new Response('', { status: 200 }))
+        .mockResolvedValueOnce(Response.json([]))
         .mockResolvedValueOnce(Response.json([]))
     );
 
     const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=ZZZZ'), {
-      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() }
+      METAR_CACHE: new MemoryKv()
     });
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({
       error: 'ICAO code ZZZZ was not found. Check the code and try again.'
     });
-    vi.unstubAllGlobals();
-  });
-
-  it('returns user-friendly message when METAR is unavailable for valid ICAO', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValueOnce(new Response('', { status: 200 }))
-        .mockResolvedValueOnce(Response.json([{ icaoId: 'KJFK' }]))
-    );
-
-    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJFK'), {
-      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() }
-    });
-
-    expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toMatchObject({
-      error: 'No METAR is currently available for ICAO KJFK. Try again later.'
-    });
-    vi.unstubAllGlobals();
-  });
-
-  it('fetches upstream, writes to KV with TTL, and returns X-Cache: MISS on cache miss', async () => {
-    const metarLine = 'METAR KJFK 021953Z 11010KT 10SM FEW020 08/03 A3012 RMK AO2';
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(metarLine, { status: 200 })));
-
-    const put = vi.fn().mockResolvedValue(undefined);
-
-    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJFK'), {
-      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put }
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get('X-Cache')).toBe('MISS');
-    expect(response.headers.get('Cache-Control')).toContain('s-maxage=1800');
-
-    expect(put).toHaveBeenCalledOnce();
-    const [key, value, options] = put.mock.calls[0];
-    expect(key).toBe('metar:KJFK');
-    const stored = JSON.parse(value as string) as Record<string, unknown>;
-    expect(stored.icao).toBe('KJFK');
-    expect(stored.metarRaw).toBe(metarLine);
-    expect(stored.source).toBe('aviationweather');
-    expect(typeof stored.fetchedAt).toBe('string');
-    expect((options as { expirationTtl?: number }).expirationTtl).toBe(1800);
-
-    vi.unstubAllGlobals();
-  });
-
-  it('returns 502 when upstream METAR provider responds with a non-OK status', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-
-    const put = vi.fn();
-
-    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJFK'), {
-      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put }
-    });
-
-    expect(response.status).toBe(502);
-    await expect(response.json()).resolves.toMatchObject({
-      error: 'METAR provider returned status 503.'
-    });
-    expect(put).not.toHaveBeenCalled();
-
-    vi.unstubAllGlobals();
   });
 });

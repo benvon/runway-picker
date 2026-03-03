@@ -7,7 +7,8 @@ Runway Picker is a high-contrast, mobile-first web app for pilots to compare run
 - Manual runway-end input (`09`, `27`, `18L`, etc.)
 - ICAO lookup input for METAR retrieval (Release 2)
 - METAR lookup via local API proxy (`/api/metar`) backed by a dedicated Cloudflare Worker
-- Shared 30-minute METAR caching in Worker KV for multi-user cache reuse
+- Shared adapter-driven caching (edge cache + KV + Durable Object single-flight)
+- Structured cache provenance metadata returned from `/api/metar` (`cache` object + `X-Runway-Cache-Status`)
 - Sustained and gust component calculations for each runway
 - Best-runway selection by:
   1. greatest headwind
@@ -42,6 +43,7 @@ npm run build
   - Uses KV namespace binding `METAR_CACHE`
 
 See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
+Cache design details are documented in [docs/cache-architecture.md](./docs/cache-architecture.md).
 
 ## CI/CD workflows
 
