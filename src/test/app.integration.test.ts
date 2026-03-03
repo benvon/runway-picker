@@ -80,6 +80,14 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Data freshness: upstream_refresh via upstream');
     expect(root.textContent).toContain('Cache age: 0s (TTL 1800s)');
     expect(root.textContent).toContain('Cache key: v1:metar:KMCI');
+    expect(root.textContent).toContain('Calculation Notes & Disclaimer');
+    expect(root.textContent).toContain('Technical Details');
+
+    const detailsPanels = root.querySelectorAll('details.info-box');
+    expect(detailsPanels).toHaveLength(2);
+    detailsPanels.forEach((panel) => {
+      expect(panel.hasAttribute('open')).toBe(false);
+    });
     expect(root.textContent).not.toContain('Parsed Wind Summary');
   });
 });

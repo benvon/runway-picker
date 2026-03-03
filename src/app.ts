@@ -119,7 +119,26 @@ function renderRunwayTable(result: EvaluationResult): string {
   `;
 }
 
-function renderCalculationInfo(result: EvaluationResult, metarLookup: MetarLookupResponse): string {
+function renderCalculationInfo(result: EvaluationResult): string {
+  const notes = [
+    result.bestReason,
+    ...result.globalNotes,
+    'Advisory only: wind component output does not account for runway condition, runway length, traffic flow, NOTAMs, or ATC instructions.'
+  ];
+
+  const dedupedNotes = [...new Set(notes)];
+
+  return `
+    <details class="panel panel-subtle info-box">
+      <summary>Calculation Notes & Disclaimer</summary>
+      <ul class="notes-list">
+        ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
+      </ul>
+    </details>
+  `;
+}
+
+function renderTechnicalDetails(metarLookup: MetarLookupResponse): string {
   const freshnessNote = `Data freshness: ${metarLookup.cache.status} via ${metarLookup.cache.source}`;
   const ageNote = `Cache age: ${metarLookup.cache.ageSeconds}s (TTL ${metarLookup.cache.ttlSeconds}s)`;
   const fetchedAtNote = `Cache fetched at: ${metarLookup.cache.fetchedAt}`;
@@ -129,22 +148,19 @@ function renderCalculationInfo(result: EvaluationResult, metarLookup: MetarLooku
     : 'Cache key: not provided';
 
   const notes = [
-    result.bestReason,
-    ...result.globalNotes,
     freshnessNote,
     ageNote,
     fetchedAtNote,
     servedAtNote,
     cacheKeyNote,
-    `Raw METAR: ${metarLookup.metarRaw}`,
-    'Advisory only: wind component output does not account for runway condition, runway length, traffic flow, NOTAMs, or ATC instructions.'
+    `Raw METAR: ${metarLookup.metarRaw}`
   ];
 
   const dedupedNotes = [...new Set(notes)];
 
   return `
     <details class="panel panel-subtle info-box">
-      <summary>Calculation Notes & Disclaimer</summary>
+      <summary>Technical Details</summary>
       <ul class="notes-list">
         ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
       </ul>
@@ -225,7 +241,8 @@ export function mountApp(root: HTMLElement): void {
       bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
       resultsNode.innerHTML = [
         renderRunwayTable(evaluation),
-        renderCalculationInfo(evaluation, metarLookup)
+        renderCalculationInfo(evaluation),
+        renderTechnicalDetails(metarLookup)
       ].join('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
