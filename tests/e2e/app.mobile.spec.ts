@@ -174,9 +174,9 @@ test.describe('Runway Picker mobile preview UI', () => {
     await page.locator('#icao').fill('KJFK');
     await page.getByRole('button', { name: 'Lookup Airport and METAR' }).click();
 
-    await expect(
-      page.getByText('No METAR is currently available for ICAO KJFK. Enter an alternate ICAO code for METAR data.')
-    ).toBeVisible();
+    await expect(page.locator('#form-error')).toHaveText(
+      'No METAR is currently available for ICAO KJFK. Enter an alternate ICAO code for METAR data.'
+    );
     await expect(page.locator('#alternate-group')).toBeVisible();
     await expect(page.locator('#icao')).toHaveAttribute('readonly', '');
 
