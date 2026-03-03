@@ -257,6 +257,22 @@ function isNotFoundLookupError(error: unknown): boolean {
   return typeof status === 'number' && status === 404;
 }
 
+function shouldPromptAlternateMetar(error: unknown): boolean {
+  if (isNotFoundLookupError(error)) {
+    return true;
+  }
+
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const normalizedMessage = error.message.trim().toLowerCase();
+  return (
+    normalizedMessage.includes('no metar is currently available') ||
+    normalizedMessage === 'unexpected error while loading metar.'
+  );
+}
+
 function normalizeIcaoInput(value: string): string {
   return value.trim().toUpperCase();
 }
@@ -459,7 +475,7 @@ export function mountApp(root: HTMLElement): void {
     try {
       metar = await fetchMetarByIcao(primaryIcao);
     } catch (error) {
-      if (isNotFoundLookupError(error)) {
+      if (shouldPromptAlternateMetar(error)) {
         bestSpotlightNode.innerHTML = '';
         resultsNode.innerHTML = '';
         enterAlternateMetarStage(primaryIcao, airport);
