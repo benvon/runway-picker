@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../app';
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -13,6 +13,10 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 }
 
 describe('app integration', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('calculates and renders best runway from API METAR lookup', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     vi.stubGlobal(
@@ -64,6 +68,5 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Raw METAR: METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2');
     expect(root.textContent).toContain('Data freshness: Fresh METAR data');
     expect(root.textContent).not.toContain('Parsed Wind Summary');
-    vi.unstubAllGlobals();
   });
 });
