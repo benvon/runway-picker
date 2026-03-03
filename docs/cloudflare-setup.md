@@ -22,22 +22,26 @@ npx wrangler kv namespace create METAR_CACHE --preview
 2. Copy the returned production ID into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `kv_namespaces[].id`
 3. Keep `env.preview.kv_namespaces[]` binding-only in repo config (`{ "binding": "METAR_CACHE" }`).
-4. Save the preview KV namespace ID as GitHub variable `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (used by preview deploy workflow to generate runtime config).
-5. Deploy the worker:
+4. Ensure Durable Object binding and migration are present in [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
+   - `durable_objects.bindings[]` contains `CACHE_COORDINATOR -> CacheSingleFlightCoordinator`
+   - `migrations[]` contains `new_sqlite_classes: ["CacheSingleFlightCoordinator"]`
+5. Save the preview KV namespace ID as GitHub variable `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (used by preview deploy workflow to generate runtime config).
+6. Deploy the worker:
 ```bash
 npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc
 ```
-6. Deploy the preview worker environment:
+7. Deploy the preview worker environment:
 ```bash
 npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview
 ```
-7. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
+8. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
 
 Worker behavior:
 - Upstream source: `https://aviationweather.gov/api/data/metar`
 - Upstream user agent: `benvon-runway-picker`
-- Shared cache store: Worker KV (`METAR_CACHE`)
-- Cache TTL: 30 minutes
+- Shared cache stores: edge cache + Worker KV (`METAR_CACHE`)
+- Single-flight refresh coordinator: Durable Object (`CACHE_COORDINATOR`)
+- Cache TTL: 30 minutes (with stale windows configured in adapter policy)
 
 ## 4) Configure Wrangler
 - `wrangler.jsonc` already contains:
@@ -75,7 +79,7 @@ Open local URL and verify:
 - UI renders
 - calculator works
 - `/api/health` returns JSON
-- `/api/metar?icao=KJFK` returns METAR JSON with cache headers
+- `/api/metar?icao=KJFK` returns METAR JSON with `cache` metadata and cache headers (`X-Runway-Cache-Status`, `X-Cache`)
 
 ## 7) CI and preview deployment
 - Open a PR to `main`.
