@@ -121,13 +121,12 @@ jobs:
         id: deploy
         shell: bash
         run: |
-          alias_name="pr-${{ github.event.pull_request.number }}"
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
             set -o pipefail
             if npx wrangler pages deploy dist \
               --project-name "$CLOUDFLARE_PROJECT_NAME" \
-              --branch "$alias_name" \
+              --branch "${{ github.event.pull_request.head.ref }}" \
               --commit-hash "${{ github.event.pull_request.head.sha }}" \
               | tee deploy-output.txt; then
               break
