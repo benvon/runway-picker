@@ -17,11 +17,10 @@ This guide matches the repository workflows and runtime shape.
 1. Create a KV namespace for shared METAR cache:
 ```bash
 npx wrangler kv namespace create METAR_CACHE
-npx wrangler kv namespace create METAR_CACHE --preview
 ```
-2. Copy the returned IDs into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
+2. Copy the returned production ID into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `kv_namespaces[].id`
-   - `env.preview.kv_namespaces[].id`
+   - `env.preview.kv_namespaces[]` should remain binding-only (`{ "binding": "METAR_CACHE" }`) so preview is managed by Wrangler.
 3. Deploy the worker:
 ```bash
 npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc
@@ -46,7 +45,7 @@ Worker behavior:
   - `services` binding:
     - `METAR_API` -> `runway-picker-metar-api`
   - `env.preview.services` binding:
-    - `METAR_API` -> `runway-picker-metar-api-preview`
+    - `METAR_API` -> `runway-picker-metar-api` with `environment: preview`
 
 ## 5) Create API token and account settings
 In Cloudflare:
@@ -79,7 +78,8 @@ Open local URL and verify:
 - `CI` workflow runs typecheck/lint/test/build.
 - `Deploy Preview` workflow:
   - deploys Worker env `preview`
-  - deploys Pages preview
+  - deploys Pages preview for the PR branch ref (`github.event.pull_request.head.ref`)
+  - uses environment-aware Pages service binding to target Worker preview
   - comments preview URL on the PR
 
 ## 8) Bootstrap release baseline
