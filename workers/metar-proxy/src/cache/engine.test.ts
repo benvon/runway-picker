@@ -97,6 +97,7 @@ function createCoordinatorNamespace(): DurableObjectNamespaceLike {
 function buildAdapter(overrides?: {
   fetchUpstream?: CacheResourceAdapter<DemoInput, string, DemoData>['fetchUpstream'];
   validate?: CacheResourceAdapter<DemoInput, string, DemoData>['validate'];
+  serialize?: CacheResourceAdapter<DemoInput, string, DemoData>['serialize'];
   ttlSeconds?: number;
   staleWhileRevalidateSeconds?: number;
   staleOnErrorSeconds?: number;
@@ -116,18 +117,22 @@ function buildAdapter(overrides?: {
         value,
         fetchedAt: new Date().toISOString()
       })),
-    serialize: (data, key, resource) => ({
-      schemaVersion: 2,
-      resource,
-      key,
-      data,
-      cacheMeta: {
-        fetchedAt: data.fetchedAt,
-        expiresAt: new Date(new Date(data.fetchedAt).getTime() + (overrides?.ttlSeconds ?? 30) * 1000).toISOString(),
-        policyVersion: 'demo-v1',
-        source: 'upstream'
-      }
-    }),
+    serialize:
+      overrides?.serialize ??
+      ((data, key, resource) => ({
+        schemaVersion: 2,
+        resource,
+        key,
+        data,
+        cacheMeta: {
+          fetchedAt: data.fetchedAt,
+          expiresAt: new Date(
+            new Date(data.fetchedAt).getTime() + (overrides?.ttlSeconds ?? 30) * 1000
+          ).toISOString(),
+          policyVersion: 'demo-v1',
+          source: 'upstream'
+        }
+      })),
     deserialize: (cached) => {
       if (!cached || typeof cached !== 'object') {
         return null;
@@ -330,5 +335,47 @@ describe('cache engine', () => {
     expect(fetchUpstream).toHaveBeenCalledTimes(1);
     expect(result.payload.value).toBe('from-upstream');
     expect(result.cache.status).toBe('upstream_refresh');
+  });
+
+  it('returns and stores adapter-serialized data when serialize transforms payload', async () => {
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn().mockResolvedValue('raw-upstream'),
+      validate: () => ({
+        value: 'raw-value',
+        fetchedAt: 'invalid-timestamp'
+      }),
+      serialize: (_data, key, resource) => ({
+        schemaVersion: 2,
+        resource,
+        key,
+        data: {
+          value: 'normalized-value',
+          fetchedAt: '2026-03-03T12:00:00.000Z'
+        },
+        cacheMeta: {
+          fetchedAt: '2026-03-03T12:00:00.000Z',
+          expiresAt: '2026-03-03T12:00:30.000Z',
+          policyVersion: 'demo-v1',
+          source: 'upstream'
+        }
+      })
+    });
+    const kv = new MemoryKv();
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: new MemoryEdgeCache(),
+      now: new Date('2026-03-03T12:00:01.000Z')
+    });
+
+    expect(result.payload.value).toBe('normalized-value');
+    expect(result.payload.fetchedAt).toBe('2026-03-03T12:00:00.000Z');
+
+    const stored = (await kv.get('v1:demo:alpha')) as CacheEnvelope<DemoData>;
+    expect(stored.data.value).toBe('normalized-value');
+    expect(stored.data.fetchedAt).toBe('2026-03-03T12:00:00.000Z');
   });
 });

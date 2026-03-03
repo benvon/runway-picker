@@ -199,7 +199,8 @@ function toEnvelope<TInput, TUpstream, TData>(
   now: Date
 ): CacheEnvelope<TData> {
   const candidate = adapter.serialize(data, cacheKey, adapter.resource);
-  const fetchedAt = parseIsoDate(candidate?.cacheMeta?.fetchedAt) ?? extractFetchedAt(data) ?? now;
+  const serializedData = candidate.data;
+  const fetchedAt = parseIsoDate(candidate?.cacheMeta?.fetchedAt) ?? extractFetchedAt(serializedData) ?? now;
   const expiresAt =
     parseIsoDate(candidate?.cacheMeta?.expiresAt) ??
     new Date(fetchedAt.getTime() + adapter.policy.ttlSeconds * 1000);
@@ -208,7 +209,7 @@ function toEnvelope<TInput, TUpstream, TData>(
     schemaVersion: adapter.schemaVersion,
     resource: adapter.resource,
     key: cacheKey,
-    data,
+    data: serializedData,
     cacheMeta: {
       fetchedAt: fetchedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
