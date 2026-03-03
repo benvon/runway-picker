@@ -13,6 +13,7 @@ export interface AirportRunwayEnd {
   id: string;
   headingDegMag: number;
   isClosed: boolean;
+  lengthFt: number | null;
 }
 
 export interface AirportResourceData {
@@ -41,6 +42,7 @@ interface AirportDbPayload {
 
 interface AirportDbRunway {
   closed?: unknown;
+  length_ft?: unknown;
   le_ident?: unknown;
   he_ident?: unknown;
 }
@@ -107,7 +109,7 @@ function isRunwayClosed(value: unknown): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
-function toRunwayEnd(identCandidate: unknown, isClosed: boolean): AirportRunwayEnd | null {
+function toRunwayEnd(identCandidate: unknown, isClosed: boolean, lengthFt: number | null): AirportRunwayEnd | null {
   const ident = toStringValue(identCandidate)?.toUpperCase() ?? null;
   if (!ident) {
     return null;
@@ -124,7 +126,8 @@ function toRunwayEnd(identCandidate: unknown, isClosed: boolean): AirportRunwayE
   return {
     id: `${String(runwayNumber).padStart(2, '0')}${suffix}`,
     headingDegMag: runwayNumber === 36 ? 360 : runwayNumber * 10,
-    isClosed
+    isClosed,
+    lengthFt
   };
 }
 
@@ -155,13 +158,16 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
         typeof runway === 'object' &&
         typeof (runway as { id?: unknown }).id === 'string' &&
         typeof (runway as { headingDegMag?: unknown }).headingDegMag === 'number' &&
-        typeof (runway as { isClosed?: unknown }).isClosed === 'boolean'
+        typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' &&
+        ((runway as { lengthFt?: unknown }).lengthFt === null ||
+          typeof (runway as { lengthFt?: unknown }).lengthFt === 'number')
       );
     })
     .map((runway) => ({
       id: runway.id,
       headingDegMag: runway.headingDegMag,
-      isClosed: runway.isClosed
+      isClosed: runway.isClosed,
+      lengthFt: runway.lengthFt
     }));
 
   if (runwayEnds.length === 0) {
@@ -276,19 +282,29 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
       }
 
       const runwayClosed = isRunwayClosed(runway.closed);
-      const le = toRunwayEnd(runway.le_ident, runwayClosed);
-      const he = toRunwayEnd(runway.he_ident, runwayClosed);
+      const lengthFtCandidate = toIntegerValue(runway.length_ft);
+      const lengthFt = lengthFtCandidate !== null && lengthFtCandidate > 0 ? lengthFtCandidate : null;
+      const le = toRunwayEnd(runway.le_ident, runwayClosed, lengthFt);
+      const he = toRunwayEnd(runway.he_ident, runwayClosed, lengthFt);
 
       if (le) {
         const existing = runwayMap.get(le.id);
-        if (!existing || (existing.isClosed && !le.isClosed)) {
+        if (
+          !existing ||
+          (existing.isClosed && !le.isClosed) ||
+          (existing.isClosed === le.isClosed && (existing.lengthFt ?? 0) < (le.lengthFt ?? 0))
+        ) {
           runwayMap.set(le.id, le);
         }
       }
 
       if (he) {
         const existing = runwayMap.get(he.id);
-        if (!existing || (existing.isClosed && !he.isClosed)) {
+        if (
+          !existing ||
+          (existing.isClosed && !he.isClosed) ||
+          (existing.isClosed === he.isClosed && (existing.lengthFt ?? 0) < (he.lengthFt ?? 0))
+        ) {
           runwayMap.set(he.id, he);
         }
       }

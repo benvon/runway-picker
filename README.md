@@ -14,7 +14,9 @@ Runway Picker is a high-contrast, mobile-first web app for pilots to compare run
 - Best-runway selection by:
   1. greatest headwind
   2. lowest crosswind tie-break
-  3. alphanumeric runway ID tie-break
+  3. longest runway tie-break
+  4. smallest runway number tie-break
+  5. alphanumeric runway ID tie-break
 
 ## Local development
 

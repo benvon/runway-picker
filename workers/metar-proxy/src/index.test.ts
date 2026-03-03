@@ -49,11 +49,13 @@ function buildAirportReport(icao: string): Record<string, unknown> {
     runways: [
       {
         closed: '0',
+        length_ft: '12000',
         le_ident: '04L',
         he_ident: '22R'
       },
       {
         closed: '1',
+        length_ft: '10000',
         le_ident: '13',
         he_ident: '31'
       }
@@ -309,7 +311,7 @@ describe('airport worker', () => {
       requestedIcao: string;
       icao: string;
       source: string;
-      runwayEnds: Array<{ id: string; headingDegMag: number; isClosed: boolean }>;
+      runwayEnds: Array<{ id: string; headingDegMag: number; isClosed: boolean; lengthFt: number | null }>;
       cache: { source: string; status: string };
     };
 
@@ -317,10 +319,10 @@ describe('airport worker', () => {
     expect(payload.icao).toBe('KJFK');
     expect(payload.source).toBe('airportdb');
     expect(payload.runwayEnds).toEqual([
-      { id: '04L', headingDegMag: 40, isClosed: false },
-      { id: '13', headingDegMag: 130, isClosed: true },
-      { id: '22R', headingDegMag: 220, isClosed: false },
-      { id: '31', headingDegMag: 310, isClosed: true }
+      { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12000 },
+      { id: '13', headingDegMag: 130, isClosed: true, lengthFt: 10000 },
+      { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12000 },
+      { id: '31', headingDegMag: 310, isClosed: true, lengthFt: 10000 }
     ]);
     expect(payload.cache.source).toBe('upstream');
     expect(payload.cache.status).toBe('upstream_refresh');

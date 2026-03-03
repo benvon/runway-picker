@@ -41,6 +41,44 @@ describe('evaluateRunways', () => {
     expect(result.bestRunwayId).toBe('18L');
   });
 
+  it('uses runway length tie-break when wind components are equal', () => {
+    const sameHeadingRunways: RunwayEnd[] = [
+      { id: '18L', headingDegMag: 180, lengthFt: 7000 },
+      { id: '18R', headingDegMag: 180, lengthFt: 9000 }
+    ];
+
+    const wind: ParsedWind = {
+      raw: '18010KT',
+      directionType: 'fixed',
+      directionDegTrue: 180,
+      speedKt: 10,
+      gustKt: null,
+      source: 'wind_group'
+    };
+
+    const result = evaluateRunways(sameHeadingRunways, wind);
+    expect(result.bestRunwayId).toBe('18R');
+  });
+
+  it('uses smallest runway number when wind and length tie', () => {
+    const equalRunways: RunwayEnd[] = [
+      { id: '09', headingDegMag: 90, lengthFt: 8000 },
+      { id: '27', headingDegMag: 270, lengthFt: 8000 }
+    ];
+
+    const wind: ParsedWind = {
+      raw: '00000KT',
+      directionType: 'calm',
+      directionDegTrue: null,
+      speedKt: 0,
+      gustKt: null,
+      source: 'wind_group'
+    };
+
+    const result = evaluateRunways(equalRunways, wind);
+    expect(result.bestRunwayId).toBe('09');
+  });
+
   it('returns null best runway for variable winds', () => {
     const wind: ParsedWind = {
       raw: 'VRB05KT',

@@ -4,6 +4,7 @@ export interface RunwayEnd {
   id: string;
   headingDegMag: number;
   isClosed?: boolean;
+  lengthFt?: number | null;
 }
 
 export interface ParsedWind {

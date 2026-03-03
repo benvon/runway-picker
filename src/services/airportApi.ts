@@ -147,7 +147,11 @@ function normalizeRunwayEnds(runwayCandidate: unknown): RunwayEnd[] {
     .map((runway) => ({
       id: runway.id,
       headingDegMag: runway.headingDegMag,
-      isClosed: typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' ? runway.isClosed : false
+      isClosed: typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' ? runway.isClosed : false,
+      lengthFt:
+        typeof (runway as { lengthFt?: unknown }).lengthFt === 'number'
+          ? runway.lengthFt
+          : null
     }));
 
   if (parsed.length === 0) {

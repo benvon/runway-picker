@@ -109,16 +109,19 @@ describe('resource adapters', () => {
         runways: [
           {
             closed: '0',
+            length_ft: '12079',
             le_ident: '04L',
             he_ident: '22R'
           },
           {
             closed: '1',
+            length_ft: '14511',
             le_ident: '13R',
             he_ident: '31L'
           },
           {
             closed: '0',
+            length_ft: '12079',
             le_ident: '04L',
             he_ident: '22R'
           }
@@ -141,10 +144,10 @@ describe('resource adapters', () => {
     expect(validated.countryName).toBe('United States');
     expect(validated.elevationFt).toBe(13);
     expect(validated.runwayEnds).toEqual([
-      { id: '04L', headingDegMag: 40, isClosed: false },
-      { id: '13R', headingDegMag: 130, isClosed: true },
-      { id: '22R', headingDegMag: 220, isClosed: false },
-      { id: '31L', headingDegMag: 310, isClosed: true }
+      { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 },
+      { id: '13R', headingDegMag: 130, isClosed: true, lengthFt: 14511 },
+      { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12079 },
+      { id: '31L', headingDegMag: 310, isClosed: true, lengthFt: 14511 }
     ]);
   });
 
@@ -165,8 +168,8 @@ describe('resource adapters', () => {
     );
 
     expect(validated.runwayEnds).toEqual([
-      { id: '13', headingDegMag: 130, isClosed: true },
-      { id: '31', headingDegMag: 310, isClosed: true }
+      { id: '13', headingDegMag: 130, isClosed: true, lengthFt: null },
+      { id: '31', headingDegMag: 310, isClosed: true, lengthFt: null }
     ]);
   });
 });

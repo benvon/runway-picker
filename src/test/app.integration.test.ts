@@ -22,8 +22,8 @@ function airportPayload(icao: string) {
     countryName: 'United States',
     elevationFt: 100,
     runwayEnds: [
-      { id: '04', headingDegMag: 40 },
-      { id: '22', headingDegMag: 220 }
+      { id: '04', headingDegMag: 40, isClosed: false, lengthFt: 8000 },
+      { id: '22', headingDegMag: 220, isClosed: false, lengthFt: 8000 }
     ],
     source: 'airportdb',
     fetchedAt: '2026-03-02T00:00:00.000Z',
@@ -179,6 +179,61 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Variable winds reported at 3 kt; no deterministic best runway.');
   });
 
+  it('uses runway length as tie-break when wind components are equal', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KLEN') {
+        return Promise.resolve(
+          Response.json({
+            ...airportPayload('KLEN'),
+            runwayEnds: [
+              { id: '18L', headingDegMag: 180, isClosed: false, lengthFt: 7000 },
+              { id: '18R', headingDegMag: 180, isClosed: false, lengthFt: 9000 }
+            ]
+          })
+        );
+      }
+
+      if (url === '/api/metar?icao=KLEN') {
+        return Promise.resolve(
+          Response.json(
+            metarPayload('KLEN', {
+              raw: '18010KT',
+              directionType: 'fixed',
+              directionDegTrue: 180,
+              speedKt: 10,
+              gustKt: null
+            })
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KLEN';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
+
+    expect(root.textContent).toContain('Best runway: 18R');
+  });
+
   it('uses alternate ICAO for missing weather data', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -312,8 +367,8 @@ describe('app integration', () => {
           Response.json({
             ...airportPayload('KCLS'),
             runwayEnds: [
-              { id: '09', headingDegMag: 90, isClosed: true },
-              { id: '27', headingDegMag: 270, isClosed: false }
+              { id: '09', headingDegMag: 90, isClosed: true, lengthFt: 9000 },
+              { id: '27', headingDegMag: 270, isClosed: false, lengthFt: 9000 }
             ]
           })
         );
