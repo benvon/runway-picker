@@ -144,6 +144,34 @@ describe('metar worker', () => {
     expect(payload.wind.raw).toBe('VRB03KT');
   });
 
+  it('returns calm wind when upstream omits wind fields but METAR is 0000KT', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        Response.json([
+          {
+            icaoId: 'KJVL',
+            rawOb: 'METAR KJVL 031845Z 0000KT 7SM OVC013 04/M01 A3012'
+          }
+        ])
+      )
+    );
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJVL'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      wind: { directionType: string; speedKt: number; gustKt: number | null; raw: string };
+    };
+
+    expect(payload.wind.directionType).toBe('calm');
+    expect(payload.wind.speedKt).toBe(0);
+    expect(payload.wind.gustKt).toBeNull();
+    expect(payload.wind.raw).toBe('00000KT');
+  });
+
   it('returns 400 and no-store on invalid ICAO', async () => {
     const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=ABC'), {
       METAR_CACHE: new MemoryKv()
@@ -208,6 +236,32 @@ describe('metar worker', () => {
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: 'METAR provider returned status 503.'
+    });
+  });
+
+  it('returns debug payload when wind parsing fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        Response.json([
+          {
+            icaoId: 'KABC',
+            rawOb: 'METAR KABC 021953Z 10SM FEW020 08/03 A3012 RMK AO2'
+          }
+        ])
+      )
+    );
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KABC'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'Unable to parse wind data from METAR provider for ICAO KABC.',
+      debug: {
+        rawObPresent: true
+      }
     });
   });
 

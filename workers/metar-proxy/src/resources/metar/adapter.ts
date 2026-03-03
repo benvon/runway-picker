@@ -28,11 +28,13 @@ export interface MetarResourceWind {
 
 export class MetarWorkerError extends Error {
   status: number;
+  debug?: Record<string, unknown>;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, debug?: Record<string, unknown>) {
     super(message);
     this.name = 'MetarWorkerError';
     this.status = status;
+    this.debug = debug;
   }
 }
 
@@ -250,7 +252,23 @@ function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
   const gustField = readField(report, ['wgst', 'wind_gust_kt', 'windGustKt', 'windGust']);
 
   const speedKt = toIntegerValue(speedField);
-  if (speedKt === null || speedKt < 0) {
+  const rawMetar = extractMetarRawFromReport(report);
+
+  if (speedKt === null) {
+    if (rawMetar && /\b0000{1,2}KT\b/.test(rawMetar)) {
+      return {
+        raw: '00000KT',
+        directionType: 'calm',
+        directionDegTrue: null,
+        speedKt: 0,
+        gustKt: null
+      };
+    }
+
+    return null;
+  }
+
+  if (speedKt < 0) {
     return null;
   }
 
@@ -259,11 +277,11 @@ function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
 
   if (speedKt === 0) {
     return {
-      raw: formatWindRaw('calm', speedKt, gustKt, null),
+      raw: formatWindRaw('calm', speedKt, null, null),
       directionType: 'calm',
       directionDegTrue: null,
       speedKt,
-      gustKt
+      gustKt: null
     };
   }
 
@@ -295,6 +313,33 @@ function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
     directionDegTrue: directionDeg,
     speedKt,
     gustKt
+  };
+}
+
+function extractWindToken(rawMetar: string): string | null {
+  const match = rawMetar.match(/\b((?:\d{3}|VRB)\d{2,3}(?:G\d{2,3})?KT|0000{1,2}KT)\b/);
+  if (!match) {
+    return null;
+  }
+
+  return match[1] ?? null;
+}
+
+function buildWindDebugInfo(report: Record<string, unknown>): Record<string, unknown> {
+  const directionField = readField(report, ['wdir', 'wind_dir_degrees', 'windDirDegrees', 'windDir']);
+  const speedField = readField(report, ['wspd', 'wind_speed_kt', 'windSpeedKt', 'windSpd']);
+  const gustField = readField(report, ['wgst', 'wind_gust_kt', 'windGustKt', 'windGust']);
+  const rawMetar = extractMetarRawFromReport(report);
+
+  return {
+    availableFields: Object.keys(report).sort(),
+    candidates: {
+      directionField: toStringValue(directionField),
+      speedField: toStringValue(speedField),
+      gustField: toStringValue(gustField)
+    },
+    rawWindToken: rawMetar ? extractWindToken(rawMetar) : null,
+    rawObPresent: Boolean(rawMetar)
   };
 }
 
@@ -361,7 +406,11 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
 
     const wind = parseWind(report);
     if (!wind) {
-      throw new MetarWorkerError(`Unable to parse wind data from METAR provider for ICAO ${icao}.`, 502);
+      throw new MetarWorkerError(
+        `Unable to parse wind data from METAR provider for ICAO ${icao}.`,
+        502,
+        buildWindDebugInfo(report)
+      );
     }
 
     return {

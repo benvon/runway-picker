@@ -163,4 +163,28 @@ describe('metarApi service', () => {
       headers: { Accept: 'application/json' }
     });
   });
+
+  it('includes debug payload details in parse-failure errors', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            error: 'Unable to parse wind data from METAR provider for ICAO KJVL.',
+            debug: {
+              rawObPresent: true,
+              rawWindToken: null
+            }
+          },
+          { status: 502 }
+        )
+      )
+    );
+
+    await expect(fetchMetarByIcao('KJVL')).rejects.toMatchObject({
+      status: 502,
+      message:
+        'Unable to parse wind data from METAR provider for ICAO KJVL. Debug: {"rawObPresent":true,"rawWindToken":null}'
+    });
+  });
 });

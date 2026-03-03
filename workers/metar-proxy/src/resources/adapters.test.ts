@@ -64,6 +64,23 @@ describe('resource adapters', () => {
     expect(validated.wind.raw).toBe('VRB03KT');
   });
 
+  it('handles calm winds when provider omits explicit wind fields', async () => {
+    const validated = await metarResourceAdapter.validate(
+      [
+        {
+          rawOb: 'METAR KJVL 031845Z 0000KT 7SM OVC013 04/M01 A3012'
+        }
+      ],
+      { icao: 'KJVL' },
+      { request: new Request('https://example.com'), env: { METAR_CACHE: { get: async () => null, put: async () => {} } } }
+    );
+
+    expect(validated.wind.directionType).toBe('calm');
+    expect(validated.wind.speedKt).toBe(0);
+    expect(validated.wind.gustKt).toBeNull();
+    expect(validated.wind.raw).toBe('00000KT');
+  });
+
   it('requires airportdb token for airport fetches', async () => {
     await expect(
       airportResourceAdapter.fetchUpstream(

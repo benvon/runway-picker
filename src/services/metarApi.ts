@@ -174,8 +174,11 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
     let message = `Unable to load METAR for ${icao}.`;
 
     try {
-      const errorPayload = (await response.json()) as { error?: string; message?: string };
+      const errorPayload = (await response.json()) as { error?: string; message?: string; debug?: unknown };
       message = errorPayload.error ?? errorPayload.message ?? message;
+      if (errorPayload.debug && typeof errorPayload.debug === 'object') {
+        message = `${message} Debug: ${JSON.stringify(errorPayload.debug)}`;
+      }
     } catch {
       // Keep default message when body isn't JSON.
     }

@@ -97,7 +97,10 @@ export async function handleMetarRequest(request: Request, env: CacheEngineEnv):
     });
   } catch (error) {
     if (error instanceof MetarWorkerError) {
-      return buildJsonResponse({ error: error.message }, error.status);
+      return buildJsonResponse(
+        error.debug ? { error: error.message, debug: error.debug } : { error: error.message },
+        error.status
+      );
     }
 
     if (error instanceof CacheEngineError) {
