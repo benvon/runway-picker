@@ -197,7 +197,8 @@ test.describe('Runway Picker mobile preview UI', () => {
         KXYZ: {
           status: 404,
           body: {
-            error: 'ICAO code KXYZ was not found in airport database.'
+            error: 'ICAO code KXYZ was not found in airport database.',
+            code: 'ICAO_NOT_FOUND'
           }
         }
       },

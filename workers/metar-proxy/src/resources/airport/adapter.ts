@@ -29,6 +29,16 @@ export interface AirportResourceData {
   fetchedAt: string;
 }
 
+export type AirportWorkerErrorCode =
+  | 'INVALID_ICAO'
+  | 'SERVICE_NOT_CONFIGURED'
+  | 'AUTH_ERROR'
+  | 'ICAO_NOT_FOUND'
+  | 'RUNWAY_DATA_UNAVAILABLE'
+  | 'PROVIDER_ERROR'
+  | 'PROVIDER_PAYLOAD_INVALID'
+  | 'UNEXPECTED';
+
 interface AirportDbPayload {
   ident?: unknown;
   icao_code?: unknown;
@@ -49,18 +59,20 @@ interface AirportDbRunway {
 
 export class AirportWorkerError extends Error {
   status: number;
+  code: AirportWorkerErrorCode;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code: AirportWorkerErrorCode) {
     super(message);
     this.name = 'AirportWorkerError';
     this.status = status;
+    this.code = code;
   }
 }
 
 export function normalizeAirportIcao(value: string): string {
   const normalized = value.trim().toUpperCase();
   if (!/^[A-Z0-9]{4}$/.test(normalized)) {
-    throw new AirportWorkerError('Invalid ICAO code. Expected 4 alphanumeric characters.', 400);
+    throw new AirportWorkerError('Invalid ICAO code. Expected 4 alphanumeric characters.', 400, 'INVALID_ICAO');
   }
 
   return normalized;
@@ -216,7 +228,7 @@ function buildAirportDbUrl(icao: string, token: string): string {
 
 function toAirportDbPayload(candidate: unknown): AirportDbPayload {
   if (!candidate || typeof candidate !== 'object') {
-    throw new AirportWorkerError('Airport provider returned an invalid payload.', 502);
+    throw new AirportWorkerError('Airport provider returned an invalid payload.', 502, 'PROVIDER_PAYLOAD_INVALID');
   }
 
   return candidate as AirportDbPayload;
@@ -240,7 +252,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
     const token = ctx.env.AIRPORTDB_API_TOKEN?.trim();
 
     if (!token) {
-      throw new AirportWorkerError('Airport lookup service is not configured.', 500);
+      throw new AirportWorkerError('Airport lookup service is not configured.', 500, 'SERVICE_NOT_CONFIGURED');
     }
 
     const response = await fetch(buildAirportDbUrl(icao, token), {
@@ -251,15 +263,15 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
     });
 
     if (response.status === 401 || response.status === 403) {
-      throw new AirportWorkerError('Airport lookup service token is invalid or missing privileges.', 502);
+      throw new AirportWorkerError('Airport lookup service token is invalid or missing privileges.', 502, 'AUTH_ERROR');
     }
 
     if (response.status === 404) {
-      throw new AirportWorkerError(`ICAO code ${icao} was not found in airport database.`, 404);
+      throw new AirportWorkerError(`ICAO code ${icao} was not found in airport database.`, 404, 'ICAO_NOT_FOUND');
     }
 
     if (!response.ok) {
-      throw new AirportWorkerError(`Airport provider returned status ${response.status}.`, 502);
+      throw new AirportWorkerError(`Airport provider returned status ${response.status}.`, 502, 'PROVIDER_ERROR');
     }
 
     return response.json();
@@ -312,7 +324,11 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
 
     const runwayEnds = [...runwayMap.values()].sort((a, b) => a.id.localeCompare(b.id));
     if (runwayEnds.length === 0) {
-      throw new AirportWorkerError(`No runway data is available for ICAO ${requestedIcao}.`, 404);
+      throw new AirportWorkerError(
+        `No runway data is available for ICAO ${requestedIcao}.`,
+        404,
+        'RUNWAY_DATA_UNAVAILABLE'
+      );
     }
 
     return {

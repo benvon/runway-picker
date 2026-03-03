@@ -13,6 +13,9 @@ describe('pages airport proxy', () => {
     });
 
     expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'SERVICE_NOT_CONFIGURED'
+    });
   });
 
   it('proxies request to METAR_API service binding and preserves cache headers', async () => {

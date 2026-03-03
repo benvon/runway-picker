@@ -174,7 +174,7 @@ function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
 export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
   if (!/^[A-Z0-9]{4}$/.test(icao)) {
-    throw new MetarLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400);
+    throw new MetarLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400, undefined, 'INVALID_ICAO');
   }
 
   const response = await fetch(`/api/metar?icao=${encodeURIComponent(icao)}`, {

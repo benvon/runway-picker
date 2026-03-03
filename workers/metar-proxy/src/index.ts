@@ -149,14 +149,14 @@ export async function handleAirportRequest(request: Request, env: CacheEngineEnv
     });
   } catch (error) {
     if (error instanceof AirportWorkerError) {
-      return buildJsonResponse({ error: error.message }, error.status);
+      return buildJsonResponse({ error: error.message, code: error.code }, error.status);
     }
 
     if (error instanceof CacheEngineError) {
-      return buildJsonResponse({ error: error.message }, error.status);
+      return buildJsonResponse({ error: error.message, code: 'CACHE_ERROR' }, error.status);
     }
 
-    return buildJsonResponse({ error: 'Unexpected error while loading airport data.' }, 500);
+    return buildJsonResponse({ error: 'Unexpected error while loading airport data.', code: 'UNEXPECTED' }, 500);
   }
 }
 

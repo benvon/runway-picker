@@ -1,5 +1,5 @@
 import { evaluateRunways } from './domain/evaluateRunways';
-import { fetchAirportByIcao } from './services/airportApi';
+import { AirportLookupError, fetchAirportByIcao } from './services/airportApi';
 import type { AirportLookupResponse } from './services/airportApi';
 import { fetchMetarByIcao } from './services/metarApi';
 import { MetarLookupError } from './services/metarApi';
@@ -248,21 +248,20 @@ function renderErrorTechnicalDetails(error: unknown): string {
   `;
 }
 
-function isNotFoundLookupError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') {
-    return false;
-  }
-
-  const status = (error as { status?: unknown }).status;
-  return typeof status === 'number' && status === 404;
-}
-
 function shouldPromptAlternateMetar(error: unknown): boolean {
   if (!(error instanceof MetarLookupError)) {
     return false;
   }
 
   return error.code === 'METAR_UNAVAILABLE' || error.code === 'ICAO_NOT_FOUND';
+}
+
+function shouldShowAirportNotFoundMessage(error: unknown): boolean {
+  if (!(error instanceof AirportLookupError)) {
+    return false;
+  }
+
+  return error.code === 'ICAO_NOT_FOUND';
 }
 
 function normalizeIcaoInput(value: string): string {
@@ -451,7 +450,7 @@ export function mountApp(root: HTMLElement): void {
     try {
       airport = await fetchAirportByIcao(primaryIcao);
     } catch (error) {
-      if (isNotFoundLookupError(error)) {
+      if (shouldShowAirportNotFoundMessage(error)) {
         enterPrimaryStage();
         bestSpotlightNode.innerHTML = '';
         resultsNode.innerHTML = '';

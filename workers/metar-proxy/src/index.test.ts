@@ -361,7 +361,20 @@ describe('airport worker', () => {
 
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toMatchObject({
-      error: 'Airport lookup service is not configured.'
+      error: 'Airport lookup service is not configured.',
+      code: 'SERVICE_NOT_CONFIGURED'
+    });
+  });
+
+  it('returns INVALID_ICAO code when airport ICAO format is invalid', async () => {
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=ABC'), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'INVALID_ICAO'
     });
   });
 
@@ -385,7 +398,8 @@ describe('airport worker', () => {
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({
-      error: 'No runway data is available for ICAO KHEL.'
+      error: 'No runway data is available for ICAO KHEL.',
+      code: 'RUNWAY_DATA_UNAVAILABLE'
     });
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchMetarByIcao, MetarLookupError } from './metarApi';
+import { fetchMetarByIcao } from './metarApi';
 
 describe('metarApi service', () => {
   afterEach(() => {
@@ -7,7 +7,10 @@ describe('metarApi service', () => {
   });
 
   it('rejects invalid ICAO values', async () => {
-    await expect(fetchMetarByIcao('KSF')).rejects.toBeInstanceOf(MetarLookupError);
+    await expect(fetchMetarByIcao('KSF')).rejects.toMatchObject({
+      status: 400,
+      code: 'INVALID_ICAO'
+    });
   });
 
   it('calls local API and returns structured cache metadata', async () => {

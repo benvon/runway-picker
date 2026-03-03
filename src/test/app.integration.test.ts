@@ -462,7 +462,8 @@ describe('app integration', () => {
         return Promise.resolve(
           Response.json(
             {
-              error: 'ICAO code KXYZ was not found in airport database.'
+              error: 'ICAO code KXYZ was not found in airport database.',
+              code: 'ICAO_NOT_FOUND'
             },
             { status: 404 }
           )

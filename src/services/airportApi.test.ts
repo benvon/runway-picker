@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchAirportByIcao, AirportLookupError } from './airportApi';
+import { fetchAirportByIcao } from './airportApi';
 
 describe('airportApi service', () => {
   afterEach(() => {
@@ -7,7 +7,10 @@ describe('airportApi service', () => {
   });
 
   it('rejects invalid ICAO values', async () => {
-    await expect(fetchAirportByIcao('KSF')).rejects.toBeInstanceOf(AirportLookupError);
+    await expect(fetchAirportByIcao('KSF')).rejects.toMatchObject({
+      status: 400,
+      code: 'INVALID_ICAO'
+    });
   });
 
   it('calls local API and returns structured runway and cache metadata', async () => {
@@ -138,7 +141,8 @@ describe('airportApi service', () => {
       vi.fn().mockResolvedValue(
         Response.json(
           {
-            error: 'ICAO code XXXX was not found in airport database.'
+            error: 'ICAO code XXXX was not found in airport database.',
+            code: 'ICAO_NOT_FOUND'
           },
           { status: 404 }
         )
@@ -147,7 +151,8 @@ describe('airportApi service', () => {
 
     await expect(fetchAirportByIcao('XXXX')).rejects.toMatchObject({
       message: 'ICAO code XXXX was not found in airport database.',
-      status: 404
+      status: 404,
+      code: 'ICAO_NOT_FOUND'
     });
   });
 });
