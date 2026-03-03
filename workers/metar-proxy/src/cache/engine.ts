@@ -271,7 +271,7 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
   const cacheKey = buildVersionedKey(adapter.resource, normalizedKey);
   const edgeCache = input.edgeCache ?? getRuntimeEdgeCache();
   const readKv = async (key: string): Promise<unknown> => env.METAR_CACHE.get(key, 'json');
-  const adapterContext: CacheAdapterContext = { request };
+  const adapterContext: CacheAdapterContext = { request, env };
 
   const edgeRecord = await readEdgeEnvelope(edgeCache, adapter, cacheKey, now);
   if (edgeRecord && isFresh(edgeRecord, now)) {

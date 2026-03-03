@@ -9,6 +9,7 @@ const ALLOWED_STATUSES = new Set([
 ]);
 
 const ICAO_CANDIDATES = ['KJFK', 'KLAX', 'KORD', 'KMCI'];
+const RESOURCES = ['metar', 'airport'];
 
 function fail(message) {
   throw new Error(message);
@@ -39,8 +40,8 @@ function parsePreviewUrl(input) {
   return url.origin;
 }
 
-async function fetchMetar(baseUrl, icao) {
-  const url = `${baseUrl}/api/metar?icao=${encodeURIComponent(icao)}`;
+async function fetchResource(baseUrl, resource, icao) {
+  const url = `${baseUrl}/api/${resource}?icao=${encodeURIComponent(icao)}`;
   const response = await globalThis.fetch(url, {
     method: 'GET',
     headers: {
@@ -62,7 +63,7 @@ async function fetchMetar(baseUrl, icao) {
   };
 }
 
-function validateCacheContract(lookup, label) {
+function validateCacheContract(lookup, label, resource) {
   assert(lookup.response.ok, `${label} expected 2xx but received ${lookup.response.status}`);
   assert(lookup.body && typeof lookup.body === 'object', `${label} response body must be JSON object`);
 
@@ -79,25 +80,25 @@ function validateCacheContract(lookup, label) {
   assert(typeof cache.fetchedAt === 'string' && cache.fetchedAt.length > 0, `${label} cache.fetchedAt invalid`);
   assert(typeof cache.servedAt === 'string' && cache.servedAt.length > 0, `${label} cache.servedAt invalid`);
   assert(typeof cache.ttlSeconds === 'number' && cache.ttlSeconds > 0, `${label} cache.ttlSeconds invalid`);
-  assert(typeof cache.key === 'string' && cache.key.startsWith('v1:metar:'), `${label} cache.key invalid`);
-  assert(cache.resource === 'metar', `${label} cache.resource must be metar`);
+  assert(typeof cache.key === 'string' && cache.key.startsWith(`v1:${resource}:`), `${label} cache.key invalid`);
+  assert(cache.resource === resource, `${label} cache.resource must be ${resource}`);
 }
 
-async function findWorkingIcao(baseUrl) {
+async function findWorkingIcao(baseUrl, resource) {
   for (const icao of ICAO_CANDIDATES) {
-    const lookup = await fetchMetar(baseUrl, icao);
+    const lookup = await fetchResource(baseUrl, resource, icao);
     if (lookup.response.ok) {
       return { icao, lookup };
     }
   }
 
-  fail(`None of the ICAO candidates returned 2xx: ${ICAO_CANDIDATES.join(', ')}`);
+  fail(`None of the ICAO candidates returned 2xx for ${resource}: ${ICAO_CANDIDATES.join(', ')}`);
 }
 
-async function ensureRepeatedRequestShowsCacheReuse(baseUrl, icao) {
+async function ensureRepeatedRequestShowsCacheReuse(baseUrl, resource, icao) {
   for (let attempt = 1; attempt <= 5; attempt += 1) {
-    const lookup = await fetchMetar(baseUrl, icao);
-    validateCacheContract(lookup, `repeat attempt ${attempt}`);
+    const lookup = await fetchResource(baseUrl, resource, icao);
+    validateCacheContract(lookup, `${resource} repeat attempt ${attempt}`, resource);
 
     const status = lookup.body.cache.status;
 
@@ -108,20 +109,24 @@ async function ensureRepeatedRequestShowsCacheReuse(baseUrl, icao) {
     await sleep(1000);
   }
 
-  fail(
-    `Repeated requests for ${icao} never showed cache reuse. Expected a non-upstream_refresh status.`
-  );
+  fail(`Repeated ${resource} requests for ${icao} never showed cache reuse (non-upstream_refresh).`);
+}
+
+async function verifyResource(baseUrl, resource) {
+  const { icao, lookup } = await findWorkingIcao(baseUrl, resource);
+  console.log(`Using ICAO ${icao} for ${resource} smoke checks`);
+  validateCacheContract(lookup, `${resource} initial request`, resource);
+  await ensureRepeatedRequestShowsCacheReuse(baseUrl, resource, icao);
 }
 
 async function main() {
   const baseUrl = parsePreviewUrl(process.argv[2] ?? process.env.PREVIEW_URL);
   console.log(`Verifying preview cache behavior at ${baseUrl}`);
 
-  const { icao, lookup } = await findWorkingIcao(baseUrl);
-  console.log(`Using ICAO ${icao} for smoke checks`);
-  validateCacheContract(lookup, 'initial request');
+  for (const resource of RESOURCES) {
+    await verifyResource(baseUrl, resource);
+  }
 
-  await ensureRepeatedRequestShowsCacheReuse(baseUrl, icao);
   console.log('Preview cache smoke checks passed.');
 }
 

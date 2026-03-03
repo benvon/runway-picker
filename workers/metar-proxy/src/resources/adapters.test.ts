@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { airportResourceAdapter } from './airport/adapter';
 import { metarResourceAdapter } from './metar/adapter';
 
 describe('resource adapters', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('normalizes and serializes metar resource payloads', () => {
     const normalized = metarResourceAdapter.normalizeKey({ icao: ' kjfk ' });
     expect(normalized).toBe('KJFK');
@@ -52,7 +56,7 @@ describe('resource adapters', () => {
         }
       ],
       { icao: 'KARR' },
-      { request: new Request('https://example.com') }
+      { request: new Request('https://example.com'), env: { METAR_CACHE: { get: async () => null, put: async () => {} } } }
     );
 
     expect(validated.wind.directionType).toBe('variable');
@@ -60,16 +64,87 @@ describe('resource adapters', () => {
     expect(validated.wind.raw).toBe('VRB03KT');
   });
 
-  it('provides airport adapter contract while upstream implementation is pending', async () => {
-    const normalized = airportResourceAdapter.normalizeKey({ icao: ' kden ' });
-    expect(normalized).toBe('KDEN');
+  it('requires airportdb token for airport fetches', async () => {
+    await expect(
+      airportResourceAdapter.fetchUpstream(
+        { icao: 'KDEN' },
+        {
+          request: new Request('https://example.com'),
+          env: { METAR_CACHE: { get: async () => null, put: async () => {} } }
+        }
+      )
+    ).rejects.toMatchObject({
+      message: 'Airport lookup service is not configured.',
+      status: 500
+    });
+  });
 
-    await expect(airportResourceAdapter.fetchUpstream({ icao: 'KDEN' }, { request: new Request('https://example.com') })).rejects.toThrow(
-      'Airport adapter upstream fetch is not implemented yet.'
+  it('parses usable runway ends from airport payload and skips closed runways', async () => {
+    const validated = await airportResourceAdapter.validate(
+      {
+        ident: 'KJFK',
+        icao_code: 'KJFK',
+        name: 'John F Kennedy International Airport',
+        municipality: 'New York',
+        iso_country: 'US',
+        country: { name: 'United States' },
+        elevation_ft: '13',
+        runways: [
+          {
+            closed: '0',
+            le_ident: '04L',
+            he_ident: '22R'
+          },
+          {
+            closed: '1',
+            le_ident: '13R',
+            he_ident: '31L'
+          },
+          {
+            closed: '0',
+            le_ident: '04L',
+            he_ident: '22R'
+          }
+        ]
+      },
+      { icao: 'KJFK' },
+      {
+        request: new Request('https://example.com'),
+        env: {
+          METAR_CACHE: { get: async () => null, put: async () => {} },
+          AIRPORTDB_API_TOKEN: 'token'
+        }
+      }
     );
 
-    expect(() => airportResourceAdapter.validate({}, { icao: 'KDEN' }, { request: new Request('https://example.com') })).toThrow(
-      'Airport adapter validation is not implemented yet.'
-    );
+    expect(validated.requestedIcao).toBe('KJFK');
+    expect(validated.icao).toBe('KJFK');
+    expect(validated.name).toContain('John F Kennedy');
+    expect(validated.countryCode).toBe('US');
+    expect(validated.countryName).toBe('United States');
+    expect(validated.elevationFt).toBe(13);
+    expect(validated.runwayEnds).toEqual([
+      { id: '04L', headingDegMag: 40 },
+      { id: '22R', headingDegMag: 220 }
+    ]);
+  });
+
+  it('returns 404 when airport payload has no usable runway ends', () => {
+    expect(() =>
+      airportResourceAdapter.validate(
+        {
+          ident: 'KHEL',
+          runways: [{ closed: '1', le_ident: '13', he_ident: '31' }]
+        },
+        { icao: 'KHEL' },
+        {
+          request: new Request('https://example.com'),
+          env: {
+            METAR_CACHE: { get: async () => null, put: async () => {} },
+            AIRPORTDB_API_TOKEN: 'token'
+          }
+        }
+      )
+    ).toThrow('No runway data is available for ICAO KHEL.');
   });
 });

@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { extractMetarRaw, handleMetarRequest, MetarWorkerError, normalizeIcao } from './index';
+import {
+  extractMetarRaw,
+  handleAirportRequest,
+  handleMetarRequest,
+  MetarWorkerError,
+  normalizeAirportIcao,
+  normalizeIcao
+} from './index';
 
 class MemoryKv {
   private values = new Map<string, unknown>();
@@ -27,6 +34,30 @@ function buildMetarReport(icao: string, wind: { wdir: string | number; wspd: num
     wdir: wind.wdir,
     wspd: wind.wspd,
     wgst: wind.wgst ?? null
+  };
+}
+
+function buildAirportReport(icao: string): Record<string, unknown> {
+  return {
+    ident: icao,
+    icao_code: icao,
+    name: `${icao} Test Airport`,
+    municipality: 'Testville',
+    iso_country: 'US',
+    country: { name: 'United States' },
+    elevation_ft: '100',
+    runways: [
+      {
+        closed: '0',
+        le_ident: '04L',
+        he_ident: '22R'
+      },
+      {
+        closed: '0',
+        le_ident: '13',
+        he_ident: '31'
+      }
+    ]
   };
 }
 
@@ -196,6 +227,83 @@ describe('metar worker', () => {
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({
       error: 'ICAO code ZZZZ was not found. Check the code and try again.'
+    });
+  });
+});
+
+describe('airport worker', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('normalizes airport ICAO values', () => {
+    expect(normalizeAirportIcao(' kjfk ')).toBe('KJFK');
+  });
+
+  it('returns airport payload with runway ends and cache metadata', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
+
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+
+    const payload = (await response.json()) as {
+      requestedIcao: string;
+      icao: string;
+      source: string;
+      runwayEnds: Array<{ id: string; headingDegMag: number }>;
+      cache: { source: string; status: string };
+    };
+
+    expect(payload.requestedIcao).toBe('KJFK');
+    expect(payload.icao).toBe('KJFK');
+    expect(payload.source).toBe('airportdb');
+    expect(payload.runwayEnds).toEqual([
+      { id: '04L', headingDegMag: 40 },
+      { id: '13', headingDegMag: 130 },
+      { id: '22R', headingDegMag: 220 },
+      { id: '31', headingDegMag: 310 }
+    ]);
+    expect(payload.cache.source).toBe('upstream');
+    expect(payload.cache.status).toBe('upstream_refresh');
+  });
+
+  it('returns 500 when airportdb token is missing', async () => {
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'Airport lookup service is not configured.'
+    });
+  });
+
+  it('returns 404 when airport has no usable runway data', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        Response.json({
+          ident: 'KHEL',
+          icao_code: 'KHEL',
+          name: 'Heliport',
+          runways: []
+        })
+      )
+    );
+
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KHEL'), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'No runway data is available for ICAO KHEL.'
     });
   });
 });
