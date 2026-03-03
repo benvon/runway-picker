@@ -46,7 +46,7 @@ Worker behavior:
   - `services` binding:
     - `METAR_API` -> `runway-picker-metar-api`
   - `env.preview.services` binding:
-    - `METAR_API` -> `runway-picker-metar-api` (environment `preview`)
+    - `METAR_API` -> `runway-picker-metar-api-preview`
 
 ## 5) Create API token and account settings
 In Cloudflare:

@@ -13,8 +13,7 @@
       "services": [
         {
           "binding": "METAR_API",
-          "service": "runway-picker-metar-api",
-          "environment": "preview"
+          "service": "runway-picker-metar-api-preview"
         }
       ]
     }
