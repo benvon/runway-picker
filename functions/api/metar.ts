@@ -27,9 +27,24 @@ export const onRequestGet: PagesFunction<MetarProxyEnv> = async ({ request, env 
       })
     );
 
+    const passthroughHeaders = new Headers();
+    const headerNames = [
+      'Content-Type',
+      'Cache-Control',
+      'X-Cache',
+      'X-Runway-Cache-Status'
+    ];
+
+    for (const headerName of headerNames) {
+      const value = upstreamResponse.headers.get(headerName);
+      if (value) {
+        passthroughHeaders.set(headerName, value);
+      }
+    }
+
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
-      headers: upstreamResponse.headers
+      headers: passthroughHeaders
     });
   } catch {
     return jsonError('Unexpected error while proxying METAR lookup.', 500);
