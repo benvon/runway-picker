@@ -1,100 +1,40 @@
-const AVIATION_WEATHER_METAR_URL = 'https://aviationweather.gov/api/data/metar';
-const AVIATION_WEATHER_STATION_INFO_URL = 'https://aviationweather.gov/api/data/stationinfo';
-const CACHE_TTL_SECONDS = 1800;
-const USER_AGENT = 'benvon-runway-picker';
+import { CacheEngineError, getOrRefreshCached } from './cache/engine';
+import { getAdapterOrThrow } from './cache/registry';
+import { CacheSingleFlightCoordinator } from './cache/singleFlight';
+import type { CacheEngineEnv, CacheProvenance } from './cache/types';
+import { createResourceRegistry } from './resources';
+import {
+  extractMetarRaw,
+  MetarWorkerError,
+  metarResourceAdapter,
+  normalizeIcao,
+  type MetarResourceData,
+  type MetarResourceInput
+} from './resources/metar/adapter';
 
-interface MetarCachePayload {
-  icao: string;
-  metarRaw: string;
-  source: 'aviationweather';
-  fetchedAt: string;
+const RESOURCE_REGISTRY = createResourceRegistry();
+const METAR_ADAPTER = getAdapterOrThrow(RESOURCE_REGISTRY, 'metar') as typeof metarResourceAdapter;
+
+interface MetarApiSuccessPayload extends MetarResourceData {
+  cache: CacheProvenance;
 }
 
-interface MetarWorkerEnv {
-  METAR_CACHE: {
-    get(key: string, type: 'json'): Promise<unknown>;
-    put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+function mapCacheStatusToLegacyXCache(status: CacheProvenance['status']): 'HIT' | 'MISS' {
+  if (status === 'upstream_refresh') {
+    return 'MISS';
+  }
+
+  return 'HIT';
+}
+
+function buildJsonResponse(payload: unknown, status: number, cache?: CacheProvenance): Response {
+  const headers: Record<string, string> = {
+    'Cache-Control': status === 200 ? `public, max-age=60, s-maxage=${metarResourceAdapter.policy.ttlSeconds}` : 'no-store'
   };
-}
 
-export class MetarWorkerError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = 'MetarWorkerError';
-    this.status = status;
-  }
-}
-
-export function normalizeIcao(value: string): string {
-  const normalized = value.trim().toUpperCase();
-  if (!/^[A-Z0-9]{4}$/.test(normalized)) {
-    throw new MetarWorkerError('Invalid ICAO code. Expected 4 alphanumeric characters.', 400);
-  }
-
-  return normalized;
-}
-
-export function extractMetarRaw(rawText: string): string | null {
-  const lines = rawText
-    .split(/\r?\n/g)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    return null;
-  }
-
-  for (const line of lines) {
-    if (/^(METAR|SPECI)\s/.test(line) || /^[A-Z0-9]{4}\s\d{6}Z\s/.test(line)) {
-      return line;
-    }
-  }
-
-  return null;
-}
-
-function buildUpstreamUrl(icao: string): string {
-  const url = new URL(AVIATION_WEATHER_METAR_URL);
-  url.searchParams.set('ids', icao);
-  url.searchParams.set('format', 'raw');
-  return url.toString();
-}
-
-function buildStationInfoUrl(icao: string): string {
-  const url = new URL(AVIATION_WEATHER_STATION_INFO_URL);
-  url.searchParams.set('ids', icao);
-  url.searchParams.set('format', 'json');
-  return url.toString();
-}
-
-async function stationExistsForIcao(icao: string): Promise<boolean> {
-  const response = await fetch(buildStationInfoUrl(icao), {
-    headers: {
-      'User-Agent': USER_AGENT,
-      Accept: 'application/json'
-    }
-  });
-
-  if (!response.ok) {
-    throw new MetarWorkerError('Unable to validate ICAO code with weather provider.', 502);
-  }
-
-  const payload = (await response.json()) as unknown;
-  return Array.isArray(payload) && payload.length > 0;
-}
-
-function buildJsonResponse(payload: unknown, status: number, cacheState?: 'HIT' | 'MISS'): Response {
-  const headers: Record<string, string> = {};
-
-  if (status === 200) {
-    headers['Cache-Control'] = `public, max-age=60, s-maxage=${CACHE_TTL_SECONDS}`;
-    if (cacheState) {
-      headers['X-Cache'] = cacheState;
-    }
-  } else {
-    headers['Cache-Control'] = 'no-store';
+  if (cache && status === 200) {
+    headers['X-Runway-Cache-Status'] = cache.status;
+    headers['X-Cache'] = mapCacheStatusToLegacyXCache(cache.status);
   }
 
   return Response.json(payload, {
@@ -103,94 +43,44 @@ function buildJsonResponse(payload: unknown, status: number, cacheState?: 'HIT' 
   });
 }
 
-function cacheKeyForIcao(icao: string): string {
-  return `metar:${icao}`;
-}
-
-function toMetarPayload(value: unknown): MetarCachePayload | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const candidate = value as Partial<MetarCachePayload>;
-  if (
-    typeof candidate.icao !== 'string' ||
-    typeof candidate.metarRaw !== 'string' ||
-    typeof candidate.fetchedAt !== 'string' ||
-    candidate.source !== 'aviationweather'
-  ) {
-    return null;
-  }
-
+function toInput(request: Request): MetarResourceInput {
+  const url = new URL(request.url);
   return {
-    icao: candidate.icao,
-    metarRaw: candidate.metarRaw,
-    source: candidate.source,
-    fetchedAt: candidate.fetchedAt
+    icao: url.searchParams.get('icao') ?? ''
   };
 }
 
-export async function handleMetarRequest(request: Request, env: MetarWorkerEnv): Promise<Response> {
+export async function handleMetarRequest(request: Request, env: CacheEngineEnv): Promise<Response> {
   if (request.method !== 'GET') {
     return buildJsonResponse({ error: 'Method not allowed.' }, 405);
   }
 
+  const url = new URL(request.url);
+  if (url.pathname !== '/api/metar' && url.pathname !== '/') {
+    return buildJsonResponse({ error: 'Not found.' }, 404);
+  }
+
   try {
-    const url = new URL(request.url);
-    if (url.pathname !== '/api/metar' && url.pathname !== '/') {
-      return buildJsonResponse({ error: 'Not found.' }, 404);
-    }
-
-    const icao = normalizeIcao(url.searchParams.get('icao') ?? '');
-    const key = cacheKeyForIcao(icao);
-
-    const cached = toMetarPayload(await env.METAR_CACHE.get(key, 'json'));
-    if (cached) {
-      return buildJsonResponse(cached, 200, 'HIT');
-    }
-
-    const upstreamResponse = await fetch(buildUpstreamUrl(icao), {
-      headers: {
-        'User-Agent': USER_AGENT,
-        Accept: 'text/plain'
-      }
+    const input = toInput(request);
+    const result = await getOrRefreshCached({
+      adapter: METAR_ADAPTER,
+      input,
+      request,
+      env
     });
 
-    if (!upstreamResponse.ok) {
-      throw new MetarWorkerError(`METAR provider returned status ${upstreamResponse.status}.`, 502);
-    }
-
-    const upstreamBody = await upstreamResponse.text();
-    const metarRaw = extractMetarRaw(upstreamBody);
-    if (!metarRaw) {
-      const stationExists = await stationExistsForIcao(icao);
-      if (!stationExists) {
-        throw new MetarWorkerError(
-          `ICAO code ${icao} was not found. Check the code and try again.`,
-          404
-        );
-      }
-
-      throw new MetarWorkerError(
-        `No METAR is currently available for ICAO ${icao}. Try again later.`,
-        404
-      );
-    }
-
-    const payload: MetarCachePayload = {
-      icao,
-      metarRaw,
-      source: 'aviationweather',
-      fetchedAt: new Date().toISOString()
+    const payload: MetarApiSuccessPayload = {
+      ...result.payload,
+      cache: result.cache
     };
 
-    await env.METAR_CACHE.put(key, JSON.stringify(payload), {
-      expirationTtl: CACHE_TTL_SECONDS
-    });
-
-    return buildJsonResponse(payload, 200, 'MISS');
+    return buildJsonResponse(payload, 200, result.cache);
   } catch (error) {
     if (error instanceof MetarWorkerError) {
+      return buildJsonResponse({ error: error.message }, error.status);
+    }
+
+    if (error instanceof CacheEngineError) {
       return buildJsonResponse({ error: error.message }, error.status);
     }
 
@@ -198,8 +88,10 @@ export async function handleMetarRequest(request: Request, env: MetarWorkerEnv):
   }
 }
 
+export { CacheSingleFlightCoordinator, MetarWorkerError, normalizeIcao, extractMetarRaw };
+
 export default {
-  async fetch(request: Request, env: MetarWorkerEnv): Promise<Response> {
+  async fetch(request: Request, env: CacheEngineEnv): Promise<Response> {
     return handleMetarRequest(request, env);
   }
 };
