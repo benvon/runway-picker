@@ -8,19 +8,19 @@ import type { EvaluationResult, ParsedWind, RunwayWindComponentValue } from './d
 
 const MIN_FEEDBACK_MS = 250;
 
-type MissingDataPart = 'runway' | 'weather';
+type LookupStage = 'primary' | 'alternate-metar';
 
 interface LookupResolution {
   airport: AirportLookupResponse;
   metar: MetarLookupResponse;
   runwaySourceIcao: string;
   weatherSourceIcao: string;
-  alternateIcao: string | null;
 }
 
-interface SettledLookup<T> {
-  value: T | null;
-  error: Error | null;
+interface LookupState {
+  stage: LookupStage;
+  primaryAirport: AirportLookupResponse | null;
+  primaryIcao: string;
 }
 
 function formatHeadingValue(headwindKt: number): string {
@@ -147,7 +147,7 @@ function renderRunwayTable(result: EvaluationResult): string {
     .join('');
 
   return `
-    <section class="panel" aria-labelledby="components-title">
+    <section class="panel panel-subtle" aria-labelledby="components-title">
       <h2 id="components-title">All Runway Components</h2>
       <div class="table-wrap">
         <table>
@@ -187,12 +187,12 @@ function renderCalculationInfo(result: EvaluationResult): string {
   const dedupedNotes = [...new Set(notes)];
 
   return `
-    <details class="panel panel-subtle info-box">
-      <summary>Calculation Notes & Disclaimer</summary>
+    <section class="panel panel-subtle" aria-label="Calculation notes and disclaimer">
+      <h2>Calculation Notes & Disclaimer</h2>
       <ul class="notes-list">
         ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
       </ul>
-    </details>
+    </section>
   `;
 }
 
@@ -217,12 +217,12 @@ function renderTechnicalDetails(resolution: LookupResolution): string {
   const dedupedNotes = [...new Set(notes)];
 
   return `
-    <details class="panel panel-subtle info-box">
-      <summary>Technical Details</summary>
+    <section class="panel panel-subtle" aria-label="Technical details">
+      <h2>Technical Details</h2>
       <ul class="notes-list">
         ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
       </ul>
-    </details>
+    </section>
   `;
 }
 
@@ -248,19 +248,8 @@ function renderErrorTechnicalDetails(error: unknown): string {
   `;
 }
 
-function toSettledLookup<T>(result: PromiseSettledResult<T>): SettledLookup<T> {
-  if (result.status === 'fulfilled') {
-    return { value: result.value, error: null };
-  }
-
-  return {
-    value: null,
-    error: result.reason instanceof Error ? result.reason : new Error('Unexpected lookup failure.')
-  };
-}
-
-function isNotFoundLookupError(error: Error | null): boolean {
-  if (!error) {
+function isNotFoundLookupError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
     return false;
   }
 
@@ -268,170 +257,39 @@ function isNotFoundLookupError(error: Error | null): boolean {
   return typeof status === 'number' && status === 404;
 }
 
-function buildMissingDataMessage(primaryIcao: string, missing: MissingDataPart[], alternateProvided: boolean): string {
-  const runwayMissing = missing.includes('runway');
-  const weatherMissing = missing.includes('weather');
-
-  if (runwayMissing && weatherMissing) {
-    return alternateProvided
-      ? `Runway and weather data are unavailable for ICAO ${primaryIcao}.`
-      : `Runway and weather data are unavailable for ICAO ${primaryIcao}. Enter an alternate ICAO code to source missing data.`;
-  }
-
-  if (runwayMissing) {
-    return alternateProvided
-      ? `Runway data is unavailable for ICAO ${primaryIcao}.`
-      : `Runway data is unavailable for ICAO ${primaryIcao}. Enter an alternate ICAO code to source runway data.`;
-  }
-
-  return alternateProvided
-    ? `Weather data is unavailable for ICAO ${primaryIcao}.`
-    : `Weather data is unavailable for ICAO ${primaryIcao}. Enter an alternate ICAO code to source weather data.`;
+function normalizeIcaoInput(value: string): string {
+  return value.trim().toUpperCase();
 }
 
-function buildAlternateFailureMessage(
-  primaryIcao: string,
-  alternateIcao: string,
-  missing: MissingDataPart[],
-  runwayError: Error | null,
-  weatherError: Error | null
-): string {
-  const runwayMissing = missing.includes('runway');
-  const weatherMissing = missing.includes('weather');
-
-  if (runwayMissing && weatherMissing) {
-    return `Runway and weather data are unavailable for ICAO ${primaryIcao} and alternate ICAO ${alternateIcao}.`;
+function blurActiveElement(): void {
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement) {
+    activeElement.blur();
   }
-
-  if (runwayMissing) {
-    const detail = runwayError ? ` ${runwayError.message}` : '';
-    return `Runway data is unavailable for ICAO ${primaryIcao} and alternate ICAO ${alternateIcao}.${detail}`;
-  }
-
-  const detail = weatherError ? ` ${weatherError.message}` : '';
-  return `Weather data is unavailable for ICAO ${primaryIcao} and alternate ICAO ${alternateIcao}.${detail}`;
 }
 
 function buildFallbackNotes(resolution: LookupResolution): string[] {
-  const notes: string[] = [];
-
-  if (resolution.runwaySourceIcao !== resolution.metar.icao && resolution.weatherSourceIcao !== resolution.airport.icao) {
-    notes.push(
-      `Using split data sources: runways from ${resolution.runwaySourceIcao} and METAR from ${resolution.weatherSourceIcao}.`
-    );
-    return notes;
+  if (resolution.runwaySourceIcao === resolution.weatherSourceIcao) {
+    return [];
   }
 
-  if (resolution.alternateIcao && resolution.runwaySourceIcao === resolution.alternateIcao) {
-    notes.push(`Runway data sourced from alternate ICAO ${resolution.alternateIcao}.`);
-  }
-
-  if (resolution.alternateIcao && resolution.weatherSourceIcao === resolution.alternateIcao) {
-    notes.push(`METAR data sourced from alternate ICAO ${resolution.alternateIcao}.`);
-  }
-
-  return notes;
+  return [
+    `Using split data sources: runways from ${resolution.runwaySourceIcao} and METAR from ${resolution.weatherSourceIcao}.`
+  ];
 }
 
-async function resolveLookupData(primaryInput: string, alternateInput: string): Promise<LookupResolution> {
-  const primaryIcao = primaryInput.trim().toUpperCase();
-  const alternateIcao = alternateInput.trim().toUpperCase() || null;
-
-  const [airportPrimaryResult, metarPrimaryResult] = await Promise.allSettled([
-    fetchAirportByIcao(primaryIcao),
-    fetchMetarByIcao(primaryIcao)
-  ]);
-
-  const airportPrimary = toSettledLookup(airportPrimaryResult);
-  const metarPrimary = toSettledLookup(metarPrimaryResult);
-
-  if (airportPrimary.error && !isNotFoundLookupError(airportPrimary.error)) {
-    throw airportPrimary.error;
-  }
-
-  if (metarPrimary.error && !isNotFoundLookupError(metarPrimary.error)) {
-    throw metarPrimary.error;
-  }
-
-  const missingFromPrimary: MissingDataPart[] = [];
-  if (!airportPrimary.value && isNotFoundLookupError(airportPrimary.error)) {
-    missingFromPrimary.push('runway');
-  }
-
-  if (!metarPrimary.value && isNotFoundLookupError(metarPrimary.error)) {
-    missingFromPrimary.push('weather');
-  }
-
-  if (missingFromPrimary.length > 0 && !alternateIcao) {
-    throw new Error(buildMissingDataMessage(primaryIcao, missingFromPrimary, false));
-  }
-
-  let airport = airportPrimary.value;
-  let metar = metarPrimary.value;
-  let runwaySourceIcao = primaryIcao;
-  let weatherSourceIcao = primaryIcao;
-  let airportAlternateError: Error | null = null;
-  let metarAlternateError: Error | null = null;
-
-  if (alternateIcao && missingFromPrimary.length > 0) {
-    const fallbackPromises: Array<Promise<AirportLookupResponse | MetarLookupResponse>> = [];
-
-    if (missingFromPrimary.includes('runway')) {
-      fallbackPromises.push(fetchAirportByIcao(alternateIcao));
-    }
-
-    if (missingFromPrimary.includes('weather')) {
-      fallbackPromises.push(fetchMetarByIcao(alternateIcao));
-    }
-
-    const fallbackResults = await Promise.allSettled(fallbackPromises);
-    let fallbackIndex = 0;
-
-    if (missingFromPrimary.includes('runway')) {
-      const result = fallbackResults[fallbackIndex];
-      fallbackIndex += 1;
-      if (result?.status === 'fulfilled') {
-        airport = result.value as AirportLookupResponse;
-        runwaySourceIcao = alternateIcao;
-      } else {
-        airportAlternateError =
-          result && result.status === 'rejected' && result.reason instanceof Error
-            ? result.reason
-            : new Error('Alternate runway lookup failed.');
-      }
-    }
-
-    if (missingFromPrimary.includes('weather')) {
-      const result = fallbackResults[fallbackIndex];
-      if (result?.status === 'fulfilled') {
-        metar = result.value as MetarLookupResponse;
-        weatherSourceIcao = alternateIcao;
-      } else {
-        metarAlternateError =
-          result && result.status === 'rejected' && result.reason instanceof Error
-            ? result.reason
-            : new Error('Alternate weather lookup failed.');
-      }
-    }
-  }
-
-  if (!airport || !metar) {
-    if (!alternateIcao) {
-      throw new Error(buildMissingDataMessage(primaryIcao, missingFromPrimary, false));
-    }
-
-    throw new Error(
-      buildAlternateFailureMessage(primaryIcao, alternateIcao, missingFromPrimary, airportAlternateError, metarAlternateError)
-    );
-  }
-
-  return {
-    airport,
-    metar,
-    runwaySourceIcao,
-    weatherSourceIcao,
-    alternateIcao
-  };
+function renderDetailsPanel(resolution: LookupResolution, evaluation: EvaluationResult): string {
+  return `
+    <details class="panel panel-subtle details-toggle">
+      <summary>View details</summary>
+      <div class="details-stack">
+        ${renderLookupSummary(resolution)}
+        ${renderRunwayTable(evaluation)}
+        ${renderCalculationInfo(evaluation)}
+        ${renderTechnicalDetails(resolution)}
+      </div>
+    </details>
+  `;
 }
 
 export function mountApp(root: HTMLElement): void {
@@ -458,17 +316,19 @@ export function mountApp(root: HTMLElement): void {
             required
           />
 
-          <label for="alternate-icao">Alternate ICAO code (optional)</label>
-          <input
-            id="alternate-icao"
-            name="alternateIcao"
-            type="text"
-            placeholder="Used only when runway or METAR data is missing"
-            autocomplete="off"
-            maxlength="4"
-            class="icao-input"
-          />
-          <p class="field-help">If data is missing for the primary airport, we will use this alternate code.</p>
+          <div id="alternate-group" class="alternate-group" hidden>
+            <label for="alternate-icao">Alternate METAR ICAO code</label>
+            <input
+              id="alternate-icao"
+              name="alternateIcao"
+              type="text"
+              placeholder="Example: KLGA"
+              autocomplete="off"
+              maxlength="4"
+              class="icao-input"
+            />
+            <p id="alternate-help" class="field-help"></p>
+          </div>
 
           <button type="submit">Lookup Airport and METAR</button>
           <p id="form-error" class="error-message" role="alert" aria-live="polite"></p>
@@ -481,49 +341,185 @@ export function mountApp(root: HTMLElement): void {
 
   const form = root.querySelector<HTMLFormElement>('#calculator-form');
   const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+  const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
   const alternateIcaoInput = root.querySelector<HTMLInputElement>('#alternate-icao');
+  const alternateHelp = root.querySelector<HTMLElement>('#alternate-help');
   const errorNode = root.querySelector<HTMLElement>('#form-error');
   const submitButton = root.querySelector<HTMLButtonElement>('button[type="submit"]');
   const bestSpotlightNode = root.querySelector<HTMLElement>('#best-runway-spotlight');
   const resultsNode = root.querySelector<HTMLElement>('#results');
 
-  if (!form || !icaoInput || !alternateIcaoInput || !errorNode || !submitButton || !bestSpotlightNode || !resultsNode) {
+  if (
+    !form ||
+    !icaoInput ||
+    !alternateGroup ||
+    !alternateIcaoInput ||
+    !alternateHelp ||
+    !errorNode ||
+    !submitButton ||
+    !bestSpotlightNode ||
+    !resultsNode
+  ) {
     throw new Error('App failed to initialize required form elements.');
   }
 
+  let lookupState: LookupState = {
+    stage: 'primary',
+    primaryAirport: null,
+    primaryIcao: ''
+  };
+
+  const setIdleSubmitLabel = () => {
+    submitButton.textContent =
+      lookupState.stage === 'alternate-metar' ? 'Lookup Alternate METAR' : 'Lookup Airport and METAR';
+  };
+
+  const setBusySubmitLabel = () => {
+    submitButton.textContent =
+      lookupState.stage === 'alternate-metar' ? 'Fetching alternate METAR...' : 'Fetching airport + METAR...';
+  };
+
+  const enterPrimaryStage = () => {
+    lookupState = {
+      stage: 'primary',
+      primaryAirport: null,
+      primaryIcao: ''
+    };
+
+    icaoInput.readOnly = false;
+    icaoInput.classList.remove('locked-input');
+
+    alternateGroup.hidden = true;
+    alternateIcaoInput.required = false;
+    alternateIcaoInput.value = '';
+    alternateHelp.textContent = '';
+
+    setIdleSubmitLabel();
+  };
+
+  const enterAlternateMetarStage = (primaryIcao: string, primaryAirport: AirportLookupResponse) => {
+    lookupState = {
+      stage: 'alternate-metar',
+      primaryAirport,
+      primaryIcao
+    };
+
+    icaoInput.readOnly = true;
+    icaoInput.classList.add('locked-input');
+
+    alternateGroup.hidden = false;
+    alternateIcaoInput.required = true;
+    alternateHelp.textContent = `No METAR is currently available for ICAO ${primaryIcao}. Enter an alternate ICAO code for METAR data.`;
+
+    setIdleSubmitLabel();
+  };
+
+  const renderLookupResult = (resolution: LookupResolution) => {
+    const parsedWind = toParsedWindFromLookup(resolution.metar);
+    const parserNotes =
+      parsedWind.directionType === 'variable'
+        ? [
+            `Variable winds reported at ${parsedWind.speedKt} kt${
+              parsedWind.gustKt !== null ? ` (gust ${parsedWind.gustKt} kt)` : ''
+            }.`
+          ]
+        : [];
+
+    const evaluation = evaluateRunways(
+      resolution.airport.runwayEnds,
+      parsedWind,
+      parserNotes.concat(buildFallbackNotes(resolution))
+    );
+
+    bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
+    resultsNode.innerHTML = renderDetailsPanel(resolution, evaluation);
+  };
+
+  const handlePrimaryLookupSubmit = async () => {
+    const primaryIcao = normalizeIcaoInput(icaoInput.value);
+    icaoInput.value = primaryIcao;
+
+    let airport: AirportLookupResponse;
+    try {
+      airport = await fetchAirportByIcao(primaryIcao);
+    } catch (error) {
+      if (isNotFoundLookupError(error)) {
+        enterPrimaryStage();
+        bestSpotlightNode.innerHTML = '';
+        resultsNode.innerHTML = '';
+        throw new Error(`We couldn't find airport ${primaryIcao}. Check the code and try again.`, {
+          cause: error
+        });
+      }
+
+      throw error;
+    }
+
+    let metar: MetarLookupResponse;
+    try {
+      metar = await fetchMetarByIcao(primaryIcao);
+    } catch (error) {
+      if (isNotFoundLookupError(error)) {
+        bestSpotlightNode.innerHTML = '';
+        resultsNode.innerHTML = '';
+        enterAlternateMetarStage(primaryIcao, airport);
+        errorNode.textContent = `No METAR is currently available for ICAO ${primaryIcao}. Enter an alternate ICAO code for METAR data.`;
+        return;
+      }
+
+      throw error;
+    }
+
+    enterPrimaryStage();
+    renderLookupResult({
+      airport,
+      metar,
+      runwaySourceIcao: primaryIcao,
+      weatherSourceIcao: primaryIcao
+    });
+  };
+
+  const handleAlternateMetarSubmit = async () => {
+    const alternateIcao = normalizeIcaoInput(alternateIcaoInput.value);
+    alternateIcaoInput.value = alternateIcao;
+
+    if (!lookupState.primaryAirport || !lookupState.primaryIcao) {
+      enterPrimaryStage();
+      throw new Error('Primary airport context is missing. Submit a primary ICAO code first.');
+    }
+
+    const metar = await fetchMetarByIcao(alternateIcao);
+
+    const resolution: LookupResolution = {
+      airport: lookupState.primaryAirport,
+      metar,
+      runwaySourceIcao: lookupState.primaryIcao,
+      weatherSourceIcao: metar.icao
+    };
+
+    enterPrimaryStage();
+    renderLookupResult(resolution);
+  };
+
+  setIdleSubmitLabel();
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    blurActiveElement();
+
     errorNode.textContent = '';
     submitButton.disabled = true;
-    submitButton.textContent = 'Fetching airport + METAR...';
+    setBusySubmitLabel();
     const startedAt = Date.now();
 
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const resolution = await resolveLookupData(icaoInput.value, alternateIcaoInput.value);
-      const parsedWind = toParsedWindFromLookup(resolution.metar);
-      const parserNotes =
-        parsedWind.directionType === 'variable'
-          ? [
-              `Variable winds reported at ${parsedWind.speedKt} kt${
-                parsedWind.gustKt !== null ? ` (gust ${parsedWind.gustKt} kt)` : ''
-              }.`
-            ]
-          : [];
 
-      const evaluation = evaluateRunways(
-        resolution.airport.runwayEnds,
-        parsedWind,
-        parserNotes.concat(buildFallbackNotes(resolution))
-      );
-
-      bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
-      resultsNode.innerHTML = [
-        renderLookupSummary(resolution),
-        renderRunwayTable(evaluation),
-        renderCalculationInfo(evaluation),
-        renderTechnicalDetails(resolution)
-      ].join('');
+      if (lookupState.stage === 'alternate-metar') {
+        await handleAlternateMetarSubmit();
+      } else {
+        await handlePrimaryLookupSubmit();
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
       errorNode.textContent = message;
@@ -537,7 +533,7 @@ export function mountApp(root: HTMLElement): void {
       }
 
       submitButton.disabled = false;
-      submitButton.textContent = 'Lookup Airport and METAR';
+      setIdleSubmitLabel();
     }
   });
 }
