@@ -12,8 +12,7 @@
     "preview": {
       "kv_namespaces": [
         {
-          "binding": "METAR_CACHE",
-          "id": "48cf343ef00147c79fcf841dcf8b850f"
+          "binding": "METAR_CACHE"
         }
       ]
     }
