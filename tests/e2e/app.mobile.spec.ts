@@ -183,6 +183,8 @@ test.describe('Runway Picker mobile preview UI', () => {
     await page.locator('#alternate-icao').fill('KLGA');
     await page.getByRole('button', { name: 'Lookup Alternate METAR' }).click();
 
+    await expect(page.getByText('Best runway:')).toBeVisible();
+    await page.locator('details.details-toggle summary').click();
     await expect(page.getByText('Weather airport: KLGA')).toBeVisible();
     await expect(page.getByText('Using split data sources: runways from KJFK and METAR from KLGA.')).toBeVisible();
     await expect(page.locator('#alternate-group')).toBeHidden();
