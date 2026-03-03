@@ -5,6 +5,7 @@ class MemoryKv {
   private values = new Map<string, unknown>();
 
   async get(key: string, _type: 'json'): Promise<unknown> {
+    void _type;
     return this.values.get(key) ?? null;
   }
 
