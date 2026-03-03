@@ -1,4 +1,5 @@
 const AVIATION_WEATHER_METAR_URL = 'https://aviationweather.gov/api/data/metar';
+const AVIATION_WEATHER_STATION_INFO_URL = 'https://aviationweather.gov/api/data/stationinfo';
 const CACHE_TTL_SECONDS = 1800;
 const USER_AGENT = 'benvon-runway-picker';
 
@@ -59,6 +60,29 @@ function buildUpstreamUrl(icao: string): string {
   url.searchParams.set('ids', icao);
   url.searchParams.set('format', 'raw');
   return url.toString();
+}
+
+function buildStationInfoUrl(icao: string): string {
+  const url = new URL(AVIATION_WEATHER_STATION_INFO_URL);
+  url.searchParams.set('ids', icao);
+  url.searchParams.set('format', 'json');
+  return url.toString();
+}
+
+async function stationExistsForIcao(icao: string): Promise<boolean> {
+  const response = await fetch(buildStationInfoUrl(icao), {
+    headers: {
+      'User-Agent': USER_AGENT,
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new MetarWorkerError('Unable to validate ICAO code with weather provider.', 502);
+  }
+
+  const payload = (await response.json()) as unknown;
+  return Array.isArray(payload) && payload.length > 0;
 }
 
 function buildJsonResponse(payload: unknown, status: number, cacheState?: 'HIT' | 'MISS'): Response {
@@ -139,7 +163,18 @@ export async function handleMetarRequest(request: Request, env: MetarWorkerEnv):
     const upstreamBody = await upstreamResponse.text();
     const metarRaw = extractMetarRaw(upstreamBody);
     if (!metarRaw) {
-      throw new MetarWorkerError(`No METAR found for ICAO ${icao}.`, 404);
+      const stationExists = await stationExistsForIcao(icao);
+      if (!stationExists) {
+        throw new MetarWorkerError(
+          `ICAO code ${icao} was not found. Check the code and try again.`,
+          404
+        );
+      }
+
+      throw new MetarWorkerError(
+        `No METAR is currently available for ICAO ${icao}. Try again later.`,
+        404
+      );
     }
 
     const payload: MetarCachePayload = {

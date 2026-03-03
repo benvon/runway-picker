@@ -43,4 +43,44 @@ describe('metar worker helpers', () => {
     expect(response.status).toBe(400);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
+
+  it('returns user-friendly message when ICAO is not found by provider', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('', { status: 200 }))
+        .mockResolvedValueOnce(Response.json([]))
+    );
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=ZZZZ'), {
+      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() }
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'ICAO code ZZZZ was not found. Check the code and try again.'
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it('returns user-friendly message when METAR is unavailable for valid ICAO', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('', { status: 200 }))
+        .mockResolvedValueOnce(Response.json([{ icaoId: 'KJFK' }]))
+    );
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KJFK'), {
+      METAR_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn() }
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'No METAR is currently available for ICAO KJFK. Try again later.'
+    });
+    vi.unstubAllGlobals();
+  });
 });

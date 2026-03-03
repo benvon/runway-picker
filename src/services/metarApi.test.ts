@@ -35,4 +35,44 @@ describe('metarApi service', () => {
     expect(payload.cacheState).toBe('cached');
     vi.unstubAllGlobals();
   });
+
+  it('surfaces user-friendly message for unknown ICAO', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            error: 'ICAO code ZZZZ was not found. Check the code and try again.'
+          },
+          { status: 404 }
+        )
+      )
+    );
+
+    await expect(fetchMetarByIcao('ZZZZ')).rejects.toMatchObject({
+      message: 'ICAO code ZZZZ was not found. Check the code and try again.',
+      status: 404
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it('surfaces user-friendly message for missing METAR on valid ICAO', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            error: 'No METAR is currently available for ICAO KJFK. Try again later.'
+          },
+          { status: 404 }
+        )
+      )
+    );
+
+    await expect(fetchMetarByIcao('KJFK')).rejects.toMatchObject({
+      message: 'No METAR is currently available for ICAO KJFK. Try again later.',
+      status: 404
+    });
+    vi.unstubAllGlobals();
+  });
 });
