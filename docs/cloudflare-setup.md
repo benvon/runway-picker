@@ -19,18 +19,19 @@ This guide matches the repository workflows and runtime shape.
 npx wrangler kv namespace create METAR_CACHE
 npx wrangler kv namespace create METAR_CACHE --preview
 ```
-2. Copy the returned IDs into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
+2. Copy the returned production ID into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `kv_namespaces[].id`
-   - `env.preview.kv_namespaces[].id`
-3. Deploy the worker:
+3. Keep `env.preview.kv_namespaces[]` binding-only in repo config (`{ "binding": "METAR_CACHE" }`).
+4. Save the preview KV namespace ID as GitHub variable `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (used by preview deploy workflow to generate runtime config).
+5. Deploy the worker:
 ```bash
 npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc
 ```
-4. Deploy the preview worker environment:
+6. Deploy the preview worker environment:
 ```bash
 npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview
 ```
-5. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
+7. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
 
 Worker behavior:
 - Upstream source: `https://aviationweather.gov/api/data/metar`
@@ -45,8 +46,8 @@ Worker behavior:
   - `compatibility_date: 2026-03-02`
   - `services` binding:
     - `METAR_API` -> `runway-picker-metar-api`
-  - `env.preview.services` binding:
-    - `METAR_API` -> `runway-picker-metar-api-preview`
+- Preview service binding is generated in CI as:
+  - `METAR_API` -> `${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}-preview`
 
 ## 5) Create API token and account settings
 In Cloudflare:
@@ -57,8 +58,10 @@ In GitHub repo settings:
 - Secrets:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
-- Variable:
+- Variables:
   - `CLOUDFLARE_PROJECT_NAME` (exact Pages project name)
+  - `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (preview KV namespace ID from `wrangler kv namespace create ... --preview`)
+  - Optional `CLOUDFLARE_METAR_WORKER_NAME` (defaults to `runway-picker-metar-api`)
 
 ## 6) Validate locally
 Run:
@@ -78,8 +81,10 @@ Open local URL and verify:
 - Open a PR to `main`.
 - `CI` workflow runs typecheck/lint/test/build.
 - `Deploy Preview` workflow:
-  - deploys Worker env `preview`
-  - deploys Pages preview
+  - generates temporary preview wrangler configs from GitHub variables
+  - deploys Worker env `preview` with preview KV namespace ID from `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID`
+  - deploys Pages preview for the PR branch ref (`github.event.pull_request.head.ref`)
+  - binds `METAR_API` to `${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}-preview`
   - comments preview URL on the PR
 
 ## 8) Bootstrap release baseline

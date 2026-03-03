@@ -69,6 +69,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+      CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID: ${{ vars.CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID }}
+      CLOUDFLARE_METAR_WORKER_NAME: ${{ vars.CLOUDFLARE_METAR_WORKER_NAME }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,8 +86,8 @@ jobs:
       - name: Validate Cloudflare configuration
         shell: bash
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
-            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_PROJECT_NAME."
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ] || [ -z "$CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID" ]; then
+            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_PROJECT_NAME, and CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID."
             exit 1
           fi
 
@@ -98,12 +100,61 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Generate preview deployment Wrangler configs
+        id: preview-config
+        shell: bash
+        run: |
+          worker_name="${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}"
+          preview_worker_config="workers/metar-proxy/wrangler.preview.generated.json"
+          preview_pages_config="wrangler.preview.generated.json"
+
+          PREVIEW_WORKER_CONFIG="$preview_worker_config" \
+          PREVIEW_PAGES_CONFIG="$preview_pages_config" \
+          METAR_WORKER_NAME="$worker_name" \
+          METAR_CACHE_PREVIEW_NAMESPACE_ID="$CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID" \
+          node <<'EOF'
+          const fs = require('node:fs');
+
+          const workerConfig = JSON.parse(
+            fs.readFileSync('workers/metar-proxy/wrangler.jsonc', 'utf8')
+          );
+          workerConfig.env = workerConfig.env ?? {};
+          workerConfig.env.preview = workerConfig.env.preview ?? {};
+          workerConfig.env.preview.kv_namespaces = [
+            {
+              binding: 'METAR_CACHE',
+              id: process.env.METAR_CACHE_PREVIEW_NAMESPACE_ID
+            }
+          ];
+          fs.writeFileSync(
+            process.env.PREVIEW_WORKER_CONFIG,
+            `${JSON.stringify(workerConfig, null, 2)}\n`
+          );
+
+          const pagesConfig = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
+          pagesConfig.env = pagesConfig.env ?? {};
+          pagesConfig.env.preview = pagesConfig.env.preview ?? {};
+          pagesConfig.env.preview.services = [
+            {
+              binding: 'METAR_API',
+              service: `${process.env.METAR_WORKER_NAME}-preview`
+            }
+          ];
+          fs.writeFileSync(
+            process.env.PREVIEW_PAGES_CONFIG,
+            `${JSON.stringify(pagesConfig, null, 2)}\n`
+          );
+          EOF
+
+          echo "preview_worker_config=$preview_worker_config" >> "$GITHUB_OUTPUT"
+          echo "preview_pages_config=$preview_pages_config" >> "$GITHUB_OUTPUT"
+
       - name: Deploy METAR Worker preview environment
         shell: bash
         run: |
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
-            if npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview; then
+            if npx wrangler deploy --config "${{ steps.preview-config.outputs.preview_worker_config }}" --env preview; then
               exit 0
             fi
 
@@ -121,13 +172,13 @@ jobs:
         id: deploy
         shell: bash
         run: |
-          alias_name="pr-${{ github.event.pull_request.number }}"
+          cp "${{ steps.preview-config.outputs.preview_pages_config }}" wrangler.jsonc
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
             set -o pipefail
             if npx wrangler pages deploy dist \
               --project-name "$CLOUDFLARE_PROJECT_NAME" \
-              --branch "$alias_name" \
+              --branch "${{ github.event.pull_request.head.ref }}" \
               --commit-hash "${{ github.event.pull_request.head.sha }}" \
               | tee deploy-output.txt; then
               break
