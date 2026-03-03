@@ -407,6 +407,10 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
 
     throw new CacheEngineError('Unexpected cache refresh failure.', 500);
   } finally {
-    await releaseSingleFlightLease(env.CACHE_COORDINATOR, lease);
+    try {
+      await releaseSingleFlightLease(env.CACHE_COORDINATOR, lease);
+    } catch {
+      // Best-effort cleanup; lock auto-expires. Do not replace successful result.
+    }
   }
 }
