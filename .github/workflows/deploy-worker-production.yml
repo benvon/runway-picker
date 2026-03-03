@@ -66,6 +66,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      AIRPORT_IO_TOKEN: ${{ secrets.AIRPORT_IO_TOKEN }}
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@v4
@@ -79,13 +80,18 @@ jobs:
       - name: Validate Cloudflare configuration
         shell: bash
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID."
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$AIRPORT_IO_TOKEN" ]; then
+            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and AIRPORT_IO_TOKEN."
             exit 1
           fi
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Set AirportDB token secret
+        shell: bash
+        run: |
+          printf '%s' "$AIRPORT_IO_TOKEN" | npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangler.jsonc
 
       - name: Deploy METAR Worker
         shell: bash

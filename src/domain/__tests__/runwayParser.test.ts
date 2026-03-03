@@ -3,17 +3,17 @@ import { parseRunwayEnd, parseRunwayEndsInput, RunwayValidationError } from '../
 
 describe('runwayParser', () => {
   it('parses runway with suffix and heading', () => {
-    expect(parseRunwayEnd('18L')).toEqual({ id: '18L', headingDegMag: 180 });
+    expect(parseRunwayEnd('18L')).toEqual({ id: '18L', headingDegMag: 180, isClosed: false });
   });
 
   it('normalizes single digit runway numbers', () => {
-    expect(parseRunwayEnd('9')).toEqual({ id: '09', headingDegMag: 90 });
+    expect(parseRunwayEnd('9')).toEqual({ id: '09', headingDegMag: 90, isClosed: false });
   });
 
   it('deduplicates runway input list', () => {
     expect(parseRunwayEndsInput('09, 27 09')).toEqual([
-      { id: '09', headingDegMag: 90 },
-      { id: '27', headingDegMag: 270 }
+      { id: '09', headingDegMag: 90, isClosed: false },
+      { id: '27', headingDegMag: 270, isClosed: false }
     ]);
   });
 

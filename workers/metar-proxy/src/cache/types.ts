@@ -36,6 +36,7 @@ export interface CacheObservability {
 
 export interface CacheAdapterContext {
   request: Request;
+  env: CacheEngineEnv;
 }
 
 export interface CacheResourceAdapter<TInput, TUpstream, TData> {
@@ -83,6 +84,7 @@ export interface KvNamespaceLike {
 export interface CacheEngineEnv {
   METAR_CACHE: KvNamespaceLike;
   CACHE_COORDINATOR?: DurableObjectNamespaceLike;
+  AIRPORTDB_API_TOKEN?: string;
 }
 
 export interface EdgeCacheLike {

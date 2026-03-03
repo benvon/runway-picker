@@ -38,11 +38,13 @@ export interface MetarLookupWind {
 
 export class MetarLookupError extends Error {
   status: number;
+  debug?: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, debug?: unknown) {
     super(message);
     this.name = 'MetarLookupError';
     this.status = status;
+    this.debug = debug;
   }
 }
 
@@ -172,15 +174,17 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
 
   if (!response.ok) {
     let message = `Unable to load METAR for ${icao}.`;
+    let debug: unknown;
 
     try {
-      const errorPayload = (await response.json()) as { error?: string; message?: string };
+      const errorPayload = (await response.json()) as { error?: string; message?: string; debug?: unknown };
       message = errorPayload.error ?? errorPayload.message ?? message;
+      debug = errorPayload.debug;
     } catch {
       // Keep default message when body isn't JSON.
     }
 
-    throw new MetarLookupError(message, response.status);
+    throw new MetarLookupError(message, response.status, debug);
   }
 
   const payload = (await response.json()) as Omit<MetarLookupResponse, 'cache'> & {

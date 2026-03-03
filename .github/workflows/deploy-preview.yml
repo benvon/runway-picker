@@ -68,6 +68,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      AIRPORT_IO_TOKEN: ${{ secrets.AIRPORT_IO_TOKEN }}
       CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
       CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID: ${{ vars.CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID }}
       CLOUDFLARE_METAR_WORKER_NAME: ${{ vars.CLOUDFLARE_METAR_WORKER_NAME }}
@@ -86,8 +87,8 @@ jobs:
       - name: Validate Cloudflare configuration
         shell: bash
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ] || [ -z "$CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID" ]; then
-            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_PROJECT_NAME, and CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID."
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ] || [ -z "$CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID" ] || [ -z "$AIRPORT_IO_TOKEN" ]; then
+            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_PROJECT_NAME, CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID, and AIRPORT_IO_TOKEN."
             exit 1
           fi
 
@@ -152,6 +153,8 @@ jobs:
       - name: Deploy METAR Worker preview environment
         shell: bash
         run: |
+          printf '%s' "$AIRPORT_IO_TOKEN" | npx wrangler secret put AIRPORTDB_API_TOKEN --config "${{ steps.preview-config.outputs.preview_worker_config }}" --env preview
+
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
             if npx wrangler deploy --config "${{ steps.preview-config.outputs.preview_worker_config }}" --env preview; then

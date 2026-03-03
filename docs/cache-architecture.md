@@ -59,7 +59,7 @@ Registered adapters live in:
 Current adapters:
 
 - `metar`
-- `airport` (stub for upcoming implementation)
+- `airport` (AirportDB-backed; daily-refresh policy)
 
 ## Adding a new resource
 

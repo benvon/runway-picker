@@ -12,6 +12,7 @@ This guide matches the repository workflows and runtime shape.
 - This repo uses `functions/` for Pages Functions.
 - `functions/api/health.ts` provides a starter API endpoint at `/api/health`.
 - `functions/api/metar.ts` is a proxy endpoint to the dedicated Worker API at `/api/metar?icao=KJFK`.
+- `functions/api/airport.ts` is a proxy endpoint to the dedicated Worker API at `/api/airport?icao=KJFK`.
 
 ## 3) Provision and deploy the METAR Worker
 1. Create a KV namespace for shared METAR cache:
@@ -39,9 +40,16 @@ npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview
 Worker behavior:
 - Upstream source: `https://aviationweather.gov/api/data/metar`
 - Upstream user agent: `benvon-runway-picker`
+- Airport source: `https://airportdb.io/api/v1/airport/{ICAO}?apiToken={TOKEN}`
 - Shared cache stores: edge cache + Worker KV (`METAR_CACHE`)
 - Single-flight refresh coordinator: Durable Object (`CACHE_COORDINATOR`)
 - Cache TTL: 30 minutes (with stale windows configured in adapter policy)
+- Airport cache TTL: 24 hours (with stale windows configured in adapter policy)
+- Configure the AirportDB token in Worker secrets (never in client code):
+```bash
+npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangler.jsonc
+npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangler.jsonc --env preview
+```
 
 ## 4) Configure Wrangler
 - `wrangler.jsonc` already contains:
@@ -62,6 +70,7 @@ In GitHub repo settings:
 - Secrets:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
+  - `AIRPORT_IO_TOKEN` (CI maps this into Worker secret key `AIRPORTDB_API_TOKEN`)
 - Variables:
   - `CLOUDFLARE_PROJECT_NAME` (exact Pages project name)
   - `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (preview KV namespace ID from `wrangler kv namespace create ... --preview`)
@@ -79,6 +88,7 @@ Open local URL and verify:
 - UI renders
 - calculator works
 - `/api/health` returns JSON
+- `/api/airport?icao=KJFK` returns airport JSON with runway ends + `cache` metadata and `X-Runway-Cache-Status`
 - `/api/metar?icao=KJFK` returns METAR JSON with `cache` metadata and `X-Runway-Cache-Status`
 
 ## 7) CI and preview deployment

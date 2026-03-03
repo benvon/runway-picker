@@ -219,6 +219,18 @@ th {
   margin-bottom: 0.6rem;
 }
 
+.debug-json {
+  margin: 0;
+  padding: 0.6rem;
+  border: 2px solid var(--border);
+  background: #fff;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.86rem;
+}
+
 @media (min-width: 860px) {
   #app {
     padding: 1.5rem;
