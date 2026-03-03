@@ -212,8 +212,8 @@ export function mountApp(root: HTMLElement): void {
 
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const metarLookup = await fetchMetarByIcao(icaoInput.value);
       const runways = parseRunwayEndsInput(runwaysInput.value);
+      const metarLookup = await fetchMetarByIcao(icaoInput.value);
       const parsedWind = parseWindInput(metarLookup.metarRaw);
       const evaluation = evaluateRunways(runways, parsedWind.wind, parsedWind.notes);
 
