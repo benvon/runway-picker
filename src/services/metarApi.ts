@@ -36,14 +36,27 @@ export interface MetarLookupWind {
   gustKt: number | null;
 }
 
+export type MetarLookupErrorCode =
+  | 'INVALID_ICAO'
+  | 'PROVIDER_ERROR'
+  | 'PROVIDER_VALIDATION_ERROR'
+  | 'ICAO_NOT_FOUND'
+  | 'METAR_UNAVAILABLE'
+  | 'WIND_PARSE_ERROR'
+  | 'CACHE_ERROR'
+  | 'UNEXPECTED'
+  | 'UNKNOWN';
+
 export class MetarLookupError extends Error {
   status: number;
+  code: MetarLookupErrorCode;
   debug?: unknown;
 
-  constructor(message: string, status: number, debug?: unknown) {
+  constructor(message: string, status: number, debug?: unknown, code: MetarLookupErrorCode = 'UNKNOWN') {
     super(message);
     this.name = 'MetarLookupError';
     this.status = status;
+    this.code = code;
     this.debug = debug;
   }
 }
@@ -135,7 +148,7 @@ function normalizeCacheMetadata(
 
 function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
   if (!windCandidate || typeof windCandidate !== 'object') {
-    throw new MetarLookupError('METAR response is missing structured wind data.', 502);
+    throw new MetarLookupError('METAR response is missing structured wind data.', 502, undefined, 'UNEXPECTED');
   }
 
   const candidate = windCandidate as Partial<MetarLookupWind>;
@@ -146,7 +159,7 @@ function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
       candidate.directionType !== 'calm') ||
     typeof candidate.speedKt !== 'number'
   ) {
-    throw new MetarLookupError('METAR response contains invalid structured wind data.', 502);
+    throw new MetarLookupError('METAR response contains invalid structured wind data.', 502, undefined, 'UNEXPECTED');
   }
 
   return {
@@ -175,16 +188,25 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
   if (!response.ok) {
     let message = `Unable to load METAR for ${icao}.`;
     let debug: unknown;
+    let code: MetarLookupErrorCode = 'UNKNOWN';
 
     try {
-      const errorPayload = (await response.json()) as { error?: string; message?: string; debug?: unknown };
+      const errorPayload = (await response.json()) as {
+        error?: string;
+        message?: string;
+        debug?: unknown;
+        code?: unknown;
+      };
       message = errorPayload.error ?? errorPayload.message ?? message;
       debug = errorPayload.debug;
+      if (typeof errorPayload.code === 'string') {
+        code = errorPayload.code as MetarLookupErrorCode;
+      }
     } catch {
       // Keep default message when body isn't JSON.
     }
 
-    throw new MetarLookupError(message, response.status, debug);
+    throw new MetarLookupError(message, response.status, debug, code);
   }
 
   const payload = (await response.json()) as Omit<MetarLookupResponse, 'cache'> & {

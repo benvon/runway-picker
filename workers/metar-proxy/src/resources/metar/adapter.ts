@@ -26,14 +26,25 @@ export interface MetarResourceWind {
   gustKt: number | null;
 }
 
+export type MetarWorkerErrorCode =
+  | 'INVALID_ICAO'
+  | 'PROVIDER_ERROR'
+  | 'PROVIDER_VALIDATION_ERROR'
+  | 'ICAO_NOT_FOUND'
+  | 'METAR_UNAVAILABLE'
+  | 'WIND_PARSE_ERROR'
+  | 'UNEXPECTED';
+
 export class MetarWorkerError extends Error {
   status: number;
+  code: MetarWorkerErrorCode;
   debug?: Record<string, unknown>;
 
-  constructor(message: string, status: number, debug?: Record<string, unknown>) {
+  constructor(message: string, status: number, code: MetarWorkerErrorCode, debug?: Record<string, unknown>) {
     super(message);
     this.name = 'MetarWorkerError';
     this.status = status;
+    this.code = code;
     this.debug = debug;
   }
 }
@@ -41,7 +52,7 @@ export class MetarWorkerError extends Error {
 export function normalizeIcao(value: string): string {
   const normalized = value.trim().toUpperCase();
   if (!/^[A-Z0-9]{4}$/.test(normalized)) {
-    throw new MetarWorkerError('Invalid ICAO code. Expected 4 alphanumeric characters.', 400);
+    throw new MetarWorkerError('Invalid ICAO code. Expected 4 alphanumeric characters.', 400, 'INVALID_ICAO');
   }
 
   return normalized;
@@ -89,7 +100,7 @@ async function stationExistsForIcao(icao: string): Promise<boolean> {
   });
 
   if (!response.ok) {
-    throw new MetarWorkerError('Unable to validate ICAO code with weather provider.', 502);
+    throw new MetarWorkerError('Unable to validate ICAO code with weather provider.', 502, 'PROVIDER_VALIDATION_ERROR');
   }
 
   const payload = (await response.json()) as unknown;
@@ -382,7 +393,7 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
     });
 
     if (!response.ok) {
-      throw new MetarWorkerError(`METAR provider returned status ${response.status}.`, 502);
+      throw new MetarWorkerError(`METAR provider returned status ${response.status}.`, 502, 'PROVIDER_ERROR');
     }
 
     return response.json();
@@ -393,15 +404,23 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
     if (!report) {
       const stationExists = await stationExistsForIcao(icao);
       if (!stationExists) {
-        throw new MetarWorkerError(`ICAO code ${icao} was not found. Check the code and try again.`, 404);
+        throw new MetarWorkerError(`ICAO code ${icao} was not found. Check the code and try again.`, 404, 'ICAO_NOT_FOUND');
       }
 
-      throw new MetarWorkerError(`No METAR is currently available for ICAO ${icao}. Try again later.`, 404);
+      throw new MetarWorkerError(
+        `No METAR is currently available for ICAO ${icao}. Try again later.`,
+        404,
+        'METAR_UNAVAILABLE'
+      );
     }
 
     const metarRaw = extractMetarRawFromReport(report);
     if (!metarRaw) {
-      throw new MetarWorkerError(`No METAR is currently available for ICAO ${icao}. Try again later.`, 404);
+      throw new MetarWorkerError(
+        `No METAR is currently available for ICAO ${icao}. Try again later.`,
+        404,
+        'METAR_UNAVAILABLE'
+      );
     }
 
     const wind = parseWind(report);
@@ -409,6 +428,7 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
       throw new MetarWorkerError(
         `Unable to parse wind data from METAR provider for ICAO ${icao}.`,
         502,
+        'WIND_PARSE_ERROR',
         buildWindDebugInfo(report)
       );
     }

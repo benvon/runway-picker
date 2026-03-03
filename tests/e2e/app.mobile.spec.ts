@@ -153,7 +153,8 @@ test.describe('Runway Picker mobile preview UI', () => {
         KJFK: {
           status: 404,
           body: {
-            error: 'No METAR is currently available for ICAO KJFK. Try again later.'
+            error: 'No METAR is currently available for ICAO KJFK. Try again later.',
+            code: 'METAR_UNAVAILABLE'
           }
         },
         KLGA: {

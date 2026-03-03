@@ -127,7 +127,8 @@ describe('metarApi service', () => {
       vi.fn().mockResolvedValue(
         Response.json(
           {
-            error: 'ICAO code ZZZZ was not found. Check the code and try again.'
+            error: 'ICAO code ZZZZ was not found. Check the code and try again.',
+            code: 'ICAO_NOT_FOUND'
           },
           { status: 404 }
         )
@@ -136,7 +137,8 @@ describe('metarApi service', () => {
 
     await expect(fetchMetarByIcao('ZZZZ')).rejects.toMatchObject({
       message: 'ICAO code ZZZZ was not found. Check the code and try again.',
-      status: 404
+      status: 404,
+      code: 'ICAO_NOT_FOUND'
     });
   });
 
@@ -146,7 +148,8 @@ describe('metarApi service', () => {
       vi.fn().mockResolvedValue(
         Response.json(
           {
-            error: 'No METAR is currently available for ICAO KJFK. Try again later.'
+            error: 'No METAR is currently available for ICAO KJFK. Try again later.',
+            code: 'METAR_UNAVAILABLE'
           },
           { status: 404 }
         )
@@ -155,7 +158,8 @@ describe('metarApi service', () => {
 
     await expect(fetchMetarByIcao('kjfk')).rejects.toMatchObject({
       message: 'No METAR is currently available for ICAO KJFK. Try again later.',
-      status: 404
+      status: 404,
+      code: 'METAR_UNAVAILABLE'
     });
     expect(fetch).toHaveBeenCalledWith('/api/metar?icao=KJFK', {
       method: 'GET',
@@ -171,6 +175,7 @@ describe('metarApi service', () => {
         Response.json(
           {
             error: 'Unable to parse wind data from METAR provider for ICAO KJVL.',
+            code: 'WIND_PARSE_ERROR',
             debug: {
               rawObPresent: true,
               rawWindToken: null
@@ -184,6 +189,7 @@ describe('metarApi service', () => {
     await expect(fetchMetarByIcao('KJVL')).rejects.toMatchObject({
       status: 502,
       message: 'Unable to parse wind data from METAR provider for ICAO KJVL.',
+      code: 'WIND_PARSE_ERROR',
       debug: {
         rawObPresent: true,
         rawWindToken: null

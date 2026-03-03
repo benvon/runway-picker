@@ -263,7 +263,8 @@ describe('app integration', () => {
         return Promise.resolve(
           Response.json(
             {
-              error: 'No METAR is currently available for ICAO KJFK. Try again later.'
+              error: 'No METAR is currently available for ICAO KJFK. Try again later.',
+              code: 'METAR_UNAVAILABLE'
             },
             { status: 404 }
           )
@@ -332,7 +333,7 @@ describe('app integration', () => {
     });
   });
 
-  it('reveals alternate METAR flow when primary METAR returns unexpected loader error', async () => {
+  it('reveals alternate METAR flow only when METAR API returns fallback code', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -345,9 +346,10 @@ describe('app integration', () => {
         return Promise.resolve(
           Response.json(
             {
-              error: 'Unexpected error while loading METAR.'
+              error: 'No METAR is currently available for ICAO KDKB. Try again later.',
+              code: 'METAR_UNAVAILABLE'
             },
-            { status: 500 }
+            { status: 404 }
           )
         );
       }
@@ -401,6 +403,54 @@ describe('app integration', () => {
 
     await waitFor(() => (root.textContent?.includes('Weather airport: KORD') ?? false));
     expect(root.textContent).toContain('Using split data sources: runways from KDKB and METAR from KORD.');
+  });
+
+  it('does not reveal alternate METAR flow for generic METAR errors without fallback code', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KDKB') {
+        return Promise.resolve(Response.json(airportPayload('KDKB')));
+      }
+
+      if (url === '/api/metar?icao=KDKB') {
+        return Promise.resolve(
+          Response.json(
+            {
+              error: 'Unexpected error while loading METAR.',
+              code: 'UNEXPECTED'
+            },
+            { status: 500 }
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !alternateGroup || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KDKB';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() => (root.textContent?.includes('Unexpected error while loading METAR.') ?? false));
+
+    expect(root.textContent).toContain('Unexpected error while loading METAR.');
+    expect(alternateGroup.hidden).toBe(true);
   });
 
   it('shows friendly airport-not-found message and does not reveal alternate flow', async () => {

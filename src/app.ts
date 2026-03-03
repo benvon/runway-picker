@@ -258,19 +258,11 @@ function isNotFoundLookupError(error: unknown): boolean {
 }
 
 function shouldPromptAlternateMetar(error: unknown): boolean {
-  if (isNotFoundLookupError(error)) {
-    return true;
-  }
-
-  if (!(error instanceof Error)) {
+  if (!(error instanceof MetarLookupError)) {
     return false;
   }
 
-  const normalizedMessage = error.message.trim().toLowerCase();
-  return (
-    normalizedMessage.includes('no metar is currently available') ||
-    normalizedMessage === 'unexpected error while loading metar.'
-  );
+  return error.code === 'METAR_UNAVAILABLE' || error.code === 'ICAO_NOT_FOUND';
 }
 
 function normalizeIcaoInput(value: string): string {

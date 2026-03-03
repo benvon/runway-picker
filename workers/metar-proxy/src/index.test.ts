@@ -181,6 +181,9 @@ describe('metar worker', () => {
 
     expect(response.status).toBe(400);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'INVALID_ICAO'
+    });
   });
 
   it('fetches from upstream on miss then returns cached on repeated request', async () => {
@@ -237,7 +240,8 @@ describe('metar worker', () => {
 
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
-      error: 'METAR provider returned status 503.'
+      error: 'METAR provider returned status 503.',
+      code: 'PROVIDER_ERROR'
     });
   });
 
@@ -261,6 +265,7 @@ describe('metar worker', () => {
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: 'Unable to parse wind data from METAR provider for ICAO KABC.',
+      code: 'WIND_PARSE_ERROR',
       debug: {
         rawObPresent: true
       }
@@ -282,7 +287,28 @@ describe('metar worker', () => {
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({
-      error: 'ICAO code ZZZZ was not found. Check the code and try again.'
+      error: 'ICAO code ZZZZ was not found. Check the code and try again.',
+      code: 'ICAO_NOT_FOUND'
+    });
+  });
+
+  it('returns METAR_UNAVAILABLE code when station exists but no METAR report is present', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(Response.json([]))
+        .mockResolvedValueOnce(Response.json([{ icaoId: 'KDKB' }]))
+    );
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KDKB'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'No METAR is currently available for ICAO KDKB. Try again later.',
+      code: 'METAR_UNAVAILABLE'
     });
   });
 });
