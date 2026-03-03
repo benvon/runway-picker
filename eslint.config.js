@@ -5,11 +5,14 @@ import tsPlugin from '@typescript-eslint/eslint-plugin';
 export default [
   js.configs.recommended,
   {
-    files: ['scripts/**/*.js', '*.config.js'],
+    files: ['scripts/**/*.{js,mjs}', '*.config.js'],
     languageOptions: {
       globals: {
         process: 'readonly',
-        console: 'readonly'
+        console: 'readonly',
+        setTimeout: 'readonly',
+        fetch: 'readonly',
+        URL: 'readonly'
       }
     }
   },

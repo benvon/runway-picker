@@ -88,6 +88,7 @@ Open local URL and verify:
   - generates temporary preview wrangler configs from GitHub variables
   - deploys Worker env `preview` with preview KV namespace ID from `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID`
   - deploys Pages preview for the PR branch ref (`github.event.pull_request.head.ref`)
+  - runs preview smoke tests against `/api/metar` to verify cache metadata contract and repeated-request cache reuse
   - binds `METAR_API` to `${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}-preview`
   - comments preview URL on the PR
 

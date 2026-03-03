@@ -202,6 +202,13 @@ jobs:
 
           echo "preview_url=$preview_url" >> "$GITHUB_OUTPUT"
 
+      - name: Smoke test preview cache behavior
+        shell: bash
+        env:
+          PREVIEW_URL: ${{ steps.deploy.outputs.preview_url }}
+        run: |
+          node scripts/verify-preview-cache.mjs "$PREVIEW_URL"
+
       - name: Post or update PR comment
         uses: actions/github-script@v7
         env:
