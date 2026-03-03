@@ -7,16 +7,5 @@
       "binding": "METAR_API",
       "service": "runway-picker-metar-api"
     }
-  ],
-  "env": {
-    "preview": {
-      "services": [
-        {
-          "binding": "METAR_API",
-          "service": "runway-picker-metar-api",
-          "environment": "preview"
-        }
-      ]
-    }
-  }
+  ]
 }

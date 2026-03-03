@@ -50,7 +50,7 @@ See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
   - `release/*` => major
   - `feature/*` => minor
   - other => patch
-- `Deploy Preview`: deploy Worker preview env (managed preview KV binding), deploy Pages preview from PR branch ref with env-aware service binding, and comment URL
+- `Deploy Preview`: generate preview-specific Wrangler config from GitHub vars, deploy Worker preview env, deploy Pages preview from PR branch ref, and comment URL
 - `Deploy Production`: deploy on pushed tags (`v*.*.*`)
 - `Deploy METAR Worker Production`: deploy METAR Worker on pushed tags (`v*.*.*`)
 
