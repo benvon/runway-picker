@@ -11,6 +11,13 @@ describe('resource adapters', () => {
       {
         icao: 'KJFK',
         metarRaw: 'METAR KJFK 021953Z 11010KT 10SM FEW020 08/03 A3012 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          speedKt: 10,
+          gustKt: null
+        },
         source: 'aviationweather',
         fetchedAt: '2026-03-03T12:00:00.000Z'
       },
@@ -18,11 +25,12 @@ describe('resource adapters', () => {
       'metar'
     );
 
-    expect(envelope.schemaVersion).toBe(2);
+    expect(envelope.schemaVersion).toBe(3);
     expect(envelope.resource).toBe('metar');
     expect(envelope.key).toBe('v1:metar:KJFK');
     expect(envelope.cacheMeta.policyVersion).toBe('metar-v1');
     expect(metarResourceAdapter.deserialize(envelope)?.icao).toBe('KJFK');
+    expect(metarResourceAdapter.deserialize(envelope)?.wind.directionType).toBe('fixed');
     expect(
       metarResourceAdapter.deserialize({
         icao: 'KJFK',
@@ -31,6 +39,25 @@ describe('resource adapters', () => {
         fetchedAt: '2026-03-03T12:00:00.000Z'
       })
     ).toBeNull();
+  });
+
+  it('parses provider JSON wind objects during validation', async () => {
+    const validated = await metarResourceAdapter.validate(
+      [
+        {
+          rawOb: 'METAR KARR 031652Z VRB03KT 4SM HZ OVC013 05/00 A3011 RMK AO2',
+          wdir: { repr: 'VRB' },
+          wspd: { value: 3 },
+          wgst: null
+        }
+      ],
+      { icao: 'KARR' },
+      { request: new Request('https://example.com') }
+    );
+
+    expect(validated.wind.directionType).toBe('variable');
+    expect(validated.wind.speedKt).toBe(3);
+    expect(validated.wind.raw).toBe('VRB03KT');
   });
 
   it('provides airport adapter contract while upstream implementation is pending', async () => {

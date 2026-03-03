@@ -18,6 +18,18 @@ class MemoryKv {
   }
 }
 
+function buildMetarReport(icao: string, wind: { wdir: string | number; wspd: number; wgst?: number | null }) {
+  return {
+    icaoId: icao,
+    rawOb: `METAR ${icao} 021953Z ${typeof wind.wdir === 'string' ? wind.wdir : `${wind.wdir}`.padStart(3, '0')}${wind.wspd
+      .toString()
+      .padStart(2, '0')}${wind.wgst ? `G${wind.wgst.toString().padStart(2, '0')}` : ''}KT 10SM FEW020 08/03 A3012 RMK AO2`,
+    wdir: wind.wdir,
+    wspd: wind.wspd,
+    wgst: wind.wgst ?? null
+  };
+}
+
 describe('metar worker', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -40,12 +52,19 @@ describe('metar worker', () => {
     const kv = new MemoryKv();
     const fetchedAt = new Date(Date.now() - 30_000);
     kv.seed('v1:metar:KMCI', {
-      schemaVersion: 2,
+      schemaVersion: 3,
       resource: 'metar',
       key: 'v1:metar:KMCI',
       data: {
         icao: 'KMCI',
         metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          speedKt: 10,
+          gustKt: null
+        },
         source: 'aviationweather',
         fetchedAt: fetchedAt.toISOString()
       },
@@ -66,12 +85,32 @@ describe('metar worker', () => {
 
     const payload = (await response.json()) as {
       icao: string;
+      wind: { directionType: string; speedKt: number };
       cache: { source: string; status: string };
     };
 
     expect(payload.icao).toBe('KMCI');
+    expect(payload.wind.directionType).toBe('fixed');
+    expect(payload.wind.speedKt).toBe(10);
     expect(payload.cache.source).toBe('kv');
     expect(payload.cache.status).toBe('kv_hit');
+  });
+
+  it('returns variable wind with non-zero speed using structured upstream fields', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KARR', { wdir: 'VRB', wspd: 3 })])));
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KARR'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      wind: { directionType: string; speedKt: number; raw: string };
+    };
+
+    expect(payload.wind.directionType).toBe('variable');
+    expect(payload.wind.speedKt).toBe(3);
+    expect(payload.wind.raw).toBe('VRB03KT');
   });
 
   it('returns 400 and no-store on invalid ICAO', async () => {
@@ -84,8 +123,7 @@ describe('metar worker', () => {
   });
 
   it('fetches from upstream on miss then returns cached on repeated request', async () => {
-    const metarLine = 'METAR KJFK 021953Z 18015KT 10SM FEW250 10/M01 A3004 RMK AO2';
-    const fetchUpstream = vi.fn().mockResolvedValueOnce(new Response(`${metarLine}\n`, { status: 200 }));
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KJFK', { wdir: 180, wspd: 15 })]));
     vi.stubGlobal('fetch', fetchUpstream);
 
     const kv = new MemoryKv();
@@ -100,8 +138,8 @@ describe('metar worker', () => {
     expect(firstResponse.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
     expect(secondResponse.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
 
-    const firstPayload = (await firstResponse.json()) as { metarRaw: string; cache: { source: string } };
-    expect(firstPayload.metarRaw).toBe(metarLine);
+    const firstPayload = (await firstResponse.json()) as { wind: { source?: string; speedKt: number }; cache: { source: string } };
+    expect(firstPayload.wind.speedKt).toBe(15);
     expect(firstPayload.cache.source).toBe('upstream');
 
     const secondPayload = (await secondResponse.json()) as { cache: { source: string } };
@@ -117,8 +155,7 @@ describe('metar worker', () => {
       fetchedAt: new Date(Date.now() - 30_000).toISOString()
     });
 
-    const metarLine = 'METAR KDEN 021953Z 18012KT 10SM FEW120 11/M01 A3004 RMK AO2';
-    const fetchUpstream = vi.fn().mockResolvedValueOnce(new Response(`${metarLine}\n`, { status: 200 }));
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KDEN', { wdir: 180, wspd: 12 })]));
     vi.stubGlobal('fetch', fetchUpstream);
 
     const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KDEN'), {
@@ -148,7 +185,7 @@ describe('metar worker', () => {
       'fetch',
       vi
         .fn()
-        .mockResolvedValueOnce(new Response('', { status: 200 }))
+        .mockResolvedValueOnce(Response.json([]))
         .mockResolvedValueOnce(Response.json([]))
     );
 

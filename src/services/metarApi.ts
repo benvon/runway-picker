@@ -22,9 +22,18 @@ export interface MetarCacheMetadata {
 export interface MetarLookupResponse {
   icao: string;
   metarRaw: string;
+  wind: MetarLookupWind;
   source: 'aviationweather';
   fetchedAt: string;
   cache: MetarCacheMetadata;
+}
+
+export interface MetarLookupWind {
+  raw: string;
+  directionType: 'fixed' | 'variable' | 'calm';
+  directionDegTrue: number | null;
+  speedKt: number;
+  gustKt: number | null;
 }
 
 export class MetarLookupError extends Error {
@@ -122,6 +131,31 @@ function normalizeCacheMetadata(
   };
 }
 
+function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
+  if (!windCandidate || typeof windCandidate !== 'object') {
+    throw new MetarLookupError('METAR response is missing structured wind data.', 502);
+  }
+
+  const candidate = windCandidate as Partial<MetarLookupWind>;
+  if (
+    typeof candidate.raw !== 'string' ||
+    (candidate.directionType !== 'fixed' &&
+      candidate.directionType !== 'variable' &&
+      candidate.directionType !== 'calm') ||
+    typeof candidate.speedKt !== 'number'
+  ) {
+    throw new MetarLookupError('METAR response contains invalid structured wind data.', 502);
+  }
+
+  return {
+    raw: candidate.raw,
+    directionType: candidate.directionType,
+    directionDegTrue: typeof candidate.directionDegTrue === 'number' ? candidate.directionDegTrue : null,
+    speedKt: candidate.speedKt,
+    gustKt: typeof candidate.gustKt === 'number' ? candidate.gustKt : null
+  };
+}
+
 export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
   if (!/^[A-Z0-9]{4}$/.test(icao)) {
@@ -156,6 +190,7 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
   return {
     icao: payload.icao,
     metarRaw: payload.metarRaw,
+    wind: normalizeWindPayload((payload as { wind?: unknown }).wind),
     source: payload.source,
     fetchedAt: payload.fetchedAt,
     cache: normalizeCacheMetadata(payload.cache, response.headers, payload.fetchedAt)

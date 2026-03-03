@@ -1,9 +1,8 @@
 import { evaluateRunways } from './domain/evaluateRunways';
-import { parseWindInput } from './domain/metarParser';
 import { parseRunwayEndsInput } from './domain/runwayParser';
 import { fetchMetarByIcao } from './services/metarApi';
 import type { MetarLookupResponse } from './services/metarApi';
-import type { EvaluationResult, RunwayWindComponentValue } from './domain/types';
+import type { EvaluationResult, ParsedWind, RunwayWindComponentValue } from './domain/types';
 
 const MIN_FEEDBACK_MS = 250;
 
@@ -76,15 +75,24 @@ function renderBestRunway(result: EvaluationResult): string {
 }
 
 function renderRunwayTable(result: EvaluationResult): string {
+  const variableSustainedLabel =
+    result.parsedWind.directionType === 'variable'
+      ? `Variable direction ${result.parsedWind.speedKt} kt`
+      : 'Not available (variable winds)';
+  const variableGustLabel =
+    result.parsedWind.directionType === 'variable' && result.parsedWind.gustKt !== null
+      ? `Variable direction G${result.parsedWind.gustKt} kt`
+      : 'None';
+
   const rows = result.runwayResults
     .map((runway) => {
       const sustained = runway.sustained
         ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}`
-        : 'Not available (variable winds)';
+        : variableSustainedLabel;
 
       const gust = runway.gust
         ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}`
-        : 'None';
+        : variableGustLabel;
 
       const notes = runway.notes.length ? runway.notes.join(' ') : 'None';
 
@@ -117,6 +125,17 @@ function renderRunwayTable(result: EvaluationResult): string {
       </div>
     </section>
   `;
+}
+
+function toParsedWindFromLookup(metarLookup: MetarLookupResponse): ParsedWind {
+  return {
+    raw: metarLookup.wind.raw,
+    directionType: metarLookup.wind.directionType,
+    directionDegTrue: metarLookup.wind.directionDegTrue,
+    speedKt: metarLookup.wind.speedKt,
+    gustKt: metarLookup.wind.gustKt,
+    source: 'metar_api'
+  };
 }
 
 function renderCalculationInfo(result: EvaluationResult): string {
@@ -235,8 +254,16 @@ export function mountApp(root: HTMLElement): void {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const runways = parseRunwayEndsInput(runwaysInput.value);
       const metarLookup = await fetchMetarByIcao(icaoInput.value);
-      const parsedWind = parseWindInput(metarLookup.metarRaw);
-      const evaluation = evaluateRunways(runways, parsedWind.wind, parsedWind.notes);
+      const parsedWind = toParsedWindFromLookup(metarLookup);
+      const parserNotes =
+        parsedWind.directionType === 'variable'
+          ? [
+              `Variable winds reported at ${parsedWind.speedKt} kt${
+                parsedWind.gustKt !== null ? ` (gust ${parsedWind.gustKt} kt)` : ''
+              }.`
+            ]
+          : [];
+      const evaluation = evaluateRunways(runways, parsedWind, parserNotes);
 
       bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
       resultsNode.innerHTML = [

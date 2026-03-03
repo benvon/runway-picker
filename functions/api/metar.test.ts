@@ -21,6 +21,13 @@ describe('pages metar proxy', () => {
         {
           icao: 'KMCI',
           metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+          wind: {
+            raw: '11010KT',
+            directionType: 'fixed',
+            directionDegTrue: 110,
+            speedKt: 10,
+            gustKt: null
+          },
           source: 'aviationweather',
           fetchedAt: '2026-03-02T00:00:00.000Z',
           cache: {

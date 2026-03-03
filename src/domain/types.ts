@@ -11,7 +11,7 @@ export interface ParsedWind {
   directionDegTrue: number | null;
   speedKt: number;
   gustKt: number | null;
-  source: 'metar' | 'wind_group';
+  source: 'metar' | 'wind_group' | 'metar_api';
 }
 
 export interface RunwayWindComponentValue {

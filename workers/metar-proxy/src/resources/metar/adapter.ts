@@ -4,7 +4,7 @@ const AVIATION_WEATHER_METAR_URL = 'https://aviationweather.gov/api/data/metar';
 const AVIATION_WEATHER_STATION_INFO_URL = 'https://aviationweather.gov/api/data/stationinfo';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const METAR_SCHEMA_VERSION = 2;
+export const METAR_SCHEMA_VERSION = 3;
 
 export interface MetarResourceInput {
   icao: string;
@@ -13,8 +13,17 @@ export interface MetarResourceInput {
 export interface MetarResourceData {
   icao: string;
   metarRaw: string;
+  wind: MetarResourceWind;
   source: 'aviationweather';
   fetchedAt: string;
+}
+
+export interface MetarResourceWind {
+  raw: string;
+  directionType: 'fixed' | 'variable' | 'calm';
+  directionDegTrue: number | null;
+  speedKt: number;
+  gustKt: number | null;
 }
 
 export class MetarWorkerError extends Error {
@@ -58,7 +67,7 @@ export function extractMetarRaw(rawText: string): string | null {
 function buildMetarUrl(icao: string): string {
   const url = new URL(AVIATION_WEATHER_METAR_URL);
   url.searchParams.set('ids', icao);
-  url.searchParams.set('format', 'raw');
+  url.searchParams.set('format', 'json');
   return url.toString();
 }
 
@@ -94,6 +103,11 @@ function toMetarData(candidate: unknown): MetarResourceData | null {
   if (
     typeof asData.icao !== 'string' ||
     typeof asData.metarRaw !== 'string' ||
+    !asData.wind ||
+    typeof asData.wind !== 'object' ||
+    typeof (asData.wind as { raw?: unknown }).raw !== 'string' ||
+    typeof (asData.wind as { directionType?: unknown }).directionType !== 'string' ||
+    typeof (asData.wind as { speedKt?: unknown }).speedKt !== 'number' ||
     typeof asData.fetchedAt !== 'string' ||
     asData.source !== 'aviationweather'
   ) {
@@ -103,6 +117,13 @@ function toMetarData(candidate: unknown): MetarResourceData | null {
   return {
     icao: asData.icao,
     metarRaw: asData.metarRaw,
+    wind: {
+      raw: (asData.wind as { raw: string }).raw,
+      directionType: (asData.wind as { directionType: 'fixed' | 'variable' | 'calm' }).directionType,
+      directionDegTrue: (asData.wind as { directionDegTrue?: number | null }).directionDegTrue ?? null,
+      speedKt: (asData.wind as { speedKt: number }).speedKt,
+      gustKt: (asData.wind as { gustKt?: number | null }).gustKt ?? null
+    },
     fetchedAt: asData.fetchedAt,
     source: asData.source
   };
@@ -156,7 +177,153 @@ function deserializeMetar(value: unknown): MetarResourceData | null {
   return toMetarData(candidate.data);
 }
 
-export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, string, MetarResourceData> = {
+function readField(report: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (key in report) {
+      return report[key];
+    }
+  }
+
+  return null;
+}
+
+function toStringValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `${value}`;
+  }
+
+  if (value && typeof value === 'object') {
+    const objectValue = value as Record<string, unknown>;
+    const nestedKeys = ['repr', 'value', 'raw', 'text', 'str', 'degrees', 'deg'];
+    for (const key of nestedKeys) {
+      const nested = toStringValue(objectValue[key]);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
+}
+
+function toIntegerValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.round(value);
+  }
+
+  const stringValue = toStringValue(value);
+  if (!stringValue) {
+    return null;
+  }
+
+  if (!/^-?\d+$/.test(stringValue)) {
+    return null;
+  }
+
+  return Number.parseInt(stringValue, 10);
+}
+
+function formatWindRaw(directionType: 'fixed' | 'variable' | 'calm', speedKt: number, gustKt: number | null, directionDeg: number | null): string {
+  if (directionType === 'calm') {
+    return '00000KT';
+  }
+
+  const speed = speedKt.toString().padStart(2, '0');
+  const gust = gustKt === null ? '' : `G${gustKt.toString().padStart(2, '0')}`;
+
+  if (directionType === 'variable') {
+    return `VRB${speed}${gust}KT`;
+  }
+
+  const direction = (directionDeg ?? 0).toString().padStart(3, '0');
+  return `${direction}${speed}${gust}KT`;
+}
+
+function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
+  const directionField = readField(report, ['wdir', 'wind_dir_degrees', 'windDirDegrees', 'windDir']);
+  const speedField = readField(report, ['wspd', 'wind_speed_kt', 'windSpeedKt', 'windSpd']);
+  const gustField = readField(report, ['wgst', 'wind_gust_kt', 'windGustKt', 'windGust']);
+
+  const speedKt = toIntegerValue(speedField);
+  if (speedKt === null || speedKt < 0) {
+    return null;
+  }
+
+  const gustKtCandidate = toIntegerValue(gustField);
+  const gustKt = gustKtCandidate !== null && gustKtCandidate >= speedKt ? gustKtCandidate : null;
+
+  if (speedKt === 0) {
+    return {
+      raw: formatWindRaw('calm', speedKt, gustKt, null),
+      directionType: 'calm',
+      directionDegTrue: null,
+      speedKt,
+      gustKt
+    };
+  }
+
+  const directionText = toStringValue(directionField)?.toUpperCase() ?? null;
+  if (directionText === 'VRB') {
+    return {
+      raw: formatWindRaw('variable', speedKt, gustKt, null),
+      directionType: 'variable',
+      directionDegTrue: null,
+      speedKt,
+      gustKt
+    };
+  }
+
+  const directionDeg = toIntegerValue(directionField);
+  if (directionDeg === null || directionDeg < 0 || directionDeg > 360) {
+    return {
+      raw: formatWindRaw('variable', speedKt, gustKt, null),
+      directionType: 'variable',
+      directionDegTrue: null,
+      speedKt,
+      gustKt
+    };
+  }
+
+  return {
+    raw: formatWindRaw('fixed', speedKt, gustKt, directionDeg),
+    directionType: 'fixed',
+    directionDegTrue: directionDeg,
+    speedKt,
+    gustKt
+  };
+}
+
+function toMetarReport(upstream: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(upstream) || upstream.length === 0) {
+    return null;
+  }
+
+  const first = upstream[0];
+  if (!first || typeof first !== 'object') {
+    return null;
+  }
+
+  return first as Record<string, unknown>;
+}
+
+function extractMetarRawFromReport(report: Record<string, unknown>): string | null {
+  const direct = toStringValue(
+    readField(report, ['rawOb', 'raw_text', 'rawText', 'raw', 'metar'])
+  );
+
+  if (direct) {
+    return direct;
+  }
+
+  return null;
+}
+
+export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unknown, MetarResourceData> = {
   resource: 'metar',
   schemaVersion: METAR_SCHEMA_VERSION,
   normalizeKey: (input) => normalizeIcao(input.icao),
@@ -165,7 +332,7 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, stri
     const response = await fetch(buildMetarUrl(icao), {
       headers: {
         'User-Agent': USER_AGENT,
-        Accept: 'text/plain'
+        Accept: 'application/json'
       }
     });
 
@@ -173,12 +340,12 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, stri
       throw new MetarWorkerError(`METAR provider returned status ${response.status}.`, 502);
     }
 
-    return response.text();
+    return response.json();
   },
   validate: async (upstream, input) => {
     const icao = normalizeIcao(input.icao);
-    const metarRaw = extractMetarRaw(upstream);
-    if (!metarRaw) {
+    const report = toMetarReport(upstream);
+    if (!report) {
       const stationExists = await stationExistsForIcao(icao);
       if (!stationExists) {
         throw new MetarWorkerError(`ICAO code ${icao} was not found. Check the code and try again.`, 404);
@@ -187,9 +354,20 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, stri
       throw new MetarWorkerError(`No METAR is currently available for ICAO ${icao}. Try again later.`, 404);
     }
 
+    const metarRaw = extractMetarRawFromReport(report);
+    if (!metarRaw) {
+      throw new MetarWorkerError(`No METAR is currently available for ICAO ${icao}. Try again later.`, 404);
+    }
+
+    const wind = parseWind(report);
+    if (!wind) {
+      throw new MetarWorkerError(`Unable to parse wind data from METAR provider for ICAO ${icao}.`, 502);
+    }
+
     return {
       icao,
       metarRaw,
+      wind,
       source: 'aviationweather',
       fetchedAt: new Date().toISOString()
     };

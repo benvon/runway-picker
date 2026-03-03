@@ -18,6 +18,13 @@ describe('metarApi service', () => {
           {
             icao: 'KJFK',
             metarRaw: 'METAR KJFK 022051Z 12008KT 10SM FEW040 05/M02 A3016',
+            wind: {
+              raw: '12008KT',
+              directionType: 'fixed',
+              directionDegTrue: 120,
+              speedKt: 8,
+              gustKt: null
+            },
             source: 'aviationweather',
             fetchedAt: '2026-03-02T00:00:00.000Z',
             cache: {
@@ -47,6 +54,8 @@ describe('metarApi service', () => {
       headers: { Accept: 'application/json' }
     });
     expect(payload.icao).toBe('KJFK');
+    expect(payload.wind.directionType).toBe('fixed');
+    expect(payload.wind.speedKt).toBe(8);
     expect(payload.cache.status).toBe('kv_hit');
     expect(payload.cache.source).toBe('kv');
     expect(payload.cache.key).toBe('v1:metar:KJFK');
@@ -59,7 +68,14 @@ describe('metarApi service', () => {
         Response.json(
           {
             icao: 'KMCI',
-            metarRaw: 'METAR KMCI 022051Z 12008KT 10SM FEW040 05/M02 A3016',
+            metarRaw: 'METAR KMCI 022051Z VRB03KT 10SM FEW040 05/M02 A3016',
+            wind: {
+              raw: 'VRB03KT',
+              directionType: 'variable',
+              directionDegTrue: null,
+              speedKt: 3,
+              gustKt: null
+            },
             source: 'aviationweather',
             fetchedAt: '2026-03-02T00:00:00.000Z'
           },
@@ -73,8 +89,36 @@ describe('metarApi service', () => {
     );
 
     const payload = await fetchMetarByIcao('kmci');
+    expect(payload.wind.directionType).toBe('variable');
+    expect(payload.wind.speedKt).toBe(3);
     expect(payload.cache.status).toBe('upstream_refresh');
     expect(payload.cache.source).toBe('upstream');
+  });
+
+  it('throws when response lacks structured wind fields', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            icao: 'KMCI',
+            metarRaw: 'METAR KMCI 022051Z VRB03KT 10SM FEW040 05/M02 A3016',
+            source: 'aviationweather',
+            fetchedAt: '2026-03-02T00:00:00.000Z'
+          },
+          {
+            headers: {
+              'X-Runway-Cache-Status': 'upstream_refresh'
+            }
+          }
+        )
+      )
+    );
+
+    await expect(fetchMetarByIcao('kmci')).rejects.toMatchObject({
+      message: 'METAR response is missing structured wind data.',
+      status: 502
+    });
   });
 
   it('surfaces user-friendly message for unknown ICAO', async () => {
