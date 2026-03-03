@@ -67,15 +67,16 @@ describe('metarApi service', () => {
           { status: 404 }
         )
       )
-    try {
-      const payload = await fetchMetarByIcao('kjfk');
-      expect(fetch).toHaveBeenCalledWith('/api/metar?icao=KJFK', {
-        method: 'GET',
-        headers: { Accept: 'application/json' }
-      });
-      expect(payload.icao).toBe('KJFK');
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    );
+
+    await expect(fetchMetarByIcao('kjfk')).rejects.toMatchObject({
+      message: 'No METAR is currently available for ICAO KJFK. Try again later.',
+      status: 404
+    });
+    expect(fetch).toHaveBeenCalledWith('/api/metar?icao=KJFK', {
+      method: 'GET',
+      headers: { Accept: 'application/json' }
+    });
+    vi.unstubAllGlobals();
   });
 });
