@@ -131,6 +131,11 @@ textarea {
   resize: vertical;
 }
 
+.icao-input {
+  width: min(12rem, 100%);
+  text-transform: uppercase;
+}
+
 button {
   margin-top: 0.9rem;
   padding: 0.75rem;

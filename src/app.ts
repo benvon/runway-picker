@@ -1,6 +1,8 @@
 import { evaluateRunways } from './domain/evaluateRunways';
 import { parseWindInput } from './domain/metarParser';
 import { parseRunwayEndsInput } from './domain/runwayParser';
+import { fetchMetarByIcao } from './services/metarApi';
+import type { MetarLookupResponse } from './services/metarApi';
 import type { EvaluationResult, RunwayWindComponentValue } from './domain/types';
 
 const MIN_FEEDBACK_MS = 250;
@@ -51,27 +53,6 @@ function formatBestCrosswindSummary(
     sustained.crosswindFrom === 'left' ? '←' : sustained.crosswindFrom === 'right' ? '→' : '↔';
   const gustValue = gust ? ` G${gust.crosswindKt} kt` : '';
   return `${arrow} ${sustained.crosswindKt} kt${gustValue}`;
-}
-
-function renderParsedWindSummary(result: EvaluationResult): string {
-  const wind = result.parsedWind;
-  const directionLabel =
-    wind.directionType === 'fixed' ? `${wind.directionDegTrue?.toString().padStart(3, '0')}°` : wind.directionType;
-
-  const gustLabel = wind.gustKt !== null ? `${wind.gustKt} kt` : 'None';
-
-  return `
-    <section class="panel panel-subtle" aria-labelledby="parsed-wind-title">
-      <h2 id="parsed-wind-title">Parsed Wind Summary</h2>
-      <div class="grid-two">
-        <p><strong>Raw Group:</strong> ${wind.raw}</p>
-        <p><strong>Source:</strong> ${wind.source === 'metar' ? 'Full METAR' : 'Wind Group'}</p>
-        <p><strong>Direction:</strong> ${directionLabel}</p>
-        <p><strong>Speed:</strong> ${wind.speedKt} kt</p>
-        <p><strong>Gust:</strong> ${gustLabel}</p>
-      </div>
-    </section>
-  `;
 }
 
 function renderBestRunway(result: EvaluationResult): string {
@@ -138,10 +119,19 @@ function renderRunwayTable(result: EvaluationResult): string {
   `;
 }
 
-function renderCalculationInfo(result: EvaluationResult): string {
+function renderCalculationInfo(result: EvaluationResult, metarLookup: MetarLookupResponse): string {
+  const freshnessNote =
+    metarLookup.cacheState === 'cached'
+      ? 'Data freshness: Cached METAR data'
+      : metarLookup.cacheState === 'fresh'
+        ? 'Data freshness: Fresh METAR data'
+        : 'Data freshness: Unknown (cache header not provided)';
+
   const notes = [
     result.bestReason,
     ...result.globalNotes,
+    freshnessNote,
+    `Raw METAR: ${metarLookup.metarRaw}`,
     'Advisory only: wind component output does not account for runway condition, runway length, traffic flow, NOTAMs, or ATC instructions.'
   ];
 
@@ -169,6 +159,18 @@ export function mountApp(root: HTMLElement): void {
       <section class="panel" aria-labelledby="input-title">
         <h2 id="input-title">Inputs</h2>
         <form id="calculator-form" novalidate>
+          <label for="icao">ICAO code</label>
+          <input
+            id="icao"
+            name="icao"
+            type="text"
+            placeholder="Example: KJFK"
+            autocomplete="off"
+            maxlength="4"
+            class="icao-input"
+            required
+          />
+
           <label for="runways">Runway ends</label>
           <input
             id="runways"
@@ -180,16 +182,6 @@ export function mountApp(root: HTMLElement): void {
           />
           <p class="field-help">Use spaces or commas between runway ends.</p>
 
-          <label for="metar">METAR or wind group</label>
-          <textarea
-            id="metar"
-            name="metar"
-            rows="3"
-            placeholder="Example: KJFK 021651Z 22012G20KT 10SM CLR 07/M01 A3012"
-            required
-          ></textarea>
-          <p class="field-help">Accepted examples: 22012KT, 22012G20KT, VRB05KT, 00000KT.</p>
-
           <button type="submit">Calculate Runway Components</button>
           <p id="form-error" class="error-message" role="alert" aria-live="polite"></p>
         </form>
@@ -200,14 +192,14 @@ export function mountApp(root: HTMLElement): void {
   `;
 
   const form = root.querySelector<HTMLFormElement>('#calculator-form');
+  const icaoInput = root.querySelector<HTMLInputElement>('#icao');
   const runwaysInput = root.querySelector<HTMLInputElement>('#runways');
-  const metarInput = root.querySelector<HTMLTextAreaElement>('#metar');
   const errorNode = root.querySelector<HTMLElement>('#form-error');
   const submitButton = root.querySelector<HTMLButtonElement>('button[type="submit"]');
   const bestSpotlightNode = root.querySelector<HTMLElement>('#best-runway-spotlight');
   const resultsNode = root.querySelector<HTMLElement>('#results');
 
-  if (!form || !runwaysInput || !metarInput || !errorNode || !submitButton || !bestSpotlightNode || !resultsNode) {
+  if (!form || !icaoInput || !runwaysInput || !errorNode || !submitButton || !bestSpotlightNode || !resultsNode) {
     throw new Error('App failed to initialize required form elements.');
   }
 
@@ -215,20 +207,20 @@ export function mountApp(root: HTMLElement): void {
     event.preventDefault();
     errorNode.textContent = '';
     submitButton.disabled = true;
-    submitButton.textContent = 'Calculating...';
+    submitButton.textContent = 'Fetching METAR...';
     const startedAt = Date.now();
 
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const runways = parseRunwayEndsInput(runwaysInput.value);
-      const parsedWind = parseWindInput(metarInput.value);
+      const metarLookup = await fetchMetarByIcao(icaoInput.value);
+      const parsedWind = parseWindInput(metarLookup.metarRaw);
       const evaluation = evaluateRunways(runways, parsedWind.wind, parsedWind.notes);
 
       bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
       resultsNode.innerHTML = [
         renderRunwayTable(evaluation),
-        renderParsedWindSummary(evaluation),
-        renderCalculationInfo(evaluation)
+        renderCalculationInfo(evaluation, metarLookup)
       ].join('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';

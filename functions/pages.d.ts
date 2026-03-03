@@ -1,3 +1,7 @@
+interface Fetcher {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+}
+
 type PagesFunction<Env = unknown, Params extends string = string, Data = unknown> = (context: {
   request: Request;
   env: Env;

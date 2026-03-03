@@ -1,4 +1,4 @@
-name: Deploy Production
+name: Deploy METAR Worker Production
 
 on:
   push:
@@ -60,13 +60,12 @@ jobs:
               `Timed out waiting for CI validate check to complete for ${ref}.`
             );
 
-  deploy-production:
+  deploy-worker:
     needs: wait-for-ci
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@v4
@@ -80,38 +79,29 @@ jobs:
       - name: Validate Cloudflare configuration
         shell: bash
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
-            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_PROJECT_NAME."
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID."
             exit 1
           fi
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Test
-        run: npm run test
-
-      - name: Build
-        run: npm run build
-
-      - name: Deploy production to Cloudflare Pages
+      - name: Deploy METAR Worker
         shell: bash
         run: |
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
-            if npx wrangler pages deploy dist \
-              --project-name "$CLOUDFLARE_PROJECT_NAME" \
-              --branch main \
-              --commit-hash "${{ github.sha }}"; then
+            if npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc; then
               exit 0
             fi
 
             if [ "$attempt" -eq "$attempts" ]; then
-              echo "Pages production deploy failed after $attempts attempts."
+              echo "Worker production deploy failed after $attempts attempts."
               exit 1
             fi
 
             sleep_seconds=$((attempt * 10))
-            echo "Retrying pages production deploy in ${sleep_seconds}s..."
+            echo "Retrying worker production deploy in ${sleep_seconds}s..."
             sleep "$sleep_seconds"
           done
