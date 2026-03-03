@@ -3,7 +3,7 @@ import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
 const AIRPORT_DB_BASE_URL = 'https://airportdb.io/api/v1/airport';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const AIRPORT_SCHEMA_VERSION = 3;
+export const AIRPORT_SCHEMA_VERSION = 4;
 
 export interface AirportResourceInput {
   icao: string;
@@ -12,6 +12,7 @@ export interface AirportResourceInput {
 export interface AirportRunwayEnd {
   id: string;
   headingDegMag: number;
+  isClosed: boolean;
 }
 
 export interface AirportResourceData {
@@ -106,7 +107,7 @@ function isRunwayClosed(value: unknown): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
-function toRunwayEnd(identCandidate: unknown): AirportRunwayEnd | null {
+function toRunwayEnd(identCandidate: unknown, isClosed: boolean): AirportRunwayEnd | null {
   const ident = toStringValue(identCandidate)?.toUpperCase() ?? null;
   if (!ident) {
     return null;
@@ -122,7 +123,8 @@ function toRunwayEnd(identCandidate: unknown): AirportRunwayEnd | null {
 
   return {
     id: `${String(runwayNumber).padStart(2, '0')}${suffix}`,
-    headingDegMag: runwayNumber === 36 ? 360 : runwayNumber * 10
+    headingDegMag: runwayNumber === 36 ? 360 : runwayNumber * 10,
+    isClosed
   };
 }
 
@@ -152,12 +154,14 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
         Boolean(runway) &&
         typeof runway === 'object' &&
         typeof (runway as { id?: unknown }).id === 'string' &&
-        typeof (runway as { headingDegMag?: unknown }).headingDegMag === 'number'
+        typeof (runway as { headingDegMag?: unknown }).headingDegMag === 'number' &&
+        typeof (runway as { isClosed?: unknown }).isClosed === 'boolean'
       );
     })
     .map((runway) => ({
       id: runway.id,
-      headingDegMag: runway.headingDegMag
+      headingDegMag: runway.headingDegMag,
+      isClosed: runway.isClosed
     }));
 
   if (runwayEnds.length === 0) {
@@ -271,19 +275,22 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
         continue;
       }
 
-      if (isRunwayClosed(runway.closed)) {
-        continue;
-      }
-
-      const le = toRunwayEnd(runway.le_ident);
-      const he = toRunwayEnd(runway.he_ident);
+      const runwayClosed = isRunwayClosed(runway.closed);
+      const le = toRunwayEnd(runway.le_ident, runwayClosed);
+      const he = toRunwayEnd(runway.he_ident, runwayClosed);
 
       if (le) {
-        runwayMap.set(le.id, le);
+        const existing = runwayMap.get(le.id);
+        if (!existing || (existing.isClosed && !le.isClosed)) {
+          runwayMap.set(le.id, le);
+        }
       }
 
       if (he) {
-        runwayMap.set(he.id, he);
+        const existing = runwayMap.get(he.id);
+        if (!existing || (existing.isClosed && !he.isClosed)) {
+          runwayMap.set(he.id, he);
+        }
       }
     }
 

@@ -30,7 +30,8 @@ export function parseRunwayEnd(input: string): RunwayEnd {
 
   return {
     id: `${formattedNumber}${suffix}`,
-    headingDegMag
+    headingDegMag,
+    isClosed: false
   };
 }
 

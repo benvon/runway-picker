@@ -121,13 +121,17 @@ function renderRunwayTable(result: EvaluationResult): string {
 
   const rows = result.runwayResults
     .map((runway) => {
-      const sustained = runway.sustained
-        ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}`
-        : variableSustainedLabel;
+      const sustained = runway.isClosed
+        ? 'Closed runway'
+        : runway.sustained
+          ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}`
+          : variableSustainedLabel;
 
-      const gust = runway.gust
-        ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}`
-        : variableGustLabel;
+      const gust = runway.isClosed
+        ? 'Closed runway'
+        : runway.gust
+          ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}`
+          : variableGustLabel;
 
       const notes = runway.notes.length ? runway.notes.join(' ') : 'None';
 

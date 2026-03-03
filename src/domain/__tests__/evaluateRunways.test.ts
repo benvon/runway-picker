@@ -88,4 +88,46 @@ describe('evaluateRunways', () => {
     }
     expect(result.bestRunwayId).toBe('09');
   });
+
+  it('never selects a closed runway even if winds favor it', () => {
+    const runwaysWithClosed: RunwayEnd[] = [
+      { id: '09', headingDegMag: 90, isClosed: true },
+      { id: '27', headingDegMag: 270, isClosed: false }
+    ];
+
+    const wind: ParsedWind = {
+      raw: '09012KT',
+      directionType: 'fixed',
+      directionDegTrue: 90,
+      speedKt: 12,
+      gustKt: null,
+      source: 'wind_group'
+    };
+
+    const result = evaluateRunways(runwaysWithClosed, wind);
+    expect(result.bestRunwayId).toBe('27');
+    expect(result.runwayResults.find((runway) => runway.runwayId === '09')?.notes).toContain(
+      'Runway is closed; excluded from recommendation.'
+    );
+  });
+
+  it('returns no best runway when all runways are closed', () => {
+    const closedRunways: RunwayEnd[] = [
+      { id: '09', headingDegMag: 90, isClosed: true },
+      { id: '27', headingDegMag: 270, isClosed: true }
+    ];
+
+    const wind: ParsedWind = {
+      raw: '09010KT',
+      directionType: 'fixed',
+      directionDegTrue: 90,
+      speedKt: 10,
+      gustKt: null,
+      source: 'wind_group'
+    };
+
+    const result = evaluateRunways(closedRunways, wind);
+    expect(result.bestRunwayId).toBeNull();
+    expect(result.bestReason).toBe('No open runways available for selection.');
+  });
 });

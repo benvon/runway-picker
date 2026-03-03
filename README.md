@@ -10,6 +10,7 @@ Runway Picker is a high-contrast, mobile-first web app for pilots to compare run
 - Shared adapter-driven caching (edge cache + KV + Durable Object single-flight)
 - Structured cache provenance metadata returned from `/api/metar` and `/api/airport` (`cache` object + `X-Runway-Cache-Status`)
 - Sustained and gust component calculations for each runway
+- Closed runways are always excluded from best-runway recommendation logic
 - Best-runway selection by:
   1. greatest headwind
   2. lowest crosswind tie-break

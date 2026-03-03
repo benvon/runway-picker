@@ -302,6 +302,63 @@ describe('app integration', () => {
     expect(root.textContent).not.toContain('All Runway Components');
   });
 
+  it('excludes closed runways from best-runway selection', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KCLS') {
+        return Promise.resolve(
+          Response.json({
+            ...airportPayload('KCLS'),
+            runwayEnds: [
+              { id: '09', headingDegMag: 90, isClosed: true },
+              { id: '27', headingDegMag: 270, isClosed: false }
+            ]
+          })
+        );
+      }
+
+      if (url === '/api/metar?icao=KCLS') {
+        return Promise.resolve(
+          Response.json(
+            metarPayload('KCLS', {
+              raw: '09012KT',
+              directionType: 'fixed',
+              directionDegTrue: 90,
+              speedKt: 12,
+              gustKt: null
+            })
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KCLS';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
+
+    expect(root.textContent).toContain('Best runway: 27');
+    expect(root.textContent).toContain('Runway is closed; excluded from recommendation.');
+    expect(root.textContent).toContain('Closed runway');
+  });
+
   it('shows debug output in Technical Details when METAR lookup fails with debug payload', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {

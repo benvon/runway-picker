@@ -3,6 +3,7 @@ export type WindDirectionType = 'fixed' | 'variable' | 'calm';
 export interface RunwayEnd {
   id: string;
   headingDegMag: number;
+  isClosed?: boolean;
 }
 
 export interface ParsedWind {
@@ -22,6 +23,7 @@ export interface RunwayWindComponentValue {
 
 export interface RunwayWindComponent {
   runwayId: string;
+  isClosed: boolean;
   sustained: RunwayWindComponentValue | null;
   gust: RunwayWindComponentValue | null;
   notes: string[];

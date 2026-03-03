@@ -13,6 +13,8 @@ interface RankedRunway {
   crosswindKt: number;
 }
 
+const CLOSED_RUNWAY_NOTE = 'Runway is closed; excluded from recommendation.';
+
 function sortRunwaysForBest(a: RankedRunway, b: RankedRunway): number {
   if (b.headwindKt !== a.headwindKt) {
     return b.headwindKt - a.headwindKt;
@@ -35,6 +37,36 @@ function zeroComponent(): RunwayWindComponentValue {
 
 export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNotes: string[] = []): EvaluationResult {
   const globalNotes = [...parserNotes];
+  const hasRunways = runways.length > 0;
+  const openRunways = runways.filter((runway) => !runway.isClosed);
+
+  if (!hasRunways) {
+    return {
+      parsedWind: wind,
+      runwayResults: [],
+      bestRunwayId: null,
+      bestReason: 'No runways available.',
+      globalNotes
+    };
+  }
+
+  if (openRunways.length === 0) {
+    const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
+      runwayId: runway.id,
+      isClosed: true,
+      sustained: null,
+      gust: null,
+      notes: [CLOSED_RUNWAY_NOTE]
+    }));
+
+    return {
+      parsedWind: wind,
+      runwayResults,
+      bestRunwayId: null,
+      bestReason: 'No open runways available for selection.',
+      globalNotes
+    };
+  }
 
   if (wind.directionType === 'variable') {
     const variableSpeedNote =
@@ -44,9 +76,10 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
 
     const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
       runwayId: runway.id,
+      isClosed: Boolean(runway.isClosed),
       sustained: null,
       gust: null,
-      notes: [variableSpeedNote]
+      notes: runway.isClosed ? [CLOSED_RUNWAY_NOTE] : [variableSpeedNote]
     }));
 
     return {
@@ -59,21 +92,22 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
   }
 
   if (wind.directionType === 'calm') {
-    const sortedIds = [...runways].map((runway) => runway.id).sort((a, b) => a.localeCompare(b));
+    const sortedIds = [...openRunways].map((runway) => runway.id).sort((a, b) => a.localeCompare(b));
     const bestRunwayId = sortedIds[0] ?? null;
 
     const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
       runwayId: runway.id,
-      sustained: zeroComponent(),
+      isClosed: Boolean(runway.isClosed),
+      sustained: runway.isClosed ? null : zeroComponent(),
       gust: null,
-      notes: ['Calm winds: runway choice is not wind-limited.']
+      notes: runway.isClosed ? [CLOSED_RUNWAY_NOTE] : ['Calm winds: runway choice is not wind-limited.']
     }));
 
     return {
       parsedWind: wind,
       runwayResults,
       bestRunwayId,
-      bestReason: 'Calm winds; selected by runway ID tie-break.',
+      bestReason: 'Calm winds; selected by runway ID tie-break among open runways.',
       globalNotes
     };
   }
@@ -85,6 +119,16 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
   const ranking: RankedRunway[] = [];
 
   const runwayResults: RunwayWindComponent[] = runways.map((runway) => {
+    if (runway.isClosed) {
+      return {
+        runwayId: runway.id,
+        isClosed: true,
+        sustained: null,
+        gust: null,
+        notes: [CLOSED_RUNWAY_NOTE]
+      };
+    }
+
     const sustainedRaw = calculateWindComponent(wind.speedKt, wind.directionDegTrue!, runway.headingDegMag);
     ranking.push({
       runwayId: runway.id,
@@ -98,6 +142,7 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
 
     return {
       runwayId: runway.id,
+      isClosed: false,
       sustained: {
         headwindKt: sustainedRaw.headwindKt,
         crosswindKt: sustainedRaw.crosswindKt,
@@ -123,7 +168,7 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
     bestRunwayId: best?.runwayId ?? null,
     bestReason: best
       ? 'Highest headwind; tie-break by lowest crosswind, then runway ID.'
-      : 'No runways available.',
+      : 'No open runways available for selection.',
     globalNotes
   };
 }

@@ -58,8 +58,8 @@ describe('airportApi service', () => {
     expect(payload.requestedIcao).toBe('KJFK');
     expect(payload.icao).toBe('KJFK');
     expect(payload.runwayEnds).toEqual([
-      { id: '04L', headingDegMag: 40 },
-      { id: '22R', headingDegMag: 220 }
+      { id: '04L', headingDegMag: 40, isClosed: false },
+      { id: '22R', headingDegMag: 220, isClosed: false }
     ]);
     expect(payload.cache.status).toBe('kv_hit');
     expect(payload.cache.source).toBe('kv');
@@ -96,7 +96,10 @@ describe('airportApi service', () => {
     );
 
     const payload = await fetchAirportByIcao('kmci');
-    expect(payload.runwayEnds[0]?.id).toBe('01L');
+    expect(payload.runwayEnds[0]).toMatchObject({
+      id: '01L',
+      isClosed: false
+    });
     expect(payload.cache.status).toBe('upstream_refresh');
     expect(payload.cache.source).toBe('upstream');
   });

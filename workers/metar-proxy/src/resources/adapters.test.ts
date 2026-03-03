@@ -96,7 +96,7 @@ describe('resource adapters', () => {
     });
   });
 
-  it('parses usable runway ends from airport payload and skips closed runways', async () => {
+  it('parses runway ends and preserves closed-runway status', async () => {
     const validated = await airportResourceAdapter.validate(
       {
         ident: 'KJFK',
@@ -141,27 +141,32 @@ describe('resource adapters', () => {
     expect(validated.countryName).toBe('United States');
     expect(validated.elevationFt).toBe(13);
     expect(validated.runwayEnds).toEqual([
-      { id: '04L', headingDegMag: 40 },
-      { id: '22R', headingDegMag: 220 }
+      { id: '04L', headingDegMag: 40, isClosed: false },
+      { id: '13R', headingDegMag: 130, isClosed: true },
+      { id: '22R', headingDegMag: 220, isClosed: false },
+      { id: '31L', headingDegMag: 310, isClosed: true }
     ]);
   });
 
-  it('returns 404 when airport payload has no usable runway ends', () => {
-    expect(() =>
-      airportResourceAdapter.validate(
-        {
-          ident: 'KHEL',
-          runways: [{ closed: '1', le_ident: '13', he_ident: '31' }]
-        },
-        { icao: 'KHEL' },
-        {
-          request: new Request('https://example.com'),
-          env: {
-            METAR_CACHE: { get: async () => null, put: async () => {} },
-            AIRPORTDB_API_TOKEN: 'token'
-          }
+  it('supports airports where all runways are closed', async () => {
+    const validated = await airportResourceAdapter.validate(
+      {
+        ident: 'KHEL',
+        runways: [{ closed: '1', le_ident: '13', he_ident: '31' }]
+      },
+      { icao: 'KHEL' },
+      {
+        request: new Request('https://example.com'),
+        env: {
+          METAR_CACHE: { get: async () => null, put: async () => {} },
+          AIRPORTDB_API_TOKEN: 'token'
         }
-      )
-    ).toThrow('No runway data is available for ICAO KHEL.');
+      }
+    );
+
+    expect(validated.runwayEnds).toEqual([
+      { id: '13', headingDegMag: 130, isClosed: true },
+      { id: '31', headingDegMag: 310, isClosed: true }
+    ]);
   });
 });
