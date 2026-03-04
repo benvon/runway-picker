@@ -46,6 +46,7 @@ export type MetarLookupErrorCode =
   | 'WIND_PARSE_ERROR'
   | 'CACHE_ERROR'
   | 'UNEXPECTED'
+  | 'SERVICE_NOT_CONFIGURED'
   | 'UNKNOWN';
 
 export class MetarLookupError extends Error {
