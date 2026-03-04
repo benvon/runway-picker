@@ -29,6 +29,7 @@ export interface MetarResourceWind {
 export type MetarWorkerErrorCode =
   | 'INVALID_ICAO'
   | 'PROVIDER_ERROR'
+  | 'PROVIDER_PAYLOAD_INVALID'
   | 'PROVIDER_VALIDATION_ERROR'
   | 'ICAO_NOT_FOUND'
   | 'METAR_UNAVAILABLE'
@@ -396,7 +397,20 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
       throw new MetarWorkerError(`METAR provider returned status ${response.status}.`, 502, 'PROVIDER_ERROR');
     }
 
-    return response.json();
+    if (response.status === 204) {
+      return [];
+    }
+
+    const bodyText = await response.text();
+    if (bodyText.trim().length === 0) {
+      return [];
+    }
+
+    try {
+      return JSON.parse(bodyText) as unknown;
+    } catch {
+      throw new MetarWorkerError('METAR provider returned an invalid payload.', 502, 'PROVIDER_PAYLOAD_INVALID');
+    }
   },
   validate: async (upstream, input) => {
     const icao = normalizeIcao(input.icao);

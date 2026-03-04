@@ -39,6 +39,7 @@ export interface MetarLookupWind {
 export type MetarLookupErrorCode =
   | 'INVALID_ICAO'
   | 'PROVIDER_ERROR'
+  | 'PROVIDER_PAYLOAD_INVALID'
   | 'PROVIDER_VALIDATION_ERROR'
   | 'ICAO_NOT_FOUND'
   | 'METAR_UNAVAILABLE'

@@ -311,6 +311,26 @@ describe('metar worker', () => {
       code: 'METAR_UNAVAILABLE'
     });
   });
+
+  it('returns METAR_UNAVAILABLE code when provider responds with 204 and station exists', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        .mockResolvedValueOnce(Response.json([{ icaoId: 'KDKB' }]))
+    );
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KDKB'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'No METAR is currently available for ICAO KDKB. Try again later.',
+      code: 'METAR_UNAVAILABLE'
+    });
+  });
 });
 
 describe('airport worker', () => {
