@@ -76,16 +76,23 @@ export function buildProxyResponse(upstreamResponse: Response, requestId: string
 }
 
 export function extractClientIp(request: Request): string | null {
-  const candidates = [request.headers.get('CF-Connecting-IP'), request.headers.get('X-Forwarded-For')];
+  const ipPattern = /^[A-Fa-f0-9:.]{3,45}$/;
 
-  for (const candidate of candidates) {
-    if (!candidate) {
-      continue;
-    }
+  const cfConnectingIp = request.headers.get('CF-Connecting-IP')?.trim();
+  if (cfConnectingIp && ipPattern.test(cfConnectingIp)) {
+    return cfConnectingIp;
+  }
 
-    const first = candidate.split(',')[0]?.trim() ?? '';
-    if (/^[A-Fa-f0-9:.]{3,45}$/.test(first)) {
-      return first;
+  const xForwardedFor = request.headers.get('X-Forwarded-For');
+  if (xForwardedFor) {
+    const parts = xForwardedFor
+      .split(',')
+      .map(part => part.trim())
+      .filter(part => part.length > 0);
+
+    const candidate = parts[parts.length - 1];
+    if (candidate && ipPattern.test(candidate)) {
+      return candidate;
     }
   }
 
