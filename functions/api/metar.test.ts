@@ -14,8 +14,10 @@ describe('pages metar proxy', () => {
 
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toMatchObject({
-      code: 'SERVICE_NOT_CONFIGURED'
+      code: 'SERVICE_NOT_CONFIGURED',
+      requestId: expect.any(String)
     });
+    expect(response.headers.get('X-Request-Id')).toEqual(expect.any(String));
   });
 
   it('proxies request to METAR_API service binding and preserves cache headers', async () => {
@@ -54,7 +56,11 @@ describe('pages metar proxy', () => {
     );
 
     const response = await onRequestGet({
-      request: new Request('https://example.com/api/metar?icao=KMCI'),
+      request: new Request('https://example.com/api/metar?icao=KMCI', {
+        headers: {
+          'CF-Connecting-IP': '203.0.113.10'
+        }
+      }),
       env: {
         METAR_API: { fetch }
       },
@@ -68,5 +74,32 @@ describe('pages metar proxy', () => {
     expect(fetch).toHaveBeenCalled();
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
     expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=1800');
+    expect(response.headers.get('X-Request-Id')).toEqual(expect.any(String));
+    const proxiedRequest = fetch.mock.calls[0]?.[0];
+    expect(proxiedRequest).toBeInstanceOf(Request);
+    expect((proxiedRequest as Request).headers.get('X-Client-IP')).toBe('203.0.113.10');
+    expect((proxiedRequest as Request).headers.get('X-Request-Id')).toEqual(expect.any(String));
+  });
+
+  it('returns INVALID_ICAO for malformed input before proxying', async () => {
+    const fetch = vi.fn();
+
+    const response = await onRequestGet({
+      request: new Request('https://example.com/api/metar?icao=ABC'),
+      env: {
+        METAR_API: { fetch }
+      },
+      params: {},
+      data: {},
+      waitUntil: () => {},
+      next: async () => new Response('')
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'INVALID_ICAO',
+      requestId: expect.any(String)
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

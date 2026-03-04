@@ -1,7 +1,12 @@
 {
   "name": "runway-picker-metar-api",
   "main": "src/index.ts",
+  "workers_dev": false,
   "compatibility_date": "2026-03-02",
+  "vars": {
+    "APP_ENV": "production",
+    "ENABLE_DEBUG_ERRORS": "false"
+  },
   "kv_namespaces": [
     {
       "binding": "METAR_CACHE",
@@ -13,6 +18,10 @@
       {
         "name": "CACHE_COORDINATOR",
         "class_name": "CacheSingleFlightCoordinator"
+      },
+      {
+        "name": "API_RATE_LIMITER",
+        "class_name": "ApiRateLimiter"
       }
     ]
   },
@@ -20,10 +29,18 @@
     {
       "tag": "v1-cache-coordinator",
       "new_sqlite_classes": ["CacheSingleFlightCoordinator"]
+    },
+    {
+      "tag": "v2-api-rate-limiter",
+      "new_sqlite_classes": ["ApiRateLimiter"]
     }
   ],
   "env": {
     "preview": {
+      "vars": {
+        "APP_ENV": "preview",
+        "ENABLE_DEBUG_ERRORS": "true"
+      },
       "kv_namespaces": [
         {
           "binding": "METAR_CACHE"
@@ -34,6 +51,10 @@
           {
             "name": "CACHE_COORDINATOR",
             "class_name": "CacheSingleFlightCoordinator"
+          },
+          {
+            "name": "API_RATE_LIMITER",
+            "class_name": "ApiRateLimiter"
           }
         ]
       }

@@ -37,6 +37,7 @@ export interface AirportLookupResponse {
 
 export type AirportLookupErrorCode =
   | 'INVALID_ICAO'
+  | 'RATE_LIMITED'
   | 'SERVICE_NOT_CONFIGURED'
   | 'AUTH_ERROR'
   | 'ICAO_NOT_FOUND'

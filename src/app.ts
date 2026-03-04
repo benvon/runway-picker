@@ -1,10 +1,11 @@
 import { evaluateRunways } from './domain/evaluateRunways';
+import type { EvaluationResult, ParsedWind, RunwayWindComponentValue } from './domain/types';
 import { AirportLookupError, fetchAirportByIcao } from './services/airportApi';
 import type { AirportLookupResponse } from './services/airportApi';
 import { fetchMetarByIcao } from './services/metarApi';
 import { MetarLookupError } from './services/metarApi';
 import type { MetarLookupResponse } from './services/metarApi';
-import type { EvaluationResult, ParsedWind, RunwayWindComponentValue } from './domain/types';
+import { appendChildren, createElement, createTextParagraph, strongLabel } from './ui/dom';
 
 const MIN_FEEDBACK_MS = 250;
 
@@ -21,6 +22,18 @@ interface LookupState {
   stage: LookupStage;
   primaryAirport: AirportLookupResponse | null;
   primaryIcao: string;
+}
+
+interface AppElements {
+  form: HTMLFormElement;
+  icaoInput: HTMLInputElement;
+  alternateGroup: HTMLElement;
+  alternateIcaoInput: HTMLInputElement;
+  alternateHelp: HTMLElement;
+  errorNode: HTMLElement;
+  submitButton: HTMLButtonElement;
+  bestSpotlightNode: HTMLElement;
+  resultsNode: HTMLElement;
 }
 
 function formatHeadingValue(headwindKt: number): string {
@@ -71,7 +84,7 @@ function formatBestCrosswindSummary(
   return `${arrow} ${sustained.crosswindKt} kt${gustValue}`;
 }
 
-function renderBestRunway(result: EvaluationResult): string {
+function renderBestRunway(result: EvaluationResult): HTMLElement {
   const bestRunway = result.bestRunwayId
     ? result.runwayResults.find((runway) => runway.runwayId === result.bestRunwayId) ?? null
     : null;
@@ -80,36 +93,54 @@ function renderBestRunway(result: EvaluationResult): string {
   const headwindSummary = formatBestHeadwindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
   const crosswindSummary = formatBestCrosswindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
 
-  return `
-    <section class="panel panel-accent panel-spotlight" aria-label="Best runway summary">
-      <div class="best-runway-row">
-        <p class="best-runway-cell"><strong>Best runway:</strong> ${runwayDisplay}</p>
-        <p class="best-runway-cell">${headwindSummary}</p>
-        <p class="best-runway-cell">${crosswindSummary}</p>
-      </div>
-    </section>
-  `;
+  const section = createElement('section', {
+    className: 'panel panel-accent panel-spotlight',
+    attributes: { 'aria-label': 'Best runway summary' }
+  });
+  const row = createElement('div', { className: 'best-runway-row' });
+
+  const bestRunwayCell = createElement('p', { className: 'best-runway-cell' });
+  bestRunwayCell.append(strongLabel('Best runway:'), document.createTextNode(` ${runwayDisplay}`));
+
+  const headwindCell = createElement('p', {
+    className: 'best-runway-cell',
+    textContent: headwindSummary
+  });
+
+  const crosswindCell = createElement('p', {
+    className: 'best-runway-cell',
+    textContent: crosswindSummary
+  });
+
+  appendChildren(row, [bestRunwayCell, headwindCell, crosswindCell]);
+  section.appendChild(row);
+  return section;
 }
 
-function renderLookupSummary(resolution: LookupResolution): string {
+function renderLookupSummary(resolution: LookupResolution): HTMLElement {
   const runwaySourceLabel =
     resolution.runwaySourceIcao === resolution.airport.requestedIcao
       ? resolution.runwaySourceIcao
       : `${resolution.runwaySourceIcao} (requested ${resolution.airport.requestedIcao})`;
 
-  const weatherSourceLabel = resolution.weatherSourceIcao;
+  const section = createElement('section', {
+    className: 'panel panel-subtle',
+    attributes: { 'aria-label': 'Lookup summary' }
+  });
 
-  return `
-    <section class="panel panel-subtle" aria-label="Lookup summary">
-      <h2>Lookup Summary</h2>
-      <p><strong>Runway airport:</strong> ${runwaySourceLabel} - ${resolution.airport.name}</p>
-      <p><strong>Weather airport:</strong> ${weatherSourceLabel}</p>
-      <p><strong>Runway ends loaded:</strong> ${resolution.airport.runwayEnds.length}</p>
-    </section>
-  `;
+  const heading = createElement('h2', { textContent: 'Lookup Summary' });
+  const runwayAirport = createTextParagraph('Runway airport:', `${runwaySourceLabel} - ${resolution.airport.name}`);
+  const weatherAirport = createTextParagraph('Weather airport:', resolution.weatherSourceIcao);
+  const runwayCount = createTextParagraph(
+    'Runway ends loaded:',
+    `${resolution.airport.runwayEnds.length}`
+  );
+
+  appendChildren(section, [heading, runwayAirport, weatherAirport, runwayCount]);
+  return section;
 }
 
-function renderRunwayTable(result: EvaluationResult): string {
+function renderRunwayTable(result: EvaluationResult): HTMLElement {
   const variableSustainedLabel =
     result.parsedWind.directionType === 'variable'
       ? `Variable direction ${result.parsedWind.speedKt} kt`
@@ -119,51 +150,64 @@ function renderRunwayTable(result: EvaluationResult): string {
       ? `Variable direction G${result.parsedWind.gustKt} kt`
       : 'None';
 
-  const rows = result.runwayResults
-    .map((runway) => {
-      const sustained = runway.isClosed
-        ? 'Closed runway'
-        : runway.sustained
-          ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}`
-          : variableSustainedLabel;
+  const section = createElement('section', {
+    className: 'panel panel-subtle',
+    attributes: { 'aria-labelledby': 'components-title' }
+  });
+  const heading = createElement('h2', {
+    textContent: 'All Runway Components',
+    attributes: { id: 'components-title' }
+  });
 
-      const gust = runway.isClosed
-        ? 'Closed runway'
-        : runway.gust
-          ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}`
-          : variableGustLabel;
+  const tableWrap = createElement('div', { className: 'table-wrap' });
+  const table = createElement('table');
+  const thead = createElement('thead');
+  const headerRow = createElement('tr');
+  const body = createElement('tbody');
 
-      const notes = runway.notes.length ? runway.notes.join(' ') : 'None';
+  const headerLabels = ['Runway', 'Sustained', 'Gust', 'Notes'];
+  for (const label of headerLabels) {
+    const header = createElement('th', {
+      textContent: label,
+      attributes: { scope: 'col' }
+    });
+    headerRow.appendChild(header);
+  }
+  thead.appendChild(headerRow);
 
-      return `
-        <tr>
-          <th scope="row">${runway.runwayId}</th>
-          <td>${sustained}</td>
-          <td>${gust}</td>
-          <td>${notes}</td>
-        </tr>
-      `;
-    })
-    .join('');
+  for (const runway of result.runwayResults) {
+    const sustained = runway.isClosed
+      ? 'Closed runway'
+      : runway.sustained
+        ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}`
+        : variableSustainedLabel;
 
-  return `
-    <section class="panel panel-subtle" aria-labelledby="components-title">
-      <h2 id="components-title">All Runway Components</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Runway</th>
-              <th scope="col">Sustained</th>
-              <th scope="col">Gust</th>
-              <th scope="col">Notes</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </section>
-  `;
+    const gust = runway.isClosed
+      ? 'Closed runway'
+      : runway.gust
+        ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}`
+        : variableGustLabel;
+
+    const notes = runway.notes.length ? runway.notes.join(' ') : 'None';
+
+    const row = createElement('tr');
+    const runwayCell = createElement('th', {
+      textContent: runway.runwayId,
+      attributes: { scope: 'row' }
+    });
+    const sustainedCell = createElement('td', { textContent: sustained });
+    const gustCell = createElement('td', { textContent: gust });
+    const notesCell = createElement('td', { textContent: notes });
+
+    appendChildren(row, [runwayCell, sustainedCell, gustCell, notesCell]);
+    body.appendChild(row);
+  }
+
+  appendChildren(table, [thead, body]);
+  tableWrap.appendChild(table);
+
+  appendChildren(section, [heading, tableWrap]);
+  return section;
 }
 
 function toParsedWindFromLookup(metarLookup: MetarLookupResponse): ParsedWind {
@@ -177,7 +221,16 @@ function toParsedWindFromLookup(metarLookup: MetarLookupResponse): ParsedWind {
   };
 }
 
-function renderCalculationInfo(result: EvaluationResult): string {
+function createNotesList(notes: string[]): HTMLUListElement {
+  const list = createElement('ul', { className: 'notes-list' });
+  for (const note of notes) {
+    list.appendChild(createElement('li', { textContent: note }));
+  }
+
+  return list;
+}
+
+function renderCalculationInfo(result: EvaluationResult): HTMLElement {
   const notes = [
     result.bestReason,
     ...result.globalNotes,
@@ -186,17 +239,20 @@ function renderCalculationInfo(result: EvaluationResult): string {
 
   const dedupedNotes = [...new Set(notes)];
 
-  return `
-    <section class="panel panel-subtle" aria-label="Calculation notes and disclaimer">
-      <h2>Calculation Notes & Disclaimer</h2>
-      <ul class="notes-list">
-        ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
-      </ul>
-    </section>
-  `;
+  const section = createElement('section', {
+    className: 'panel panel-subtle',
+    attributes: { 'aria-label': 'Calculation notes and disclaimer' }
+  });
+
+  appendChildren(section, [
+    createElement('h2', { textContent: 'Calculation Notes & Disclaimer' }),
+    createNotesList(dedupedNotes)
+  ]);
+
+  return section;
 }
 
-function renderTechnicalDetails(resolution: LookupResolution): string {
+function renderTechnicalDetails(resolution: LookupResolution): HTMLElement {
   const airport = resolution.airport;
   const metar = resolution.metar;
 
@@ -216,36 +272,41 @@ function renderTechnicalDetails(resolution: LookupResolution): string {
 
   const dedupedNotes = [...new Set(notes)];
 
-  return `
-    <section class="panel panel-subtle" aria-label="Technical details">
-      <h2>Technical Details</h2>
-      <ul class="notes-list">
-        ${dedupedNotes.map((note) => `<li>${note}</li>`).join('')}
-      </ul>
-    </section>
-  `;
+  const section = createElement('section', {
+    className: 'panel panel-subtle',
+    attributes: { 'aria-label': 'Technical details' }
+  });
+
+  appendChildren(section, [
+    createElement('h2', { textContent: 'Technical Details' }),
+    createNotesList(dedupedNotes)
+  ]);
+
+  return section;
 }
 
-function renderErrorTechnicalDetails(error: unknown): string {
+function renderErrorTechnicalDetails(error: unknown): HTMLElement | null {
   if (!(error instanceof MetarLookupError)) {
-    return '';
+    return null;
   }
 
   if (!error.debug || typeof error.debug !== 'object') {
-    return '';
+    return null;
   }
 
   const debugJson = JSON.stringify(error.debug, null, 2);
   if (!debugJson) {
-    return '';
+    return null;
   }
 
-  return `
-    <details class="panel panel-subtle info-box" open>
-      <summary>Technical Details</summary>
-      <pre class="debug-json">${debugJson}</pre>
-    </details>
-  `;
+  const details = createElement('details', { className: 'panel panel-subtle info-box' });
+  details.open = true;
+  const summary = createElement('summary', { textContent: 'Technical Details' });
+  const pre = createElement('pre', { className: 'debug-json' });
+  pre.textContent = debugJson;
+
+  appendChildren(details, [summary, pre]);
+  return details;
 }
 
 function shouldPromptAlternateMetar(error: unknown): boolean {
@@ -285,90 +346,149 @@ function buildFallbackNotes(resolution: LookupResolution): string[] {
   ];
 }
 
-function renderDetailsPanel(resolution: LookupResolution, evaluation: EvaluationResult): string {
-  return `
-    <details class="panel panel-subtle details-toggle">
-      <summary>View details</summary>
-      <div class="details-stack">
-        ${renderLookupSummary(resolution)}
-        ${renderRunwayTable(evaluation)}
-        ${renderCalculationInfo(evaluation)}
-        ${renderTechnicalDetails(resolution)}
-      </div>
-    </details>
-  `;
+function renderDetailsPanel(resolution: LookupResolution, evaluation: EvaluationResult): HTMLElement {
+  const details = createElement('details', { className: 'panel panel-subtle details-toggle' });
+  const summary = createElement('summary', { textContent: 'View details' });
+  const detailsStack = createElement('div', { className: 'details-stack' });
+
+  appendChildren(detailsStack, [
+    renderLookupSummary(resolution),
+    renderRunwayTable(evaluation),
+    renderCalculationInfo(evaluation),
+    renderTechnicalDetails(resolution)
+  ]);
+
+  appendChildren(details, [summary, detailsStack]);
+  return details;
+}
+
+function buildAppUi(root: HTMLElement): AppElements {
+  root.textContent = '';
+
+  const appShell = createElement('div', { className: 'app-shell' });
+
+  const header = createElement('header', { className: 'panel hero-panel' });
+  header.appendChild(createElement('h1', { textContent: 'Runway Picker' }));
+
+  const bestSpotlightNode = createElement('section', {
+    className: 'results-stack',
+    attributes: {
+      id: 'best-runway-spotlight',
+      'aria-live': 'polite'
+    }
+  });
+
+  const inputSection = createElement('section', {
+    className: 'panel',
+    attributes: { 'aria-labelledby': 'input-title' }
+  });
+  const inputTitle = createElement('h2', {
+    textContent: 'Inputs',
+    attributes: { id: 'input-title' }
+  });
+
+  const form = createElement('form', {
+    attributes: {
+      id: 'calculator-form',
+      novalidate: ''
+    }
+  });
+
+  const primaryIcaoLabel = createElement('label', { textContent: 'Primary ICAO code' });
+  primaryIcaoLabel.htmlFor = 'icao';
+
+  const icaoInput = createElement('input', {
+    className: 'icao-input',
+    attributes: {
+      id: 'icao',
+      name: 'icao',
+      type: 'text',
+      placeholder: 'Example: KJFK',
+      autocomplete: 'off'
+    }
+  });
+  icaoInput.maxLength = 4;
+  icaoInput.required = true;
+
+  const alternateGroup = createElement('div', {
+    className: 'alternate-group',
+    attributes: { id: 'alternate-group' }
+  });
+  alternateGroup.hidden = true;
+
+  const alternateLabel = createElement('label', { textContent: 'Alternate METAR ICAO code' });
+  alternateLabel.htmlFor = 'alternate-icao';
+
+  const alternateIcaoInput = createElement('input', {
+    className: 'icao-input',
+    attributes: {
+      id: 'alternate-icao',
+      name: 'alternateIcao',
+      type: 'text',
+      placeholder: 'Example: KLGA',
+      autocomplete: 'off'
+    }
+  });
+  alternateIcaoInput.maxLength = 4;
+
+  const alternateHelp = createElement('p', {
+    className: 'field-help',
+    attributes: { id: 'alternate-help' }
+  });
+
+  appendChildren(alternateGroup, [alternateLabel, alternateIcaoInput, alternateHelp]);
+
+  const submitButton = createElement('button', { textContent: 'Lookup Airport and METAR' });
+  submitButton.type = 'submit';
+
+  const errorNode = createElement('p', {
+    className: 'error-message',
+    attributes: {
+      id: 'form-error',
+      role: 'alert',
+      'aria-live': 'polite'
+    }
+  });
+
+  appendChildren(form, [primaryIcaoLabel, icaoInput, alternateGroup, submitButton, errorNode]);
+  appendChildren(inputSection, [inputTitle, form]);
+
+  const resultsNode = createElement('section', {
+    className: 'results-stack',
+    attributes: {
+      id: 'results',
+      'aria-live': 'polite'
+    }
+  });
+
+  appendChildren(appShell, [header, bestSpotlightNode, inputSection, resultsNode]);
+  root.appendChild(appShell);
+
+  return {
+    form,
+    icaoInput,
+    alternateGroup,
+    alternateIcaoInput,
+    alternateHelp,
+    errorNode,
+    submitButton,
+    bestSpotlightNode,
+    resultsNode
+  };
 }
 
 export function mountApp(root: HTMLElement): void {
-  root.innerHTML = `
-    <div class="app-shell">
-      <header class="panel hero-panel">
-        <h1>Runway Picker</h1>
-      </header>
-
-      <section id="best-runway-spotlight" class="results-stack" aria-live="polite"></section>
-
-      <section class="panel" aria-labelledby="input-title">
-        <h2 id="input-title">Inputs</h2>
-        <form id="calculator-form" novalidate>
-          <label for="icao">Primary ICAO code</label>
-          <input
-            id="icao"
-            name="icao"
-            type="text"
-            placeholder="Example: KJFK"
-            autocomplete="off"
-            maxlength="4"
-            class="icao-input"
-            required
-          />
-
-          <div id="alternate-group" class="alternate-group" hidden>
-            <label for="alternate-icao">Alternate METAR ICAO code</label>
-            <input
-              id="alternate-icao"
-              name="alternateIcao"
-              type="text"
-              placeholder="Example: KLGA"
-              autocomplete="off"
-              maxlength="4"
-              class="icao-input"
-            />
-            <p id="alternate-help" class="field-help"></p>
-          </div>
-
-          <button type="submit">Lookup Airport and METAR</button>
-          <p id="form-error" class="error-message" role="alert" aria-live="polite"></p>
-        </form>
-      </section>
-
-      <section id="results" class="results-stack" aria-live="polite"></section>
-    </div>
-  `;
-
-  const form = root.querySelector<HTMLFormElement>('#calculator-form');
-  const icaoInput = root.querySelector<HTMLInputElement>('#icao');
-  const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
-  const alternateIcaoInput = root.querySelector<HTMLInputElement>('#alternate-icao');
-  const alternateHelp = root.querySelector<HTMLElement>('#alternate-help');
-  const errorNode = root.querySelector<HTMLElement>('#form-error');
-  const submitButton = root.querySelector<HTMLButtonElement>('button[type="submit"]');
-  const bestSpotlightNode = root.querySelector<HTMLElement>('#best-runway-spotlight');
-  const resultsNode = root.querySelector<HTMLElement>('#results');
-
-  if (
-    !form ||
-    !icaoInput ||
-    !alternateGroup ||
-    !alternateIcaoInput ||
-    !alternateHelp ||
-    !errorNode ||
-    !submitButton ||
-    !bestSpotlightNode ||
-    !resultsNode
-  ) {
-    throw new Error('App failed to initialize required form elements.');
-  }
+  const {
+    form,
+    icaoInput,
+    alternateGroup,
+    alternateIcaoInput,
+    alternateHelp,
+    errorNode,
+    submitButton,
+    bestSpotlightNode,
+    resultsNode
+  } = buildAppUi(root);
 
   let lookupState: LookupState = {
     stage: 'primary',
@@ -438,8 +558,8 @@ export function mountApp(root: HTMLElement): void {
       parserNotes.concat(buildFallbackNotes(resolution))
     );
 
-    bestSpotlightNode.innerHTML = renderBestRunway(evaluation);
-    resultsNode.innerHTML = renderDetailsPanel(resolution, evaluation);
+    bestSpotlightNode.replaceChildren(renderBestRunway(evaluation));
+    resultsNode.replaceChildren(renderDetailsPanel(resolution, evaluation));
   };
 
   const handlePrimaryLookupSubmit = async () => {
@@ -452,8 +572,8 @@ export function mountApp(root: HTMLElement): void {
     } catch (error) {
       if (shouldShowAirportNotFoundMessage(error)) {
         enterPrimaryStage();
-        bestSpotlightNode.innerHTML = '';
-        resultsNode.innerHTML = '';
+        bestSpotlightNode.replaceChildren();
+        resultsNode.replaceChildren();
         throw new Error(`We couldn't find airport ${primaryIcao}. Check the code and try again.`, {
           cause: error
         });
@@ -467,8 +587,8 @@ export function mountApp(root: HTMLElement): void {
       metar = await fetchMetarByIcao(primaryIcao);
     } catch (error) {
       if (shouldPromptAlternateMetar(error)) {
-        bestSpotlightNode.innerHTML = '';
-        resultsNode.innerHTML = '';
+        bestSpotlightNode.replaceChildren();
+        resultsNode.replaceChildren();
         enterAlternateMetarStage(primaryIcao, airport);
         errorNode.textContent = `No METAR is currently available for ICAO ${primaryIcao}. Enter an alternate ICAO code for METAR data.`;
         return;
@@ -530,8 +650,13 @@ export function mountApp(root: HTMLElement): void {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
       errorNode.textContent = message;
-      bestSpotlightNode.innerHTML = '';
-      resultsNode.innerHTML = renderErrorTechnicalDetails(error);
+      bestSpotlightNode.replaceChildren();
+      const technicalDetails = renderErrorTechnicalDetails(error);
+      if (technicalDetails) {
+        resultsNode.replaceChildren(technicalDetails);
+      } else {
+        resultsNode.replaceChildren();
+      }
     } finally {
       const elapsedMs = Date.now() - startedAt;
       const remainingMs = Math.max(0, MIN_FEEDBACK_MS - elapsedMs);

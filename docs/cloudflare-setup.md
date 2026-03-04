@@ -23,9 +23,12 @@ npx wrangler kv namespace create METAR_CACHE --preview
 2. Copy the returned production ID into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `kv_namespaces[].id`
 3. Keep `env.preview.kv_namespaces[]` binding-only in repo config (`{ "binding": "METAR_CACHE" }`).
-4. Ensure Durable Object binding and migration are present in [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
+4. Ensure Durable Object bindings and migrations are present in [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `durable_objects.bindings[]` contains `CACHE_COORDINATOR -> CacheSingleFlightCoordinator`
-   - `migrations[]` contains `new_sqlite_classes: ["CacheSingleFlightCoordinator"]`
+   - `durable_objects.bindings[]` contains `API_RATE_LIMITER -> ApiRateLimiter`
+   - `migrations[]` includes:
+     - `new_sqlite_classes: ["CacheSingleFlightCoordinator"]`
+     - `new_sqlite_classes: ["ApiRateLimiter"]`
 5. Save the preview KV namespace ID as GitHub variable `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (used by preview deploy workflow to generate runtime config).
 6. Deploy the worker:
 ```bash
@@ -43,8 +46,10 @@ Worker behavior:
 - Airport source: `https://airportdb.io/api/v1/airport/{ICAO}?apiToken={TOKEN}`
 - Shared cache stores: edge cache + Worker KV (`METAR_CACHE`)
 - Single-flight refresh coordinator: Durable Object (`CACHE_COORDINATOR`)
+- Public abuse protection: Durable Object rate limiter (`API_RATE_LIMITER`)
 - Cache TTL: 30 minutes (with stale windows configured in adapter policy)
 - Airport cache TTL: 24 hours (with stale windows configured in adapter policy)
+- Direct `workers.dev` access is disabled (`workers_dev: false`) to reduce public exposure; use Pages service binding.
 - Configure the AirportDB token in Worker secrets (never in client code):
 ```bash
 npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangler.jsonc
@@ -56,8 +61,12 @@ npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangle
   - `name: runway-picker`
   - `pages_build_output_dir: ./dist`
   - `compatibility_date: 2026-03-02`
+  - strict static security headers via `public/_headers`
   - `services` binding:
     - `METAR_API` -> `runway-picker-metar-api`
+- Worker runtime env flags are configured in `workers/metar-proxy/wrangler.jsonc`:
+  - production: `APP_ENV=production`, `ENABLE_DEBUG_ERRORS=false`
+  - preview: `APP_ENV=preview`, `ENABLE_DEBUG_ERRORS=true`
 - Preview service binding is generated in CI as:
   - `METAR_API` -> `${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}-preview`
 
@@ -122,5 +131,8 @@ git push origin v0.1.0
 ## 10) Branch protections (recommended)
 In GitHub branch protection for `main`:
 - Require pull request before merge
-- Require status check `CI / validate`
+- Require status checks:
+  - `CI / validate`
+  - `CI / security`
+  - `CI / codeql (javascript-typescript)`
 - Prevent direct pushes

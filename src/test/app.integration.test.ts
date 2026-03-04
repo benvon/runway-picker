@@ -731,4 +731,65 @@ describe('app integration', () => {
     expect(document.activeElement).not.toBe(icaoInput);
     await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
   });
+
+  it('renders provider-derived fields as text instead of executable HTML', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+
+    const maliciousAirportName = 'Airport <img src=x onerror=alert(1) />';
+    const maliciousMetar = 'METAR <script>alert(1)</script> 22012KT';
+
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KXSS') {
+        return Promise.resolve(
+          Response.json({
+            ...airportPayload('KXSS'),
+            name: maliciousAirportName
+          })
+        );
+      }
+
+      if (url === '/api/metar?icao=KXSS') {
+        return Promise.resolve(
+          Response.json({
+            ...metarPayload('KXSS', {
+              raw: '22012KT',
+              directionType: 'fixed',
+              directionDegTrue: 220,
+              speedKt: 12,
+              gustKt: null
+            }),
+            metarRaw: maliciousMetar
+          })
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KXSS';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
+
+    expect(root.textContent).toContain(`Runway airport: KXSS - ${maliciousAirportName}`);
+    expect(root.textContent).toContain(`Raw METAR: ${maliciousMetar}`);
+    expect(root.querySelector('script')).toBeNull();
+    expect(root.querySelector('img[onerror]')).toBeNull();
+  });
 });
