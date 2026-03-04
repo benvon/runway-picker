@@ -34,6 +34,20 @@ npm run test
 npm run build
 ```
 
+### Local CI parity
+
+```bash
+make ci
+```
+
+- `make ci` runs install, typecheck, lint, tests, build, secret scan, workflow lint, and dependency audit.
+- If `PREVIEW_URL` is set, `make ci` also runs E2E checks.
+- Run E2E manually any time with:
+
+```bash
+make ci-e2e
+```
+
 ## Cloudflare runtime
 
 - Static frontend served by Cloudflare Pages (`dist`)
@@ -48,10 +62,14 @@ npm run build
 
 See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
 Cache design details are documented in [docs/cache-architecture.md](./docs/cache-architecture.md).
+Security controls are documented in [docs/security-hardening.md](./docs/security-hardening.md).
 
 ## CI/CD workflows
 
-- `CI`: typecheck, lint, test, build on PRs and pushes to `main`
+- `CI`:
+  - `validate`: typecheck, lint, test, build
+  - `security`: secret scan, workflow lint, dependency audit
+  - `codeql`: static code analysis
 - `Release Tag`: on merged PRs to `main`, semver bump by branch prefix
   - `release/*` => major
   - `feature/*` => minor

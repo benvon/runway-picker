@@ -25,6 +25,22 @@ class MemoryKv {
   }
 }
 
+function alwaysBlockedRateLimiter() {
+  return {
+    idFromName: (name: string) => name,
+    get: () => ({
+      fetch: async () =>
+        Response.json({
+          allowed: false,
+          limit: 60,
+          remaining: 0,
+          resetSeconds: 10,
+          retryAfterSeconds: 10
+        })
+    })
+  };
+}
+
 function buildMetarReport(icao: string, wind: { wdir: string | number; wspd: number; wgst?: number | null }) {
   return {
     icaoId: icao,
@@ -186,6 +202,19 @@ describe('metar worker', () => {
     });
   });
 
+  it('returns 429 when rate limiter blocks the request', async () => {
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: new MemoryKv(),
+      API_RATE_LIMITER: alwaysBlockedRateLimiter()
+    });
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('10');
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'RATE_LIMITED'
+    });
+  });
+
   it('fetches from upstream on miss then returns cached on repeated request', async () => {
     const fetchUpstream = vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KJFK', { wdir: 180, wspd: 15 })]));
     vi.stubGlobal('fetch', fetchUpstream);
@@ -259,7 +288,8 @@ describe('metar worker', () => {
     );
 
     const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KABC'), {
-      METAR_CACHE: new MemoryKv()
+      METAR_CACHE: new MemoryKv(),
+      APP_ENV: 'preview'
     });
 
     expect(response.status).toBe(502);
@@ -270,6 +300,31 @@ describe('metar worker', () => {
         rawObPresent: true
       }
     });
+  });
+
+  it('omits debug payload in production mode', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        Response.json([
+          {
+            icaoId: 'KABC',
+            rawOb: 'METAR KABC 021953Z 10SM FEW020 08/03 A3012 RMK AO2'
+          }
+        ])
+      )
+    );
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KABC'), {
+      METAR_CACHE: new MemoryKv(),
+      APP_ENV: 'production',
+      ENABLE_DEBUG_ERRORS: 'false'
+    });
+
+    const payload = (await response.json()) as { debug?: unknown; code: string };
+    expect(response.status).toBe(502);
+    expect(payload.code).toBe('WIND_PARSE_ERROR');
+    expect(payload.debug).toBeUndefined();
   });
 
   it('returns user-friendly message when ICAO is not found by provider', async () => {
