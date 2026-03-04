@@ -171,6 +171,26 @@ describe('metarApi service', () => {
     });
   });
 
+  it('preserves fallback code even when API status is non-404', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            error: 'No METAR is currently available for ICAO KDKB. Try again later.',
+            code: 'METAR_UNAVAILABLE'
+          },
+          { status: 500 }
+        )
+      )
+    );
+
+    await expect(fetchMetarByIcao('KDKB')).rejects.toMatchObject({
+      status: 500,
+      code: 'METAR_UNAVAILABLE'
+    });
+  });
+
   it('includes debug payload details in parse-failure errors', async () => {
     vi.stubGlobal(
       'fetch',
