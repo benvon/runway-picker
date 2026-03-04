@@ -2,14 +2,14 @@ interface MetarProxyEnv {
   METAR_API?: Fetcher;
 }
 
-function jsonError(message: string, status: number): Response {
-  return Response.json({ error: message }, { status });
+function jsonError(message: string, status: number, code: string): Response {
+  return Response.json({ error: message, code }, { status });
 }
 
 export const onRequestGet: PagesFunction<MetarProxyEnv> = async ({ request, env }) => {
   try {
     if (!env.METAR_API) {
-      return jsonError('METAR API service binding is not configured.', 500);
+      return jsonError('METAR API service binding is not configured.', 500, 'SERVICE_NOT_CONFIGURED');
     }
 
     const requestUrl = new URL(request.url);
@@ -46,6 +46,6 @@ export const onRequestGet: PagesFunction<MetarProxyEnv> = async ({ request, env 
       headers: passthroughHeaders
     });
   } catch {
-    return jsonError('Unexpected error while proxying METAR lookup.', 500);
+    return jsonError('Unexpected error while proxying METAR lookup.', 500, 'UNEXPECTED');
   }
 };

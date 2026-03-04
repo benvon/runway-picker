@@ -40,7 +40,16 @@ function airportPayload(icao: string) {
   };
 }
 
-function metarPayload(icao: string, wind: { directionType: 'fixed' | 'variable'; directionDegTrue: number | null; speedKt: number; gustKt: number | null; raw: string; }) {
+function metarPayload(
+  icao: string,
+  wind: {
+    directionType: 'fixed' | 'variable';
+    directionDegTrue: number | null;
+    speedKt: number;
+    gustKt: number | null;
+    raw: string;
+  }
+) {
   return {
     icao,
     metarRaw: `METAR ${icao} 021953Z ${wind.raw} 10SM FEW020 08/03 A3012 RMK AO2`,
@@ -65,7 +74,7 @@ describe('app integration', () => {
     vi.unstubAllGlobals();
   });
 
-  it('calculates and renders best runway from airport + METAR API lookup', async () => {
+  it('calculates and renders best runway from primary airport + METAR lookup with details collapsed by default', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -100,15 +109,22 @@ describe('app integration', () => {
     mountApp(root);
 
     const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
     const form = root.querySelector<HTMLFormElement>('#calculator-form');
 
-    if (!icaoInput || !form) {
+    if (!icaoInput || !alternateGroup || !form) {
       throw new Error('Expected form elements not found.');
     }
+
+    expect(alternateGroup.hidden).toBe(true);
 
     icaoInput.value = 'KMCI';
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
+
+    const details = root.querySelector<HTMLDetailsElement>('.details-toggle');
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
 
     expect(fetchMock).toHaveBeenCalledWith('/api/airport?icao=KMCI', {
       method: 'GET',
@@ -234,7 +250,7 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Best runway: 18R');
   });
 
-  it('uses alternate ICAO for missing weather data', async () => {
+  it('reveals alternate METAR flow only after primary METAR 404 and locks primary input', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -247,7 +263,8 @@ describe('app integration', () => {
         return Promise.resolve(
           Response.json(
             {
-              error: 'No METAR is currently available for ICAO KJFK. Try again later.'
+              error: 'No METAR is currently available for ICAO KJFK. Try again later.',
+              code: 'METAR_UNAVAILABLE'
             },
             { status: 404 }
           )
@@ -280,19 +297,35 @@ describe('app integration', () => {
     mountApp(root);
 
     const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
     const alternateInput = root.querySelector<HTMLInputElement>('#alternate-icao');
     const form = root.querySelector<HTMLFormElement>('#calculator-form');
-    if (!icaoInput || !alternateInput || !form) {
+    if (!icaoInput || !alternateGroup || !alternateInput || !form) {
       throw new Error('Expected form elements not found.');
     }
 
+    expect(alternateGroup.hidden).toBe(true);
+
     icaoInput.value = 'KJFK';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(
+      () =>
+        root.textContent?.includes('No METAR is currently available for ICAO KJFK. Enter an alternate ICAO code for METAR data.') ??
+        false
+    );
+
+    expect(alternateGroup.hidden).toBe(false);
+    expect(icaoInput.readOnly).toBe(true);
+
     alternateInput.value = 'KLGA';
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await waitFor(() => (root.textContent?.includes('All Runway Components') ?? false));
 
-    expect(root.textContent).toContain('Weather airport: KLGA');
+    await waitFor(() => (root.textContent?.includes('Weather airport: KLGA') ?? false));
+
     expect(root.textContent).toContain('Using split data sources: runways from KJFK and METAR from KLGA.');
+    expect(alternateGroup.hidden).toBe(true);
+    expect(icaoInput.readOnly).toBe(false);
     expect(fetchMock).toHaveBeenCalledWith('/api/metar?icao=KLGA', {
       method: 'GET',
       cache: 'no-store',
@@ -300,30 +333,35 @@ describe('app integration', () => {
     });
   });
 
-  it('shows alternate-airport guidance when runway data is missing and no alternate is provided', async () => {
+  it('reveals alternate METAR flow only when METAR API returns fallback code', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
 
-      if (url === '/api/airport?icao=KXYZ') {
+      if (url === '/api/airport?icao=KDKB') {
+        return Promise.resolve(Response.json(airportPayload('KDKB')));
+      }
+
+      if (url === '/api/metar?icao=KDKB') {
         return Promise.resolve(
           Response.json(
             {
-              error: 'ICAO code KXYZ was not found in airport database.'
+              error: 'No METAR is currently available for ICAO KDKB. Try again later.',
+              code: 'METAR_UNAVAILABLE'
             },
             { status: 404 }
           )
         );
       }
 
-      if (url === '/api/metar?icao=KXYZ') {
+      if (url === '/api/metar?icao=KORD') {
         return Promise.resolve(
           Response.json(
-            metarPayload('KXYZ', {
-              raw: '18008KT',
+            metarPayload('KORD', {
+              raw: '18011KT',
               directionType: 'fixed',
               directionDegTrue: 180,
-              speedKt: 8,
+              speedKt: 11,
               gustKt: null
             })
           )
@@ -342,18 +380,187 @@ describe('app integration', () => {
     mountApp(root);
 
     const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
+    const alternateInput = root.querySelector<HTMLInputElement>('#alternate-icao');
     const form = root.querySelector<HTMLFormElement>('#calculator-form');
-    if (!icaoInput || !form) {
+    if (!icaoInput || !alternateGroup || !alternateInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KDKB';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() => (alternateGroup.hidden === false));
+
+    expect(alternateGroup.hidden).toBe(false);
+    expect(icaoInput.readOnly).toBe(true);
+    expect(root.textContent).toContain(
+      'No METAR is currently available for ICAO KDKB. Enter an alternate ICAO code for METAR data.'
+    );
+
+    alternateInput.value = 'KORD';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() => (root.textContent?.includes('Weather airport: KORD') ?? false));
+    expect(root.textContent).toContain('Using split data sources: runways from KDKB and METAR from KORD.');
+  });
+
+  it('reveals alternate METAR flow when fallback code is returned with non-404 status', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KDKB') {
+        return Promise.resolve(Response.json(airportPayload('KDKB')));
+      }
+
+      if (url === '/api/metar?icao=KDKB') {
+        return Promise.resolve(
+          Response.json(
+            {
+              error: 'No METAR is currently available for ICAO KDKB. Try again later.',
+              code: 'METAR_UNAVAILABLE'
+            },
+            { status: 500 }
+          )
+        );
+      }
+
+      if (url === '/api/metar?icao=KORD') {
+        return Promise.resolve(
+          Response.json(
+            metarPayload('KORD', {
+              raw: '21009KT',
+              directionType: 'fixed',
+              directionDegTrue: 210,
+              speedKt: 9,
+              gustKt: null
+            })
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
+    const alternateInput = root.querySelector<HTMLInputElement>('#alternate-icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !alternateGroup || !alternateInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KDKB';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (alternateGroup.hidden === false));
+
+    expect(alternateGroup.hidden).toBe(false);
+    expect(icaoInput.readOnly).toBe(true);
+
+    alternateInput.value = 'KORD';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (root.textContent?.includes('Weather airport: KORD') ?? false));
+  });
+
+  it('does not reveal alternate METAR flow for generic METAR errors without fallback code', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KDKB') {
+        return Promise.resolve(Response.json(airportPayload('KDKB')));
+      }
+
+      if (url === '/api/metar?icao=KDKB') {
+        return Promise.resolve(
+          Response.json(
+            {
+              error: 'Unexpected error while loading METAR.',
+              code: 'UNEXPECTED'
+            },
+            { status: 500 }
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !alternateGroup || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KDKB';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    await waitFor(() => (root.textContent?.includes('Unexpected error while loading METAR.') ?? false));
+
+    expect(root.textContent).toContain('Unexpected error while loading METAR.');
+    expect(alternateGroup.hidden).toBe(true);
+  });
+
+  it('shows friendly airport-not-found message and does not reveal alternate flow', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KXYZ') {
+        return Promise.resolve(
+          Response.json(
+            {
+              error: 'ICAO code KXYZ was not found in airport database.',
+              code: 'ICAO_NOT_FOUND'
+            },
+            { status: 404 }
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !alternateGroup || !form) {
       throw new Error('Expected form elements not found.');
     }
 
     icaoInput.value = 'KXYZ';
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await waitFor(() => (root.textContent?.includes('Enter an alternate ICAO code to source runway data.') ?? false));
 
-    expect(root.textContent).toContain(
-      'Runway data is unavailable for ICAO KXYZ. Enter an alternate ICAO code to source runway data.'
-    );
+    await waitFor(() => (root.textContent?.includes("We couldn't find airport KXYZ. Check the code and try again.") ?? false));
+
+    expect(root.textContent).toContain("We couldn't find airport KXYZ. Check the code and try again.");
+    expect(alternateGroup.hidden).toBe(true);
     expect(root.textContent).not.toContain('All Runway Components');
   });
 
@@ -471,5 +678,57 @@ describe('app integration', () => {
     expect(root.textContent).toContain('"rawObPresent": true');
     expect(root.textContent).toContain('"rawWindToken": null');
     expect(root.textContent).not.toContain('All Runway Components');
+  });
+
+  it('dismisses focused input when lookup starts', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KMCI') {
+        return Promise.resolve(Response.json(airportPayload('KMCI')));
+      }
+
+      if (url === '/api/metar?icao=KMCI') {
+        return Promise.resolve(
+          Response.json(
+            metarPayload('KMCI', {
+              raw: '12008KT',
+              directionType: 'fixed',
+              directionDegTrue: 120,
+              speedKt: 8,
+              gustKt: null
+            })
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KMCI';
+    icaoInput.focus();
+    expect(document.activeElement).toBe(icaoInput);
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    expect(document.activeElement).not.toBe(icaoInput);
+    await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
   });
 });

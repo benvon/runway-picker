@@ -97,17 +97,25 @@ export async function handleMetarRequest(request: Request, env: CacheEngineEnv):
     });
   } catch (error) {
     if (error instanceof MetarWorkerError) {
+      const payload: { error: string; code: string; debug?: unknown } = {
+        error: error.message,
+        code: error.code
+      };
+      if (error.debug) {
+        payload.debug = error.debug;
+      }
+
       return buildJsonResponse(
-        error.debug ? { error: error.message, debug: error.debug } : { error: error.message },
+        payload,
         error.status
       );
     }
 
     if (error instanceof CacheEngineError) {
-      return buildJsonResponse({ error: error.message }, error.status);
+      return buildJsonResponse({ error: error.message, code: 'CACHE_ERROR' }, error.status);
     }
 
-    return buildJsonResponse({ error: 'Unexpected error while loading METAR.' }, 500);
+    return buildJsonResponse({ error: 'Unexpected error while loading METAR.', code: 'UNEXPECTED' }, 500);
   }
 }
 
@@ -141,14 +149,14 @@ export async function handleAirportRequest(request: Request, env: CacheEngineEnv
     });
   } catch (error) {
     if (error instanceof AirportWorkerError) {
-      return buildJsonResponse({ error: error.message }, error.status);
+      return buildJsonResponse({ error: error.message, code: error.code }, error.status);
     }
 
     if (error instanceof CacheEngineError) {
-      return buildJsonResponse({ error: error.message }, error.status);
+      return buildJsonResponse({ error: error.message, code: 'CACHE_ERROR' }, error.status);
     }
 
-    return buildJsonResponse({ error: 'Unexpected error while loading airport data.' }, 500);
+    return buildJsonResponse({ error: 'Unexpected error while loading airport data.', code: 'UNEXPECTED' }, 500);
   }
 }
 

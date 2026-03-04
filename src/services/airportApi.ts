@@ -35,13 +35,27 @@ export interface AirportLookupResponse {
   cache: AirportCacheMetadata;
 }
 
+export type AirportLookupErrorCode =
+  | 'INVALID_ICAO'
+  | 'SERVICE_NOT_CONFIGURED'
+  | 'AUTH_ERROR'
+  | 'ICAO_NOT_FOUND'
+  | 'RUNWAY_DATA_UNAVAILABLE'
+  | 'PROVIDER_ERROR'
+  | 'PROVIDER_PAYLOAD_INVALID'
+  | 'CACHE_ERROR'
+  | 'UNEXPECTED'
+  | 'UNKNOWN';
+
 export class AirportLookupError extends Error {
   status: number;
+  code: AirportLookupErrorCode;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code: AirportLookupErrorCode = 'UNKNOWN') {
     super(message);
     this.name = 'AirportLookupError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -132,7 +146,7 @@ function normalizeCacheMetadata(
 
 function normalizeRunwayEnds(runwayCandidate: unknown): RunwayEnd[] {
   if (!Array.isArray(runwayCandidate)) {
-    throw new AirportLookupError('Airport response is missing runway data.', 502);
+    throw new AirportLookupError('Airport response is missing runway data.', 502, 'UNEXPECTED');
   }
 
   const parsed = runwayCandidate
@@ -155,7 +169,7 @@ function normalizeRunwayEnds(runwayCandidate: unknown): RunwayEnd[] {
     }));
 
   if (parsed.length === 0) {
-    throw new AirportLookupError('Airport response does not contain usable runway ends.', 502);
+    throw new AirportLookupError('Airport response does not contain usable runway ends.', 502, 'UNEXPECTED');
   }
 
   return parsed;
@@ -164,7 +178,7 @@ function normalizeRunwayEnds(runwayCandidate: unknown): RunwayEnd[] {
 export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
   if (!/^[A-Z0-9]{4}$/.test(icao)) {
-    throw new AirportLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400);
+    throw new AirportLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400, 'INVALID_ICAO');
   }
 
   const response = await fetch(`/api/airport?icao=${encodeURIComponent(icao)}`, {
@@ -177,15 +191,19 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
 
   if (!response.ok) {
     let message = `Unable to load airport data for ${icao}.`;
+    let code: AirportLookupErrorCode = 'UNKNOWN';
 
     try {
-      const errorPayload = (await response.json()) as { error?: string; message?: string };
+      const errorPayload = (await response.json()) as { error?: string; message?: string; code?: unknown };
       message = errorPayload.error ?? errorPayload.message ?? message;
+      if (typeof errorPayload.code === 'string') {
+        code = errorPayload.code as AirportLookupErrorCode;
+      }
     } catch {
       // Keep default message when body isn't JSON.
     }
 
-    throw new AirportLookupError(message, response.status);
+    throw new AirportLookupError(message, response.status, code);
   }
 
   const payload = (await response.json()) as Omit<AirportLookupResponse, 'cache' | 'runwayEnds'> & {
@@ -194,7 +212,7 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
   };
 
   if (typeof payload.icao !== 'string' || typeof payload.requestedIcao !== 'string' || typeof payload.name !== 'string') {
-    throw new AirportLookupError('Airport response contains invalid airport fields.', 502);
+    throw new AirportLookupError('Airport response contains invalid airport fields.', 502, 'UNEXPECTED');
   }
 
   return {
