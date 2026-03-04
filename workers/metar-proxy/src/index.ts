@@ -49,8 +49,10 @@ interface ResponseOptions {
   rateLimit?: RateLimitHeaders;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function createRequestId(existing: string | null): string {
-  if (typeof existing === 'string' && existing.trim().length > 0) {
+  if (typeof existing === 'string' && UUID_PATTERN.test(existing.trim())) {
     return existing.trim();
   }
 
