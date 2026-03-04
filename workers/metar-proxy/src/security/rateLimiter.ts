@@ -129,7 +129,12 @@ export class ApiRateLimiter {
     }
 
     if (url.pathname === '/check') {
-      const body = (await request.json()) as CheckRequestBody;
+      let body: CheckRequestBody = {};
+      try {
+        body = (await request.json()) as CheckRequestBody;
+      } catch {
+        // Fall through with empty body; nowMs will default to Date.now()
+      }
       const nowMs = toSafeNow(body?.nowMs);
       const rawState = (await this.state.storage.get<RateLimitState>(STATE_KEY)) ?? createState(nowMs);
 
@@ -159,7 +164,16 @@ export class ApiRateLimiter {
       const nextSustained = state.sustained.count + 1;
 
       if (nextBurst > BURST_LIMIT || nextSustained > SUSTAINED_LIMIT) {
-        const exceededResetMs = Math.min(state.burst.resetAtMs, state.sustained.resetAtMs);
+        const burstExceeded = nextBurst > BURST_LIMIT;
+        const sustainedExceeded = nextSustained > SUSTAINED_LIMIT;
+        let exceededResetMs: number;
+        if (burstExceeded && sustainedExceeded) {
+          exceededResetMs = Math.max(state.burst.resetAtMs, state.sustained.resetAtMs);
+        } else if (burstExceeded) {
+          exceededResetMs = state.burst.resetAtMs;
+        } else {
+          exceededResetMs = state.sustained.resetAtMs;
+        }
         const retryAfterSeconds = secondsUntilReset(nowMs, exceededResetMs);
         const responseBody: RateLimitDecisionResponse = {
           allowed: false,
@@ -194,7 +208,12 @@ export class ApiRateLimiter {
     }
 
     if (url.pathname === '/invalid-icao') {
-      const body = (await request.json()) as PenalizeRequestBody;
+      let body: PenalizeRequestBody = {};
+      try {
+        body = (await request.json()) as PenalizeRequestBody;
+      } catch {
+        // Fall through with empty body; nowMs will default to Date.now()
+      }
       const nowMs = toSafeNow(body?.nowMs);
       const rawState = (await this.state.storage.get<RateLimitState>(STATE_KEY)) ?? createState(nowMs);
 
