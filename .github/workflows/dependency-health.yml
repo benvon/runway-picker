@@ -1,0 +1,67 @@
+name: Dependency Health
+
+on:
+  schedule:
+    - cron: '30 14 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependencies
+        env:
+          CI: true
+        run: npm run security:audit
+
+      - name: Collect outdated dependency report
+        shell: bash
+        run: |
+          npm outdated --json > outdated.json || true
+          if [ ! -s outdated.json ]; then
+            echo '{}' > outdated.json
+          fi
+
+      - name: Publish dependency summary
+        shell: bash
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+          const raw = fs.readFileSync('outdated.json', 'utf8');
+          const data = JSON.parse(raw);
+          const keys = Object.keys(data);
+          const lines = ['## Dependency Drift', ''];
+          if (keys.length === 0) {
+            lines.push('No outdated dependencies detected.');
+          } else {
+            lines.push('| Package | Current | Wanted | Latest |');
+            lines.push('| --- | --- | --- | --- |');
+            for (const name of keys.sort()) {
+              const item = data[name];
+              lines.push(`| ${name} | ${item.current ?? '-'} | ${item.wanted ?? '-'} | ${item.latest ?? '-'} |`);
+            }
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join('\n')}\n`);
+          EOF
+
+      - name: Upload outdated report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dependency-health-${{ github.run_id }}
+          if-no-files-found: error
+          path: outdated.json

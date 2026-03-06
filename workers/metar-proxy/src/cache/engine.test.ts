@@ -94,6 +94,15 @@ function createCoordinatorNamespace(): DurableObjectNamespaceLike {
   };
 }
 
+function createBlockedCoordinatorNamespace(): DurableObjectNamespaceLike {
+  return {
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async () => Response.json({ acquired: false })
+    })
+  };
+}
+
 function buildAdapter(overrides?: {
   fetchUpstream?: CacheResourceAdapter<DemoInput, string, DemoData>['fetchUpstream'];
   validate?: CacheResourceAdapter<DemoInput, string, DemoData>['validate'];
@@ -377,5 +386,82 @@ describe('cache engine', () => {
     const stored = (await kv.get('v1:demo:alpha')) as CacheEnvelope<DemoData>;
     expect(stored.data.value).toBe('normalized-value');
     expect(stored.data.fetchedAt).toBe('2026-03-03T12:00:00.000Z');
+  });
+
+  it('serves stale-while-refresh for follower requests when stale data exists', async () => {
+    const adapter = buildAdapter({
+      ttlSeconds: 30,
+      staleWhileRevalidateSeconds: 60
+    });
+    const kv = new MemoryKv();
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'stale-value', '2026-03-03T11:59:20.000Z', 30)
+    );
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: {
+        METAR_CACHE: kv,
+        CACHE_COORDINATOR: createBlockedCoordinatorNamespace()
+      },
+      edgeCache: new MemoryEdgeCache(),
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('stale_while_refresh');
+    expect(result.payload.value).toBe('stale-value');
+  });
+
+  it('throws a cache engine error when non-Error values bubble from upstream refresh', async () => {
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn().mockRejectedValue('unexpected-string-error')
+    });
+    const kv = new MemoryKv();
+
+    await expect(
+      getOrRefreshCached({
+        adapter,
+        input: { key: 'alpha' },
+        request: new Request('https://example.com'),
+        env: { METAR_CACHE: kv },
+        edgeCache: new MemoryEdgeCache(),
+        now: new Date('2026-03-03T12:00:00.000Z')
+      })
+    ).rejects.toMatchObject({
+      name: 'CacheEngineError',
+      message: 'Unexpected cache refresh failure.',
+      status: 500
+    });
+  });
+
+  it('serves stale-on-error for follower requests after waiting for leader refresh', async () => {
+    const adapter = buildAdapter({
+      ttlSeconds: 30,
+      staleWhileRevalidateSeconds: 10,
+      staleOnErrorSeconds: 120
+    });
+    const kv = new MemoryKv();
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'older-stale', '2026-03-03T12:00:00.000Z', 30)
+    );
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: {
+        METAR_CACHE: kv,
+        CACHE_COORDINATOR: createBlockedCoordinatorNamespace()
+      },
+      edgeCache: new MemoryEdgeCache(),
+      now: new Date('2026-03-03T12:00:45.000Z')
+    });
+
+    expect(result.cache.status).toBe('stale_on_error');
+    expect(result.payload.value).toBe('older-stale');
   });
 });

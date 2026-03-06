@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  default as workerEntrypoint,
   extractMetarRaw,
   handleAirportRequest,
   handleMetarRequest,
@@ -36,6 +37,25 @@ function alwaysBlockedRateLimiter() {
           remaining: 0,
           resetSeconds: 10,
           retryAfterSeconds: 10
+        })
+    })
+  };
+}
+
+function capturingRateLimiter(capturedNames: string[]) {
+  return {
+    idFromName: (name: string) => {
+      capturedNames.push(name);
+      return name;
+    },
+    get: () => ({
+      fetch: async () =>
+        Response.json({
+          allowed: true,
+          limit: 60,
+          remaining: 59,
+          resetSeconds: 60,
+          retryAfterSeconds: null
         })
     })
   };
@@ -200,6 +220,66 @@ describe('metar worker', () => {
     await expect(response.json()).resolves.toMatchObject({
       code: 'INVALID_ICAO'
     });
+  });
+
+  it('returns 405 for non-GET requests', async () => {
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI', { method: 'POST' }), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(405);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'METHOD_NOT_ALLOWED'
+    });
+  });
+
+  it('returns 404 for unknown metar paths', async () => {
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/unknown?icao=KMCI'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'NOT_FOUND'
+    });
+  });
+
+  it('uses client headers when deriving rate-limit keys', async () => {
+    const capturedNames: string[] = [];
+
+    await handleMetarRequest(
+      new Request('https://metar.internal/api/metar?icao=ABC', {
+        headers: { 'X-Client-IP': '203.0.113.10' }
+      }),
+      {
+        METAR_CACHE: new MemoryKv(),
+        API_RATE_LIMITER: capturingRateLimiter(capturedNames)
+      }
+    );
+
+    await handleMetarRequest(
+      new Request('https://metar.internal/api/metar?icao=ABC', {
+        headers: { 'CF-Connecting-IP': '198.51.100.2' }
+      }),
+      {
+        METAR_CACHE: new MemoryKv(),
+        API_RATE_LIMITER: capturingRateLimiter(capturedNames)
+      }
+    );
+
+    await handleMetarRequest(
+      new Request('https://metar.internal/api/metar?icao=ABC', {
+        headers: { 'X-Client-IP': 'invalid-ip' }
+      }),
+      {
+        METAR_CACHE: new MemoryKv(),
+        API_RATE_LIMITER: capturingRateLimiter(capturedNames)
+      }
+    );
+
+    expect(capturedNames).toContain('rl:203.0.113.10:metar');
+    expect(capturedNames).toContain('rl:198.51.100.2:metar');
+    expect(capturedNames).toContain('rl:unknown:metar');
   });
 
   it('returns 429 when rate limiter blocks the request', async () => {
@@ -490,6 +570,43 @@ describe('airport worker', () => {
     });
   });
 
+  it('returns 429 when airport endpoint is rate limited', async () => {
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token',
+      API_RATE_LIMITER: alwaysBlockedRateLimiter()
+    });
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'RATE_LIMITED'
+    });
+  });
+
+  it('returns 405 for non-GET airport requests', async () => {
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK', { method: 'POST' }), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(405);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'METHOD_NOT_ALLOWED'
+    });
+  });
+
+  it('returns 404 for unknown airport paths', async () => {
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/nope?icao=KJFK'), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'NOT_FOUND'
+    });
+  });
+
   it('returns 404 when airport has no usable runway data', async () => {
     vi.stubGlobal(
       'fetch',
@@ -513,5 +630,20 @@ describe('airport worker', () => {
       error: 'No runway data is available for ICAO KHEL.',
       code: 'RUNWAY_DATA_UNAVAILABLE'
     });
+  });
+
+  it('routes airport and metar requests through the worker entrypoint', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 10 })])));
+
+    const airportResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/airport?icao=ABC'), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+    const metarResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: new MemoryKv()
+    });
+
+    expect(airportResponse.status).toBe(400);
+    expect(metarResponse.status).toBe(200);
   });
 });

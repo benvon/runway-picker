@@ -143,44 +143,54 @@ function toRunwayEnd(identCandidate: unknown, isClosed: boolean, lengthFt: numbe
   };
 }
 
-function toAirportData(candidate: unknown): AirportResourceData | null {
-  if (!candidate || typeof candidate !== 'object') {
-    return null;
-  }
+function isAirportResourceShape(asData: Partial<AirportResourceData>): asData is AirportResourceData {
+  return (
+    typeof asData.requestedIcao === 'string' &&
+    typeof asData.icao === 'string' &&
+    typeof asData.name === 'string' &&
+    typeof asData.municipality === 'string' &&
+    typeof asData.countryCode === 'string' &&
+    typeof asData.countryName === 'string' &&
+    Array.isArray(asData.runwayEnds) &&
+    typeof asData.fetchedAt === 'string' &&
+    asData.source === 'airportdb'
+  );
+}
 
-  const asData = candidate as Partial<AirportResourceData>;
-  if (
-    typeof asData.requestedIcao !== 'string' ||
-    typeof asData.icao !== 'string' ||
-    typeof asData.name !== 'string' ||
-    typeof asData.municipality !== 'string' ||
-    typeof asData.countryCode !== 'string' ||
-    typeof asData.countryName !== 'string' ||
-    !Array.isArray(asData.runwayEnds) ||
-    typeof asData.fetchedAt !== 'string' ||
-    asData.source !== 'airportdb'
-  ) {
-    return null;
-  }
+function isAirportRunwayEndCandidate(runway: unknown): runway is AirportRunwayEnd {
+  return (
+    Boolean(runway) &&
+    typeof runway === 'object' &&
+    typeof (runway as { id?: unknown }).id === 'string' &&
+    typeof (runway as { headingDegMag?: unknown }).headingDegMag === 'number' &&
+    typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' &&
+    ((runway as { lengthFt?: unknown }).lengthFt === null ||
+      typeof (runway as { lengthFt?: unknown }).lengthFt === 'number')
+  );
+}
 
-  const runwayEnds = asData.runwayEnds
-    .filter((runway): runway is AirportRunwayEnd => {
-      return (
-        Boolean(runway) &&
-        typeof runway === 'object' &&
-        typeof (runway as { id?: unknown }).id === 'string' &&
-        typeof (runway as { headingDegMag?: unknown }).headingDegMag === 'number' &&
-        typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' &&
-        ((runway as { lengthFt?: unknown }).lengthFt === null ||
-          typeof (runway as { lengthFt?: unknown }).lengthFt === 'number')
-      );
-    })
+function normalizeCachedRunways(runways: AirportResourceData['runwayEnds']): AirportRunwayEnd[] {
+  return runways
+    .filter(isAirportRunwayEndCandidate)
     .map((runway) => ({
       id: runway.id,
       headingDegMag: runway.headingDegMag,
       isClosed: runway.isClosed,
       lengthFt: runway.lengthFt
     }));
+}
+
+function toAirportData(candidate: unknown): AirportResourceData | null {
+  if (!candidate || typeof candidate !== 'object') {
+    return null;
+  }
+
+  const asData = candidate as Partial<AirportResourceData>;
+  if (!isAirportResourceShape(asData)) {
+    return null;
+  }
+
+  const runwayEnds = normalizeCachedRunways(asData.runwayEnds);
 
   if (runwayEnds.length === 0) {
     return null;
@@ -243,6 +253,56 @@ function toCountryName(payload: AirportDbPayload): string {
   return '';
 }
 
+function shouldReplaceRunway(existing: AirportRunwayEnd | undefined, candidate: AirportRunwayEnd): boolean {
+  if (!existing) {
+    return true;
+  }
+
+  if (existing.isClosed && !candidate.isClosed) {
+    return true;
+  }
+
+  return existing.isClosed === candidate.isClosed && (existing.lengthFt ?? 0) < (candidate.lengthFt ?? 0);
+}
+
+function addRunwayCandidate(runwayMap: Map<string, AirportRunwayEnd>, candidate: AirportRunwayEnd | null): void {
+  if (!candidate) {
+    return;
+  }
+
+  const existing = runwayMap.get(candidate.id);
+  if (shouldReplaceRunway(existing, candidate)) {
+    runwayMap.set(candidate.id, candidate);
+  }
+}
+
+function collectRunwayEnds(payload: AirportDbPayload): AirportRunwayEnd[] {
+  const runways = Array.isArray(payload.runways) ? (payload.runways as AirportDbRunway[]) : [];
+  const runwayMap = new Map<string, AirportRunwayEnd>();
+
+  for (const runway of runways) {
+    if (!runway || typeof runway !== 'object') {
+      continue;
+    }
+
+    const runwayClosed = isRunwayClosed(runway.closed);
+    const lengthFtCandidate = toIntegerValue(runway.length_ft);
+    const lengthFt = lengthFtCandidate !== null && lengthFtCandidate > 0 ? lengthFtCandidate : null;
+    addRunwayCandidate(runwayMap, toRunwayEnd(runway.le_ident, runwayClosed, lengthFt));
+    addRunwayCandidate(runwayMap, toRunwayEnd(runway.he_ident, runwayClosed, lengthFt));
+  }
+
+  return [...runwayMap.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function resolvePayloadIcao(payload: AirportDbPayload, requestedIcao: string): string {
+  return (
+    toStringValue(payload.icao_code)?.toUpperCase() ??
+    toStringValue(payload.ident)?.toUpperCase() ??
+    requestedIcao
+  );
+}
+
 export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, unknown, AirportResourceData> = {
   resource: 'airport',
   schemaVersion: AIRPORT_SCHEMA_VERSION,
@@ -279,50 +339,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
   validate: (upstream, input) => {
     const requestedIcao = normalizeAirportIcao(input.icao);
     const payload = toAirportDbPayload(upstream);
-
-    const payloadIcao =
-      toStringValue(payload.icao_code)?.toUpperCase() ??
-      toStringValue(payload.ident)?.toUpperCase() ??
-      requestedIcao;
-
-    const runways = Array.isArray(payload.runways) ? (payload.runways as AirportDbRunway[]) : [];
-    const runwayMap = new Map<string, AirportRunwayEnd>();
-
-    for (const runway of runways) {
-      if (!runway || typeof runway !== 'object') {
-        continue;
-      }
-
-      const runwayClosed = isRunwayClosed(runway.closed);
-      const lengthFtCandidate = toIntegerValue(runway.length_ft);
-      const lengthFt = lengthFtCandidate !== null && lengthFtCandidate > 0 ? lengthFtCandidate : null;
-      const le = toRunwayEnd(runway.le_ident, runwayClosed, lengthFt);
-      const he = toRunwayEnd(runway.he_ident, runwayClosed, lengthFt);
-
-      if (le) {
-        const existing = runwayMap.get(le.id);
-        if (
-          !existing ||
-          (existing.isClosed && !le.isClosed) ||
-          (existing.isClosed === le.isClosed && (existing.lengthFt ?? 0) < (le.lengthFt ?? 0))
-        ) {
-          runwayMap.set(le.id, le);
-        }
-      }
-
-      if (he) {
-        const existing = runwayMap.get(he.id);
-        if (
-          !existing ||
-          (existing.isClosed && !he.isClosed) ||
-          (existing.isClosed === he.isClosed && (existing.lengthFt ?? 0) < (he.lengthFt ?? 0))
-        ) {
-          runwayMap.set(he.id, he);
-        }
-      }
-    }
-
-    const runwayEnds = [...runwayMap.values()].sort((a, b) => a.id.localeCompare(b.id));
+    const runwayEnds = collectRunwayEnds(payload);
     if (runwayEnds.length === 0) {
       throw new AirportWorkerError(
         `No runway data is available for ICAO ${requestedIcao}.`,
@@ -333,7 +350,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
 
     return {
       requestedIcao,
-      icao: payloadIcao,
+      icao: resolvePayloadIcao(payload, requestedIcao),
       name: toStringValue(payload.name) ?? requestedIcao,
       municipality: toStringValue(payload.municipality) ?? '',
       countryCode: toStringValue(payload.iso_country) ?? '',

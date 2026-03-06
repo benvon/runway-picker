@@ -67,138 +67,144 @@ function runwayNumberForSort(runwayId: string): number {
   return number === 0 ? 36 : number;
 }
 
-export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNotes: string[] = []): EvaluationResult {
-  const globalNotes = [...parserNotes];
-  const hasRunways = runways.length > 0;
-  const openRunways = runways.filter((runway) => !runway.isClosed);
+function buildNoRunwayResult(wind: ParsedWind, globalNotes: string[]): EvaluationResult {
+  return {
+    parsedWind: wind,
+    runwayResults: [],
+    bestRunwayId: null,
+    bestReason: 'No runways available.',
+    globalNotes
+  };
+}
 
-  if (!hasRunways) {
+function buildAllClosedResult(runways: RunwayEnd[], wind: ParsedWind, globalNotes: string[]): EvaluationResult {
+  const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
+    runwayId: runway.id,
+    isClosed: true,
+    sustained: null,
+    gust: null,
+    notes: [CLOSED_RUNWAY_NOTE]
+  }));
+
+  return {
+    parsedWind: wind,
+    runwayResults,
+    bestRunwayId: null,
+    bestReason: 'No open runways available for selection.',
+    globalNotes
+  };
+}
+
+function buildVariableWindResult(
+  runways: RunwayEnd[],
+  wind: ParsedWind,
+  globalNotes: string[]
+): EvaluationResult {
+  const variableSpeedNote =
+    wind.gustKt !== null
+      ? `Variable wind direction (VRB) at ${wind.speedKt} kt with gusts to ${wind.gustKt} kt prevents per-runway component calculations.`
+      : `Variable wind direction (VRB) at ${wind.speedKt} kt prevents per-runway component calculations.`;
+
+  const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
+    runwayId: runway.id,
+    isClosed: Boolean(runway.isClosed),
+    sustained: null,
+    gust: null,
+    notes: runway.isClosed ? [CLOSED_RUNWAY_NOTE] : [variableSpeedNote]
+  }));
+
+  return {
+    parsedWind: wind,
+    runwayResults,
+    bestRunwayId: null,
+    bestReason: `Variable winds reported at ${wind.speedKt} kt; no deterministic best runway.`,
+    globalNotes
+  };
+}
+
+function buildCalmWindResult(
+  runways: RunwayEnd[],
+  openRunways: RunwayEnd[],
+  wind: ParsedWind,
+  globalNotes: string[]
+): EvaluationResult {
+  const calmRanking: RankedRunway[] = openRunways.map((runway) => ({
+    runwayId: runway.id,
+    headwindKt: 0,
+    crosswindKt: 0,
+    runwayLengthFt: runwayLengthForSort(runway),
+    runwayNumber: runwayNumberForSort(runway.id)
+  }));
+  calmRanking.sort(sortRunwaysForBest);
+  const bestRunwayId = calmRanking[0]?.runwayId ?? null;
+
+  const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
+    runwayId: runway.id,
+    isClosed: Boolean(runway.isClosed),
+    sustained: runway.isClosed ? null : zeroComponent(),
+    gust: null,
+    notes: runway.isClosed ? [CLOSED_RUNWAY_NOTE] : ['Calm winds: runway choice is not wind-limited.']
+  }));
+
+  return {
+    parsedWind: wind,
+    runwayResults,
+    bestRunwayId,
+    bestReason: 'Calm winds; selected by tie-break among open runways (longest runway, then smallest runway number).',
+    globalNotes
+  };
+}
+
+function toFixedRunwayComponent(runway: RunwayEnd, wind: ParsedWind, ranking: RankedRunway[]): RunwayWindComponent {
+  if (runway.isClosed) {
     return {
-      parsedWind: wind,
-      runwayResults: [],
-      bestRunwayId: null,
-      bestReason: 'No runways available.',
-      globalNotes
-    };
-  }
-
-  if (openRunways.length === 0) {
-    const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
       runwayId: runway.id,
       isClosed: true,
       sustained: null,
       gust: null,
       notes: [CLOSED_RUNWAY_NOTE]
-    }));
-
-    return {
-      parsedWind: wind,
-      runwayResults,
-      bestRunwayId: null,
-      bestReason: 'No open runways available for selection.',
-      globalNotes
     };
   }
 
-  if (wind.directionType === 'variable') {
-    const variableSpeedNote =
-      wind.gustKt !== null
-        ? `Variable wind direction (VRB) at ${wind.speedKt} kt with gusts to ${wind.gustKt} kt prevents per-runway component calculations.`
-        : `Variable wind direction (VRB) at ${wind.speedKt} kt prevents per-runway component calculations.`;
+  const directionDegTrue = wind.directionDegTrue as number;
+  const sustainedRaw = calculateWindComponent(wind.speedKt, directionDegTrue, runway.headingDegMag);
+  ranking.push({
+    runwayId: runway.id,
+    headwindKt: sustainedRaw.headwindKt,
+    crosswindKt: sustainedRaw.crosswindKt,
+    runwayLengthFt: runwayLengthForSort(runway),
+    runwayNumber: runwayNumberForSort(runway.id)
+  });
 
-    const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
-      runwayId: runway.id,
-      isClosed: Boolean(runway.isClosed),
-      sustained: null,
-      gust: null,
-      notes: runway.isClosed ? [CLOSED_RUNWAY_NOTE] : [variableSpeedNote]
-    }));
+  const gustRaw =
+    wind.gustKt !== null ? calculateWindComponent(wind.gustKt, directionDegTrue, runway.headingDegMag) : null;
 
-    return {
-      parsedWind: wind,
-      runwayResults,
-      bestRunwayId: null,
-      bestReason: `Variable winds reported at ${wind.speedKt} kt; no deterministic best runway.`,
-      globalNotes
-    };
-  }
+  return {
+    runwayId: runway.id,
+    isClosed: false,
+    sustained: {
+      headwindKt: sustainedRaw.headwindKt,
+      crosswindKt: sustainedRaw.crosswindKt,
+      crosswindFrom: sustainedRaw.crosswindFrom
+    },
+    gust: gustRaw
+      ? {
+          headwindKt: gustRaw.headwindKt,
+          crosswindKt: gustRaw.crosswindKt,
+          crosswindFrom: gustRaw.crosswindFrom
+        }
+      : null,
+    notes: []
+  };
+}
 
-  if (wind.directionType === 'calm') {
-    const calmRanking: RankedRunway[] = openRunways.map((runway) => ({
-      runwayId: runway.id,
-      headwindKt: 0,
-      crosswindKt: 0,
-      runwayLengthFt: runwayLengthForSort(runway),
-      runwayNumber: runwayNumberForSort(runway.id)
-    }));
-    calmRanking.sort(sortRunwaysForBest);
-    const bestRunwayId = calmRanking[0]?.runwayId ?? null;
-
-    const runwayResults: RunwayWindComponent[] = runways.map((runway) => ({
-      runwayId: runway.id,
-      isClosed: Boolean(runway.isClosed),
-      sustained: runway.isClosed ? null : zeroComponent(),
-      gust: null,
-      notes: runway.isClosed ? [CLOSED_RUNWAY_NOTE] : ['Calm winds: runway choice is not wind-limited.']
-    }));
-
-    return {
-      parsedWind: wind,
-      runwayResults,
-      bestRunwayId,
-      bestReason: 'Calm winds; selected by tie-break among open runways (longest runway, then smallest runway number).',
-      globalNotes
-    };
-  }
-
+function buildFixedWindResult(runways: RunwayEnd[], wind: ParsedWind, globalNotes: string[]): EvaluationResult {
   if (wind.directionDegTrue === null) {
     throw new Error('Fixed wind calculation requires a valid direction.');
   }
 
   const ranking: RankedRunway[] = [];
-
-  const runwayResults: RunwayWindComponent[] = runways.map((runway) => {
-    if (runway.isClosed) {
-      return {
-        runwayId: runway.id,
-        isClosed: true,
-        sustained: null,
-        gust: null,
-        notes: [CLOSED_RUNWAY_NOTE]
-      };
-    }
-
-    const sustainedRaw = calculateWindComponent(wind.speedKt, wind.directionDegTrue!, runway.headingDegMag);
-    ranking.push({
-      runwayId: runway.id,
-      headwindKt: sustainedRaw.headwindKt,
-      crosswindKt: sustainedRaw.crosswindKt,
-      runwayLengthFt: runwayLengthForSort(runway),
-      runwayNumber: runwayNumberForSort(runway.id)
-    });
-
-    const gustRaw = wind.gustKt !== null
-      ? calculateWindComponent(wind.gustKt, wind.directionDegTrue!, runway.headingDegMag)
-      : null;
-
-    return {
-      runwayId: runway.id,
-      isClosed: false,
-      sustained: {
-        headwindKt: sustainedRaw.headwindKt,
-        crosswindKt: sustainedRaw.crosswindKt,
-        crosswindFrom: sustainedRaw.crosswindFrom
-      },
-      gust: gustRaw
-        ? {
-            headwindKt: gustRaw.headwindKt,
-            crosswindKt: gustRaw.crosswindKt,
-            crosswindFrom: gustRaw.crosswindFrom
-          }
-        : null,
-      notes: []
-    };
-  });
+  const runwayResults = runways.map((runway) => toFixedRunwayComponent(runway, wind, ranking));
 
   ranking.sort(sortRunwaysForBest);
   const best = ranking[0] ?? null;
@@ -212,4 +218,26 @@ export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNo
       : 'No open runways available for selection.',
     globalNotes
   };
+}
+
+export function evaluateRunways(runways: RunwayEnd[], wind: ParsedWind, parserNotes: string[] = []): EvaluationResult {
+  const globalNotes = [...parserNotes];
+  if (runways.length === 0) {
+    return buildNoRunwayResult(wind, globalNotes);
+  }
+
+  const openRunways = runways.filter((runway) => !runway.isClosed);
+  if (openRunways.length === 0) {
+    return buildAllClosedResult(runways, wind, globalNotes);
+  }
+
+  if (wind.directionType === 'variable') {
+    return buildVariableWindResult(runways, wind, globalNotes);
+  }
+
+  if (wind.directionType === 'calm') {
+    return buildCalmWindResult(runways, openRunways, wind, globalNotes);
+  }
+
+  return buildFixedWindResult(runways, wind, globalNotes);
 }

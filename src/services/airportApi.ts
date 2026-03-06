@@ -1,4 +1,8 @@
 import type { RunwayEnd } from '../domain/types';
+import {
+  normalizeCacheMetadata as normalizeSharedCacheMetadata,
+  type NormalizedCacheMetadata
+} from './cacheMetadata';
 
 export type AirportCacheStatus =
   | 'edge_hit'
@@ -108,41 +112,55 @@ function sourceFromStatus(status: AirportCacheStatus): AirportCacheSource {
   return 'unknown';
 }
 
-function normalizeCacheMetadata(
+function normalizeCacheMetadataValue(
   cacheCandidate: unknown,
   headers: Headers,
   fallbackFetchedAt: string
 ): AirportCacheMetadata {
-  const nowIso = new Date().toISOString();
+  return normalizeSharedCacheMetadata({
+    cacheCandidate,
+    headers,
+    fallbackFetchedAt,
+    resource: 'airport',
+    statusFromHeaders,
+    sourceFromStatus,
+    isStatus: isCacheStatus,
+    isSource: isCacheSource
+  }) as NormalizedCacheMetadata<AirportCacheStatus, AirportCacheSource>;
+}
 
-  if (cacheCandidate && typeof cacheCandidate === 'object') {
-    const candidate = cacheCandidate as Partial<AirportCacheMetadata>;
-    const status = isCacheStatus(candidate.status) ? candidate.status : statusFromHeaders(headers);
-    const source = isCacheSource(candidate.source) ? candidate.source : sourceFromStatus(status);
+function readAirportErrorPayload(
+  payload: { error?: string; message?: string; code?: unknown },
+  fallbackMessage: string
+): { message: string; code: AirportLookupErrorCode } {
+  const message = payload.error ?? payload.message ?? fallbackMessage;
+  const code = typeof payload.code === 'string' ? (payload.code as AirportLookupErrorCode) : 'UNKNOWN';
+  return { message, code };
+}
 
-    return {
-      status,
-      source,
-      ageSeconds: typeof candidate.ageSeconds === 'number' && candidate.ageSeconds >= 0 ? candidate.ageSeconds : 0,
-      fetchedAt: typeof candidate.fetchedAt === 'string' ? candidate.fetchedAt : fallbackFetchedAt,
-      servedAt: typeof candidate.servedAt === 'string' ? candidate.servedAt : nowIso,
-      ttlSeconds: typeof candidate.ttlSeconds === 'number' && candidate.ttlSeconds >= 0 ? candidate.ttlSeconds : 0,
-      key: typeof candidate.key === 'string' ? candidate.key : '',
-      resource: typeof candidate.resource === 'string' ? candidate.resource : 'airport'
-    };
+async function throwAirportLookupError(response: Response, icao: string): Promise<never> {
+  const fallbackMessage = `Unable to load airport data for ${icao}.`;
+  const parsedPayload = await response
+    .json()
+    .then((payload) => payload as { error?: string; message?: string; code?: unknown })
+    .catch(() => null);
+  if (!parsedPayload) {
+    throw new AirportLookupError(fallbackMessage, response.status, 'UNKNOWN');
   }
 
-  const status = statusFromHeaders(headers);
-  return {
-    status,
-    source: sourceFromStatus(status),
-    ageSeconds: 0,
-    fetchedAt: fallbackFetchedAt,
-    servedAt: nowIso,
-    ttlSeconds: 0,
-    key: '',
-    resource: 'airport'
-  };
+  const { message, code } = readAirportErrorPayload(parsedPayload, fallbackMessage);
+  throw new AirportLookupError(message, response.status, code);
+}
+
+function assertAirportPayloadShape(
+  payload: Omit<AirportLookupResponse, 'cache' | 'runwayEnds'> & {
+    cache?: unknown;
+    runwayEnds?: unknown;
+  }
+): void {
+  if (typeof payload.icao !== 'string' || typeof payload.requestedIcao !== 'string' || typeof payload.name !== 'string') {
+    throw new AirportLookupError('Airport response contains invalid airport fields.', 502, 'UNEXPECTED');
+  }
 }
 
 function normalizeRunwayEnds(runwayCandidate: unknown): RunwayEnd[] {
@@ -191,30 +209,14 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
   });
 
   if (!response.ok) {
-    let message = `Unable to load airport data for ${icao}.`;
-    let code: AirportLookupErrorCode = 'UNKNOWN';
-
-    try {
-      const errorPayload = (await response.json()) as { error?: string; message?: string; code?: unknown };
-      message = errorPayload.error ?? errorPayload.message ?? message;
-      if (typeof errorPayload.code === 'string') {
-        code = errorPayload.code as AirportLookupErrorCode;
-      }
-    } catch {
-      // Keep default message when body isn't JSON.
-    }
-
-    throw new AirportLookupError(message, response.status, code);
+    return throwAirportLookupError(response, icao);
   }
 
   const payload = (await response.json()) as Omit<AirportLookupResponse, 'cache' | 'runwayEnds'> & {
     cache?: unknown;
     runwayEnds?: unknown;
   };
-
-  if (typeof payload.icao !== 'string' || typeof payload.requestedIcao !== 'string' || typeof payload.name !== 'string') {
-    throw new AirportLookupError('Airport response contains invalid airport fields.', 502, 'UNEXPECTED');
-  }
+  assertAirportPayloadShape(payload);
 
   return {
     requestedIcao: payload.requestedIcao,
@@ -227,6 +229,6 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
     runwayEnds: normalizeRunwayEnds(payload.runwayEnds),
     source: payload.source,
     fetchedAt: payload.fetchedAt,
-    cache: normalizeCacheMetadata(payload.cache, response.headers, payload.fetchedAt)
+    cache: normalizeCacheMetadataValue(payload.cache, response.headers, payload.fetchedAt)
   };
 }

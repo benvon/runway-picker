@@ -10,7 +10,24 @@ export default defineConfig({
     ],
     environmentMatchGlobs: [['src/test/**/*.test.ts', 'jsdom']],
     coverage: {
-      reporter: ['text', 'lcov']
+      include: ['src/**/*.ts', 'workers/**/*.ts', 'functions/**/*.ts', 'scripts/**/*.ts'],
+      exclude: [
+        '**/*.test.ts',
+        'src/test/**',
+        'src/main.ts',
+        '**/types.ts',
+        '**/*.d.ts',
+        '**/*.config.*',
+        'dist/**',
+        'node_modules/**'
+      ],
+      reporter: ['text', 'lcov'],
+      thresholds: {
+        statements: 80,
+        branches: 80,
+        functions: 80,
+        lines: 80
+      }
     }
   }
 });

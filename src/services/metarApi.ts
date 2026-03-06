@@ -1,3 +1,8 @@
+import {
+  normalizeCacheMetadata as normalizeSharedCacheMetadata,
+  type NormalizedCacheMetadata
+} from './cacheMetadata';
+
 export type MetarCacheStatus =
   | 'edge_hit'
   | 'kv_hit'
@@ -112,41 +117,53 @@ function sourceFromStatus(status: MetarCacheStatus): MetarCacheSource {
   return 'unknown';
 }
 
-function normalizeCacheMetadata(
+function normalizeCacheMetadataValue(
   cacheCandidate: unknown,
   headers: Headers,
   fallbackFetchedAt: string
 ): MetarCacheMetadata {
-  const nowIso = new Date().toISOString();
+  return normalizeSharedCacheMetadata({
+    cacheCandidate,
+    headers,
+    fallbackFetchedAt,
+    resource: 'metar',
+    statusFromHeaders,
+    sourceFromStatus,
+    isStatus: isCacheStatus,
+    isSource: isCacheSource
+  }) as NormalizedCacheMetadata<MetarCacheStatus, MetarCacheSource>;
+}
 
-  if (cacheCandidate && typeof cacheCandidate === 'object') {
-    const candidate = cacheCandidate as Partial<MetarCacheMetadata>;
-    const status = isCacheStatus(candidate.status) ? candidate.status : statusFromHeaders(headers);
-    const source = isCacheSource(candidate.source) ? candidate.source : sourceFromStatus(status);
+function readMetarErrorPayload(
+  payload: { error?: string; message?: string; debug?: unknown; code?: unknown },
+  fallbackMessage: string
+): { message: string; debug: unknown; code: MetarLookupErrorCode } {
+  const message = payload.error ?? payload.message ?? fallbackMessage;
+  const code = typeof payload.code === 'string' ? (payload.code as MetarLookupErrorCode) : 'UNKNOWN';
+  return {
+    message,
+    debug: payload.debug,
+    code
+  };
+}
 
-    return {
-      status,
-      source,
-      ageSeconds: typeof candidate.ageSeconds === 'number' && candidate.ageSeconds >= 0 ? candidate.ageSeconds : 0,
-      fetchedAt: typeof candidate.fetchedAt === 'string' ? candidate.fetchedAt : fallbackFetchedAt,
-      servedAt: typeof candidate.servedAt === 'string' ? candidate.servedAt : nowIso,
-      ttlSeconds: typeof candidate.ttlSeconds === 'number' && candidate.ttlSeconds >= 0 ? candidate.ttlSeconds : 0,
-      key: typeof candidate.key === 'string' ? candidate.key : '',
-      resource: typeof candidate.resource === 'string' ? candidate.resource : 'metar'
-    };
+async function throwMetarLookupError(response: Response, icao: string): Promise<never> {
+  const fallbackMessage = `Unable to load METAR for ${icao}.`;
+  const parsedPayload = await response
+    .json()
+    .then((payload) => payload as {
+      error?: string;
+      message?: string;
+      debug?: unknown;
+      code?: unknown;
+    })
+    .catch(() => null);
+  if (!parsedPayload) {
+    throw new MetarLookupError(fallbackMessage, response.status, undefined, 'UNKNOWN');
   }
 
-  const status = statusFromHeaders(headers);
-  return {
-    status,
-    source: sourceFromStatus(status),
-    ageSeconds: 0,
-    fetchedAt: fallbackFetchedAt,
-    servedAt: nowIso,
-    ttlSeconds: 0,
-    key: '',
-    resource: 'metar'
-  };
+  const { message, debug, code } = readMetarErrorPayload(parsedPayload, fallbackMessage);
+  throw new MetarLookupError(message, response.status, debug, code);
 }
 
 function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
@@ -189,27 +206,7 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
   });
 
   if (!response.ok) {
-    let message = `Unable to load METAR for ${icao}.`;
-    let debug: unknown;
-    let code: MetarLookupErrorCode = 'UNKNOWN';
-
-    try {
-      const errorPayload = (await response.json()) as {
-        error?: string;
-        message?: string;
-        debug?: unknown;
-        code?: unknown;
-      };
-      message = errorPayload.error ?? errorPayload.message ?? message;
-      debug = errorPayload.debug;
-      if (typeof errorPayload.code === 'string') {
-        code = errorPayload.code as MetarLookupErrorCode;
-      }
-    } catch {
-      // Keep default message when body isn't JSON.
-    }
-
-    throw new MetarLookupError(message, response.status, debug, code);
+    return throwMetarLookupError(response, icao);
   }
 
   const payload = (await response.json()) as Omit<MetarLookupResponse, 'cache'> & {
@@ -222,6 +219,6 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
     wind: normalizeWindPayload((payload as { wind?: unknown }).wind),
     source: payload.source,
     fetchedAt: payload.fetchedAt,
-    cache: normalizeCacheMetadata(payload.cache, response.headers, payload.fetchedAt)
+    cache: normalizeCacheMetadataValue(payload.cache, response.headers, payload.fetchedAt)
   };
 }

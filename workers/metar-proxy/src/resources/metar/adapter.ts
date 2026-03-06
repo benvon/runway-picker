@@ -108,6 +108,44 @@ async function stationExistsForIcao(icao: string): Promise<boolean> {
   return Array.isArray(payload) && payload.length > 0;
 }
 
+type MetarWindCandidate = {
+  raw: string;
+  directionType: 'fixed' | 'variable' | 'calm';
+  speedKt: number;
+  directionDegTrue?: number | null;
+  gustKt?: number | null;
+};
+
+function hasMetarWindShape(windCandidate: unknown): windCandidate is MetarWindCandidate {
+  if (!windCandidate || typeof windCandidate !== 'object') {
+    return false;
+  }
+
+  const wind = windCandidate as { raw?: unknown; directionType?: unknown; speedKt?: unknown };
+  return (
+    typeof wind.raw === 'string' &&
+    (wind.directionType === 'fixed' || wind.directionType === 'variable' || wind.directionType === 'calm') &&
+    typeof wind.speedKt === 'number'
+  );
+}
+
+function toMetarWind(wind: MetarWindCandidate): MetarResourceWind {
+  const directionDegTrue =
+    wind.directionType === 'fixed' && typeof wind.directionDegTrue === 'number'
+      ? wind.directionDegTrue
+      : null;
+
+  const gustKt = typeof wind.gustKt === 'number' ? wind.gustKt : null;
+
+  return {
+    raw: wind.raw,
+    directionType: wind.directionType,
+    directionDegTrue,
+    speedKt: wind.speedKt,
+    gustKt
+  };
+}
+
 function toMetarData(candidate: unknown): MetarResourceData | null {
   if (!candidate || typeof candidate !== 'object') {
     return null;
@@ -117,13 +155,9 @@ function toMetarData(candidate: unknown): MetarResourceData | null {
   if (
     typeof asData.icao !== 'string' ||
     typeof asData.metarRaw !== 'string' ||
-    !asData.wind ||
-    typeof asData.wind !== 'object' ||
-    typeof (asData.wind as { raw?: unknown }).raw !== 'string' ||
-    typeof (asData.wind as { directionType?: unknown }).directionType !== 'string' ||
-    typeof (asData.wind as { speedKt?: unknown }).speedKt !== 'number' ||
     typeof asData.fetchedAt !== 'string' ||
-    asData.source !== 'aviationweather'
+    asData.source !== 'aviationweather' ||
+    !hasMetarWindShape(asData.wind)
   ) {
     return null;
   }
@@ -131,13 +165,7 @@ function toMetarData(candidate: unknown): MetarResourceData | null {
   return {
     icao: asData.icao,
     metarRaw: asData.metarRaw,
-    wind: {
-      raw: (asData.wind as { raw: string }).raw,
-      directionType: (asData.wind as { directionType: 'fixed' | 'variable' | 'calm' }).directionType,
-      directionDegTrue: (asData.wind as { directionDegTrue?: number | null }).directionDegTrue ?? null,
-      speedKt: (asData.wind as { speedKt: number }).speedKt,
-      gustKt: (asData.wind as { gustKt?: number | null }).gustKt ?? null
-    },
+    wind: toMetarWind(asData.wind),
     fetchedAt: asData.fetchedAt,
     source: asData.source
   };
@@ -258,45 +286,30 @@ function formatWindRaw(directionType: 'fixed' | 'variable' | 'calm', speedKt: nu
   return `${direction}${speed}${gust}KT`;
 }
 
-function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
-  const directionField = readField(report, ['wdir', 'wind_dir_degrees', 'windDirDegrees', 'windDir']);
-  const speedField = readField(report, ['wspd', 'wind_speed_kt', 'windSpeedKt', 'windSpd']);
-  const gustField = readField(report, ['wgst', 'wind_gust_kt', 'windGustKt', 'windGust']);
-
-  const speedKt = toIntegerValue(speedField);
-  const rawMetar = extractMetarRawFromReport(report);
-
-  if (speedKt === null) {
-    if (rawMetar && /\b0000{1,2}KT\b/.test(rawMetar)) {
-      return {
-        raw: '00000KT',
-        directionType: 'calm',
-        directionDegTrue: null,
-        speedKt: 0,
-        gustKt: null
-      };
-    }
-
+function calmWindFromRawToken(rawMetar: string | null): MetarResourceWind | null {
+  if (!rawMetar || !/\b0000{1,2}KT\b/.test(rawMetar)) {
     return null;
   }
 
-  if (speedKt < 0) {
-    return null;
-  }
+  return {
+    raw: '00000KT',
+    directionType: 'calm',
+    directionDegTrue: null,
+    speedKt: 0,
+    gustKt: null
+  };
+}
 
+function resolveGust(speedKt: number, gustField: unknown): number | null {
   const gustKtCandidate = toIntegerValue(gustField);
-  const gustKt = gustKtCandidate !== null && gustKtCandidate >= speedKt ? gustKtCandidate : null;
+  return gustKtCandidate !== null && gustKtCandidate >= speedKt ? gustKtCandidate : null;
+}
 
-  if (speedKt === 0) {
-    return {
-      raw: formatWindRaw('calm', speedKt, null, null),
-      directionType: 'calm',
-      directionDegTrue: null,
-      speedKt,
-      gustKt: null
-    };
-  }
-
+function fixedOrVariableWind(
+  directionField: unknown,
+  speedKt: number,
+  gustKt: number | null
+): MetarResourceWind {
   const directionText = toStringValue(directionField)?.toUpperCase() ?? null;
   if (directionText === 'VRB') {
     return {
@@ -326,6 +339,37 @@ function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
     speedKt,
     gustKt
   };
+}
+
+function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
+  const directionField = readField(report, ['wdir', 'wind_dir_degrees', 'windDirDegrees', 'windDir']);
+  const speedField = readField(report, ['wspd', 'wind_speed_kt', 'windSpeedKt', 'windSpd']);
+  const gustField = readField(report, ['wgst', 'wind_gust_kt', 'windGustKt', 'windGust']);
+
+  const speedKt = toIntegerValue(speedField);
+  const rawMetar = extractMetarRawFromReport(report);
+
+  if (speedKt === null) {
+    return calmWindFromRawToken(rawMetar);
+  }
+
+  if (speedKt < 0) {
+    return null;
+  }
+
+  const gustKt = resolveGust(speedKt, gustField);
+
+  if (speedKt === 0) {
+    return {
+      raw: formatWindRaw('calm', speedKt, null, null),
+      directionType: 'calm',
+      directionDegTrue: null,
+      speedKt,
+      gustKt: null
+    };
+  }
+
+  return fixedOrVariableWind(directionField, speedKt, gustKt);
 }
 
 function extractWindToken(rawMetar: string): string | null {

@@ -118,6 +118,128 @@ function createAllowedHeaders(): RateLimitHeaders {
   };
 }
 
+async function parseBody<T>(request: Request): Promise<T | null> {
+  try {
+    return (await request.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function loadRateLimitState(
+  storage: DurableObjectStorageLike,
+  nowMs: number
+): Promise<RateLimitState> {
+  const rawState = (await storage.get<RateLimitState>(STATE_KEY)) ?? createState(nowMs);
+  return {
+    ...rawState,
+    burst: ensureWindow(rawState.burst, nowMs, BURST_WINDOW_SECONDS),
+    sustained: ensureWindow(rawState.sustained, nowMs, SUSTAINED_WINDOW_SECONDS),
+    invalidIcao: ensureWindow(rawState.invalidIcao, nowMs, INVALID_ICAO_WINDOW_SECONDS),
+    penaltyUntilMs: rawState.penaltyUntilMs ?? 0
+  };
+}
+
+function buildPenaltyDecision(nowMs: number, penaltyUntilMs: number): RateLimitDecisionResponse {
+  const retryAfterSeconds = secondsUntilReset(nowMs, penaltyUntilMs);
+  return {
+    allowed: false,
+    limit: SUSTAINED_LIMIT,
+    remaining: 0,
+    resetSeconds: retryAfterSeconds,
+    retryAfterSeconds
+  };
+}
+
+function toExceededResetMs(nowMs: number, state: RateLimitState, nextBurst: number, nextSustained: number): number {
+  const burstExceeded = nextBurst > BURST_LIMIT;
+  const sustainedExceeded = nextSustained > SUSTAINED_LIMIT;
+  if (burstExceeded && sustainedExceeded) {
+    return Math.max(state.burst.resetAtMs, state.sustained.resetAtMs);
+  }
+
+  if (burstExceeded) {
+    return state.burst.resetAtMs;
+  }
+
+  if (sustainedExceeded) {
+    return state.sustained.resetAtMs;
+  }
+
+  return nowMs;
+}
+
+function buildAllowedDecision(nowMs: number, state: RateLimitState): RateLimitDecisionResponse {
+  const remainingBurst = BURST_LIMIT - state.burst.count;
+  const remainingSustained = SUSTAINED_LIMIT - state.sustained.count;
+  return {
+    allowed: true,
+    limit: SUSTAINED_LIMIT,
+    remaining: Math.max(0, Math.min(remainingBurst, remainingSustained)),
+    resetSeconds: Math.min(
+      secondsUntilReset(nowMs, state.burst.resetAtMs),
+      secondsUntilReset(nowMs, state.sustained.resetAtMs)
+    ),
+    retryAfterSeconds: null
+  };
+}
+
+async function handleCheckRequest(
+  request: Request,
+  storage: DurableObjectStorageLike
+): Promise<Response> {
+  const body = (await parseBody<CheckRequestBody>(request)) ?? {};
+  const nowMs = toSafeNow(body.nowMs);
+  const state = await loadRateLimitState(storage, nowMs);
+
+  if (state.penaltyUntilMs > nowMs) {
+    const responseBody = buildPenaltyDecision(nowMs, state.penaltyUntilMs);
+    await storage.put(STATE_KEY, state);
+    return Response.json(responseBody);
+  }
+
+  const nextBurst = state.burst.count + 1;
+  const nextSustained = state.sustained.count + 1;
+  if (nextBurst > BURST_LIMIT || nextSustained > SUSTAINED_LIMIT) {
+    const exceededResetMs = toExceededResetMs(nowMs, state, nextBurst, nextSustained);
+    const retryAfterSeconds = secondsUntilReset(nowMs, exceededResetMs);
+    const responseBody: RateLimitDecisionResponse = {
+      allowed: false,
+      limit: SUSTAINED_LIMIT,
+      remaining: 0,
+      resetSeconds: retryAfterSeconds,
+      retryAfterSeconds
+    };
+    await storage.put(STATE_KEY, state);
+    return Response.json(responseBody);
+  }
+
+  state.burst.count = nextBurst;
+  state.sustained.count = nextSustained;
+  await storage.put(STATE_KEY, state);
+  return Response.json(buildAllowedDecision(nowMs, state));
+}
+
+async function handleInvalidIcaoRequest(
+  request: Request,
+  storage: DurableObjectStorageLike
+): Promise<Response> {
+  const body = (await parseBody<PenalizeRequestBody>(request)) ?? {};
+  const nowMs = toSafeNow(body.nowMs);
+  const state = await loadRateLimitState(storage, nowMs);
+
+  state.invalidIcao.count += 1;
+  let penalized = false;
+  if (state.invalidIcao.count >= INVALID_ICAO_LIMIT) {
+    state.penaltyUntilMs = Math.max(state.penaltyUntilMs, nowMs + INVALID_ICAO_PENALTY_SECONDS * 1000);
+    state.invalidIcao = createWindow(nowMs, INVALID_ICAO_WINDOW_SECONDS);
+    penalized = true;
+  }
+
+  await storage.put(STATE_KEY, state);
+  return Response.json({ penalized } satisfies PenalizeResponse);
+}
+
 export class ApiRateLimiter {
   constructor(private readonly state: DurableObjectStateLike) {}
 
@@ -129,113 +251,11 @@ export class ApiRateLimiter {
     }
 
     if (url.pathname === '/check') {
-      let body: CheckRequestBody = {};
-      try {
-        body = (await request.json()) as CheckRequestBody;
-      } catch {
-        // Fall through with empty body; nowMs will default to Date.now()
-      }
-      const nowMs = toSafeNow(body?.nowMs);
-      const rawState = (await this.state.storage.get<RateLimitState>(STATE_KEY)) ?? createState(nowMs);
-
-      const state: RateLimitState = {
-        ...rawState,
-        burst: ensureWindow(rawState.burst, nowMs, BURST_WINDOW_SECONDS),
-        sustained: ensureWindow(rawState.sustained, nowMs, SUSTAINED_WINDOW_SECONDS),
-        invalidIcao: ensureWindow(rawState.invalidIcao, nowMs, INVALID_ICAO_WINDOW_SECONDS),
-        penaltyUntilMs: rawState.penaltyUntilMs ?? 0
-      };
-
-      if (state.penaltyUntilMs > nowMs) {
-        const retryAfterSeconds = secondsUntilReset(nowMs, state.penaltyUntilMs);
-        const responseBody: RateLimitDecisionResponse = {
-          allowed: false,
-          limit: SUSTAINED_LIMIT,
-          remaining: 0,
-          resetSeconds: retryAfterSeconds,
-          retryAfterSeconds
-        };
-
-        await this.state.storage.put(STATE_KEY, state);
-        return Response.json(responseBody);
-      }
-
-      const nextBurst = state.burst.count + 1;
-      const nextSustained = state.sustained.count + 1;
-
-      if (nextBurst > BURST_LIMIT || nextSustained > SUSTAINED_LIMIT) {
-        const burstExceeded = nextBurst > BURST_LIMIT;
-        const sustainedExceeded = nextSustained > SUSTAINED_LIMIT;
-        let exceededResetMs: number;
-        if (burstExceeded && sustainedExceeded) {
-          exceededResetMs = Math.max(state.burst.resetAtMs, state.sustained.resetAtMs);
-        } else if (burstExceeded) {
-          exceededResetMs = state.burst.resetAtMs;
-        } else {
-          exceededResetMs = state.sustained.resetAtMs;
-        }
-        const retryAfterSeconds = secondsUntilReset(nowMs, exceededResetMs);
-        const responseBody: RateLimitDecisionResponse = {
-          allowed: false,
-          limit: SUSTAINED_LIMIT,
-          remaining: 0,
-          resetSeconds: retryAfterSeconds,
-          retryAfterSeconds
-        };
-
-        await this.state.storage.put(STATE_KEY, state);
-        return Response.json(responseBody);
-      }
-
-      state.burst.count = nextBurst;
-      state.sustained.count = nextSustained;
-      await this.state.storage.put(STATE_KEY, state);
-
-      const remainingBurst = BURST_LIMIT - state.burst.count;
-      const remainingSustained = SUSTAINED_LIMIT - state.sustained.count;
-      const responseBody: RateLimitDecisionResponse = {
-        allowed: true,
-        limit: SUSTAINED_LIMIT,
-        remaining: Math.max(0, Math.min(remainingBurst, remainingSustained)),
-        resetSeconds: Math.min(
-          secondsUntilReset(nowMs, state.burst.resetAtMs),
-          secondsUntilReset(nowMs, state.sustained.resetAtMs)
-        ),
-        retryAfterSeconds: null
-      };
-
-      return Response.json(responseBody);
+      return handleCheckRequest(request, this.state.storage);
     }
 
     if (url.pathname === '/invalid-icao') {
-      let body: PenalizeRequestBody = {};
-      try {
-        body = (await request.json()) as PenalizeRequestBody;
-      } catch {
-        // Fall through with empty body; nowMs will default to Date.now()
-      }
-      const nowMs = toSafeNow(body?.nowMs);
-      const rawState = (await this.state.storage.get<RateLimitState>(STATE_KEY)) ?? createState(nowMs);
-
-      const state: RateLimitState = {
-        ...rawState,
-        burst: ensureWindow(rawState.burst, nowMs, BURST_WINDOW_SECONDS),
-        sustained: ensureWindow(rawState.sustained, nowMs, SUSTAINED_WINDOW_SECONDS),
-        invalidIcao: ensureWindow(rawState.invalidIcao, nowMs, INVALID_ICAO_WINDOW_SECONDS),
-        penaltyUntilMs: rawState.penaltyUntilMs ?? 0
-      };
-
-      state.invalidIcao.count += 1;
-      let penalized = false;
-
-      if (state.invalidIcao.count >= INVALID_ICAO_LIMIT) {
-        state.penaltyUntilMs = Math.max(state.penaltyUntilMs, nowMs + INVALID_ICAO_PENALTY_SECONDS * 1000);
-        state.invalidIcao = createWindow(nowMs, INVALID_ICAO_WINDOW_SECONDS);
-        penalized = true;
-      }
-
-      await this.state.storage.put(STATE_KEY, state);
-      return Response.json({ penalized } satisfies PenalizeResponse);
+      return handleInvalidIcaoRequest(request, this.state.storage);
     }
 
     return Response.json({ error: 'Not found.' }, { status: 404 });
