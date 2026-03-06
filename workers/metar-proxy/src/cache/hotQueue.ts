@@ -165,9 +165,14 @@ export async function listHotCacheQueueEntries(env: CacheEngineEnv): Promise<Hot
       limit: 1000
     });
 
-    for (const key of page.keys) {
-      const raw = await env.METAR_CACHE.get(key.name, 'json');
-      const parsed = parseHotCacheEntry(raw, key.name);
+    const pageEntries = await Promise.all(
+      page.keys.map(async (key) => {
+        const raw = await env.METAR_CACHE.get(key.name, 'json');
+        return parseHotCacheEntry(raw, key.name);
+      })
+    );
+
+    for (const parsed of pageEntries) {
       if (parsed) {
         entries.push(parsed);
       }
@@ -180,12 +185,21 @@ export async function listHotCacheQueueEntries(env: CacheEngineEnv): Promise<Hot
   return entries;
 }
 
+export async function readHotCacheQueueEntry(
+  env: CacheEngineEnv,
+  metadataKey: string
+): Promise<HotCacheQueueEntry | null> {
+  const raw = await env.METAR_CACHE.get(metadataKey, 'json');
+  return parseHotCacheEntry(raw, metadataKey);
+}
+
 export async function touchHotCacheEntry(params: {
   env: CacheEngineEnv;
   resource: HotCacheResource;
   normalizedKey: string;
   cache: CacheProvenance;
   lastAccessedAt: string;
+  expirationTtl?: number;
 }): Promise<void> {
   const entry: HotCacheEntry = {
     schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
@@ -198,25 +212,46 @@ export async function touchHotCacheEntry(params: {
 
   await params.env.METAR_CACHE.put(
     hotQueueKey(params.resource, params.normalizedKey),
-    JSON.stringify(entry)
+    JSON.stringify(entry),
+    params.expirationTtl ? { expirationTtl: params.expirationTtl } : undefined
   );
 }
 
 export async function updateHotCacheEntryAfterRefresh(
   env: CacheEngineEnv,
   entry: HotCacheQueueEntry,
-  cache: CacheProvenance
+  cache: CacheProvenance,
+  expirationTtl?: number
 ): Promise<void> {
+  // Preserve the most recent lastAccessedAt in case it was updated concurrently by touchHotCacheEntry.
+  let lastAccessedAt = entry.lastAccessedAt;
+
+  const existingRaw = await env.METAR_CACHE.get(entry.metadataKey, 'json');
+  if (existingRaw) {
+    const existing = parseHotCacheEntry(existingRaw, entry.metadataKey);
+    if (existing) {
+      const existingTs = readIsoTimestamp(existing.lastAccessedAt);
+      const entryTs = readIsoTimestamp(entry.lastAccessedAt);
+      if (existingTs > entryTs) {
+        lastAccessedAt = existing.lastAccessedAt;
+      }
+    }
+  }
+
   const next: HotCacheEntry = {
     schemaVersion: entry.schemaVersion,
     resource: entry.resource,
     normalizedKey: entry.normalizedKey,
     cacheKey: cache.key,
-    lastAccessedAt: entry.lastAccessedAt,
+    lastAccessedAt,
     lastRefreshedAt: cache.fetchedAt
   };
 
-  await env.METAR_CACHE.put(entry.metadataKey, JSON.stringify(next));
+  await env.METAR_CACHE.put(
+    entry.metadataKey,
+    JSON.stringify(next),
+    expirationTtl ? { expirationTtl } : undefined
+  );
 }
 
 export async function deleteHotCacheEntryAndPayload(
