@@ -130,12 +130,19 @@ function hasMetarWindShape(windCandidate: unknown): windCandidate is MetarWindCa
 }
 
 function toMetarWind(wind: MetarWindCandidate): MetarResourceWind {
+  const directionDegTrue =
+    wind.directionType === 'fixed' && typeof wind.directionDegTrue === 'number'
+      ? wind.directionDegTrue
+      : null;
+
+  const gustKt = typeof wind.gustKt === 'number' ? wind.gustKt : null;
+
   return {
     raw: wind.raw,
     directionType: wind.directionType,
-    directionDegTrue: wind.directionDegTrue ?? null,
+    directionDegTrue,
     speedKt: wind.speedKt,
-    gustKt: wind.gustKt ?? null
+    gustKt
   };
 }
 
