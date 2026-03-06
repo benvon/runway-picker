@@ -30,7 +30,7 @@ npm run dev
 ```bash
 npm run typecheck
 npm run lint
-npm run test
+npm run test:coverage
 npm run build
 ```
 
@@ -67,9 +67,14 @@ Security controls are documented in [docs/security-hardening.md](./docs/security
 ## CI/CD workflows
 
 - `CI`:
-  - `validate`: typecheck, lint, test, build
+  - `validate`: typecheck, lint, coverage-gated tests, build
   - `security`: secret scan, workflow lint, dependency audit
+  - `quality-report`: coverage + cyclomatic complexity report artifacts
   - `codeql`: static code analysis
+- `Dependency Health`: weekly `npm audit` + `npm outdated` report artifact/summary
+- Dependabot:
+  - weekly grouped npm updates (minor/patch consolidated; majors consolidated)
+  - weekly grouped GitHub Actions updates
 - `Release Tag`: on merged PRs to `main`, semver bump by branch prefix
   - `release/*` => major
   - `feature/*` => minor

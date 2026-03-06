@@ -14,12 +14,20 @@ export default defineConfig({
       exclude: [
         '**/*.test.ts',
         'src/test/**',
+        'src/main.ts',
+        '**/types.ts',
         '**/*.d.ts',
         '**/*.config.*',
         'dist/**',
         'node_modules/**'
       ],
-      reporter: ['text', 'lcov']
+      reporter: ['text', 'lcov'],
+      thresholds: {
+        statements: 80,
+        branches: 80,
+        functions: 80,
+        lines: 80
+      }
     }
   }
 });

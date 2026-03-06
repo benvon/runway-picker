@@ -33,6 +33,13 @@ export default [
     }
   },
   {
+    files: ['src/**/*.ts', 'workers/**/*.ts', 'functions/**/*.ts', 'scripts/**/*.ts'],
+    ignores: ['**/*.test.ts', 'src/test/**'],
+    rules: {
+      complexity: ['error', 12]
+    }
+  },
+  {
     ignores: ['dist/**', 'coverage/**', 'node_modules/**']
   }
 ];

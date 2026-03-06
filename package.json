@@ -20,7 +20,7 @@
     "security:secrets": "node scripts/scan-secrets.mjs",
     "security:audit": "node scripts/run-audit.mjs",
     "security": "npm run security:secrets && npm run lint:workflows && npm run security:audit",
-    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run security",
+    "ci": "npm run typecheck && npm run lint && npm run test:coverage && npm run build && npm run security",
     "ci:e2e": "npm run test:e2e",
     "cf:typegen": "wrangler types --path='./functions/types.d.ts'"
   },
