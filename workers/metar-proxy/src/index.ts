@@ -1,4 +1,14 @@
 import { CacheEngineError, getOrRefreshCached } from './cache/engine';
+import {
+  deleteHotCacheEntryAndPayload,
+  listHotCacheQueueEntries,
+  parseCacheRefresherConfig,
+  readIsoTimestamp,
+  refreshIntervalSecondsForResource,
+  touchHotCacheEntry,
+  updateHotCacheEntryAfterRefresh,
+  type HotCacheQueueEntry
+} from './cache/hotQueue';
 import { getAdapterOrThrow } from './cache/registry';
 import { CacheSingleFlightCoordinator } from './cache/singleFlight';
 import type { CacheEngineEnv, CacheProvenance } from './cache/types';
@@ -189,6 +199,118 @@ async function noteInvalidIcaoAttempt(request: Request, env: CacheEngineEnv, end
   await noteInvalidIcao(env.API_RATE_LIMITER, getClientIdentifier(request), endpoint);
 }
 
+async function noteSuccessfulCacheAccess(
+  env: CacheEngineEnv,
+  resource: Endpoint,
+  normalizedKey: string,
+  cache: CacheProvenance
+): Promise<void> {
+  try {
+    await touchHotCacheEntry({
+      env,
+      resource,
+      normalizedKey,
+      cache,
+      lastAccessedAt: new Date().toISOString()
+    });
+  } catch {
+    // Do not fail user requests when queue metadata writes fail.
+  }
+}
+
+function toRefreshRequest(resource: Endpoint, normalizedKey: string): Request {
+  return new Request(
+    `https://cache-refresh.internal/api/${resource}?icao=${encodeURIComponent(normalizedKey)}`,
+    { method: 'GET' }
+  );
+}
+
+async function refreshQueueEntry(entry: HotCacheQueueEntry, env: CacheEngineEnv): Promise<CacheProvenance> {
+  if (entry.resource === 'metar') {
+    const result = await getOrRefreshCached({
+      adapter: METAR_ADAPTER,
+      input: { icao: entry.normalizedKey },
+      request: toRefreshRequest('metar', entry.normalizedKey),
+      env
+    });
+    return result.cache;
+  }
+
+  const result = await getOrRefreshCached({
+    adapter: AIRPORT_ADAPTER,
+    input: { icao: entry.normalizedKey },
+    request: toRefreshRequest('airport', entry.normalizedKey),
+    env
+  });
+  return result.cache;
+}
+
+async function purgeEdgeCacheForKey(cacheKey: string): Promise<void> {
+  const runtime = globalThis as unknown as {
+    caches?: {
+      default?: { delete?: (request: Request) => Promise<boolean> };
+    };
+  };
+
+  const edgeCache = runtime.caches?.default;
+  if (!edgeCache || typeof edgeCache.delete !== 'function') {
+    return;
+  }
+
+  try {
+    await edgeCache.delete(
+      new Request(`https://cache.runway.internal/${encodeURIComponent(cacheKey)}`, {
+        method: 'GET'
+      })
+    );
+  } catch {
+    // Best-effort edge cache purge.
+  }
+}
+
+export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Date()): Promise<void> {
+  const config = parseCacheRefresherConfig(env);
+  if (!config.enabled) {
+    return;
+  }
+
+  const queueEntries = await listHotCacheQueueEntries(env);
+  if (queueEntries.length === 0) {
+    return;
+  }
+
+  const nowMs = now.getTime();
+  const inactivityTtlMs = config.inactivityTtlSeconds * 1000;
+  const dueEntries: HotCacheQueueEntry[] = [];
+
+  for (const entry of queueEntries) {
+    const lastAccessedAtMs = readIsoTimestamp(entry.lastAccessedAt);
+    if (lastAccessedAtMs <= 0 || nowMs - lastAccessedAtMs > inactivityTtlMs) {
+      await deleteHotCacheEntryAndPayload(env, entry);
+      await purgeEdgeCacheForKey(entry.cacheKey);
+      continue;
+    }
+
+    const refreshIntervalMs = refreshIntervalSecondsForResource(entry.resource, config) * 1000;
+    const lastRefreshedAtMs = readIsoTimestamp(entry.lastRefreshedAt);
+    if (lastRefreshedAtMs <= 0 || nowMs - lastRefreshedAtMs >= refreshIntervalMs) {
+      dueEntries.push(entry);
+    }
+  }
+
+  dueEntries.sort((left, right) => readIsoTimestamp(left.lastRefreshedAt) - readIsoTimestamp(right.lastRefreshedAt));
+
+  const toRefresh = dueEntries.slice(0, config.maxItemsPerRun);
+  for (const entry of toRefresh) {
+    try {
+      const refreshedCache = await refreshQueueEntry(entry, env);
+      await updateHotCacheEntryAfterRefresh(env, entry, refreshedCache);
+    } catch {
+      // Keep entry queued; it will be retried on a future scheduled run.
+    }
+  }
+}
+
 export async function handleMetarRequest(request: Request, env: CacheEngineEnv): Promise<Response> {
   const requestId = createRequestId(request.headers.get('X-Request-Id'));
 
@@ -218,6 +340,7 @@ export async function handleMetarRequest(request: Request, env: CacheEngineEnv):
       request,
       env
     });
+    await noteSuccessfulCacheAccess(env, 'metar', normalizeIcao(input.icao), result.cache);
 
     const payload: MetarApiSuccessPayload = {
       ...result.payload,
@@ -285,6 +408,7 @@ export async function handleAirportRequest(request: Request, env: CacheEngineEnv
       request,
       env
     });
+    await noteSuccessfulCacheAccess(env, 'airport', normalizeAirportIcao(input.icao), result.cache);
 
     const payload: AirportApiSuccessPayload = {
       ...result.payload,
@@ -341,5 +465,9 @@ export default {
     }
 
     return handleMetarRequest(request, env);
+  },
+
+  async scheduled(_controller: unknown, env: CacheEngineEnv): Promise<void> {
+    await runScheduledCacheRefresh(env);
   }
 };

@@ -62,6 +62,7 @@ make ci-e2e
 
 See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
 Cache design details are documented in [docs/cache-architecture.md](./docs/cache-architecture.md).
+Cache refresher operations runbook is in [docs/cache-refresh-operations.md](./docs/cache-refresh-operations.md).
 Security controls are documented in [docs/security-hardening.md](./docs/security-hardening.md).
 
 ## CI/CD workflows
