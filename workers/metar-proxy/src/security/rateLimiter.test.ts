@@ -20,6 +20,24 @@ function createLimiter(): ApiRateLimiter {
 }
 
 describe('api rate limiter durable object', () => {
+  it('returns 405 for non-POST requests', async () => {
+    const limiter = createLimiter();
+    const response = await limiter.fetch(new Request('https://rate-limiter.internal/check', { method: 'GET' }));
+    expect(response.status).toBe(405);
+  });
+
+  it('returns 404 for unknown POST routes', async () => {
+    const limiter = createLimiter();
+    const response = await limiter.fetch(
+      new Request('https://rate-limiter.internal/unknown', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      })
+    );
+    expect(response.status).toBe(404);
+  });
+
   it('allows requests under burst and sustained limits', async () => {
     const limiter = createLimiter();
 
@@ -125,5 +143,18 @@ describe('api rate limiter durable object', () => {
 
     expect(payload.allowed).toBe(false);
     expect(payload.retryAfterSeconds).not.toBeNull();
+  });
+
+  it('falls back to Date.now when body JSON is invalid', async () => {
+    const limiter = createLimiter();
+    const response = await limiter.fetch(
+      new Request('https://rate-limiter.internal/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{'
+      })
+    );
+    const payload = (await response.json()) as { allowed: boolean };
+    expect(payload.allowed).toBe(true);
   });
 });

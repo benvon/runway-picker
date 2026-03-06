@@ -67,6 +67,21 @@ function extractFetchedAt<TData>(data: TData): Date | null {
   return parseIsoDate(fetchedAt);
 }
 
+function hasCompatibleEnvelope<TInput, TUpstream, TData>(
+  candidate: Partial<CacheEnvelope<TData>>,
+  adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
+  cacheKey: string
+): boolean {
+  return (
+    typeof candidate.schemaVersion === 'number' &&
+    candidate.schemaVersion === adapter.schemaVersion &&
+    typeof candidate.resource === 'string' &&
+    candidate.resource === adapter.resource &&
+    typeof candidate.key === 'string' &&
+    candidate.key === cacheKey
+  );
+}
+
 function toCachedRecord<TInput, TUpstream, TData>(
   raw: unknown,
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
@@ -78,19 +93,7 @@ function toCachedRecord<TInput, TUpstream, TData>(
   }
 
   const candidate = raw as Partial<CacheEnvelope<TData>>;
-  if (typeof candidate.schemaVersion !== 'number') {
-    return null;
-  }
-
-  if (candidate.schemaVersion !== adapter.schemaVersion) {
-    return null;
-  }
-
-  if (typeof candidate.resource !== 'string' || candidate.resource !== adapter.resource) {
-    return null;
-  }
-
-  if (typeof candidate.key !== 'string' || candidate.key !== cacheKey) {
+  if (!hasCompatibleEnvelope(candidate, adapter, cacheKey)) {
     return null;
   }
 
@@ -242,6 +245,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function cacheResultFromRecord<TInput, TUpstream, TData>(
+  adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
+  cacheKey: string,
+  record: CachedRecord<TData>,
+  now: Date,
+  status: CacheProvenance['status'],
+  source: CacheDataSource
+): CacheEngineResult<TData> {
+  return {
+    payload: record.data,
+    cache: buildProvenance(status, source, record, now, cacheKey, adapter.resource, adapter.policy.ttlSeconds)
+  };
+}
+
+function toStaleCandidate<TData>(
+  edgeRecord: CachedRecord<TData> | null,
+  kvRecord: CachedRecord<TData> | null,
+  now: Date
+): CachedRecord<TData> | null {
+  const staleEdge = edgeRecord && !isFresh(edgeRecord, now) ? edgeRecord : null;
+  const staleKv = kvRecord && !isFresh(kvRecord, now) ? kvRecord : null;
+  return chooseFresher(staleKv, staleEdge);
+}
+
 async function waitForFreshKvRecord<TInput, TUpstream, TData>(
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
   cacheKey: string,
@@ -262,6 +289,87 @@ async function waitForFreshKvRecord<TInput, TUpstream, TData>(
   return null;
 }
 
+async function waitForLeaderOrServeStale<TInput, TUpstream, TData>(
+  adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
+  cacheKey: string,
+  now: Date,
+  staleCandidate: CachedRecord<TData> | null,
+  readKv: (cacheKey: string) => Promise<unknown>
+): Promise<CacheEngineResult<TData>> {
+  if (
+    staleCandidate &&
+    isWithinStaleWindow(staleCandidate, now, adapter.policy.staleWhileRevalidateSeconds)
+  ) {
+    return cacheResultFromRecord(adapter, cacheKey, staleCandidate, now, 'stale_while_refresh', 'stale');
+  }
+
+  const waitedRecord = await waitForFreshKvRecord(adapter, cacheKey, readKv, MAX_WAIT_FOR_REFRESH_MS);
+  if (waitedRecord) {
+    return cacheResultFromRecord(adapter, cacheKey, waitedRecord, new Date(), 'kv_hit', 'kv');
+  }
+
+  if (staleCandidate && isWithinStaleWindow(staleCandidate, now, adapter.policy.staleOnErrorSeconds)) {
+    return cacheResultFromRecord(adapter, cacheKey, staleCandidate, now, 'stale_on_error', 'stale');
+  }
+
+  throw new CacheEngineError('Cache refresh is already in progress.', 503);
+}
+
+async function refreshFromUpstream<TInput, TUpstream, TData>(
+  adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
+  cacheKey: string,
+  input: TInput,
+  context: CacheAdapterContext,
+  env: CacheEngineInput<TInput, TUpstream, TData>['env'],
+  edgeCache: EdgeCacheLike | undefined
+): Promise<CacheEngineResult<TData>> {
+  const upstreamPayload = await adapter.fetchUpstream(input, context);
+  const validatedData = await adapter.validate(upstreamPayload, input, context);
+  const envelope = toEnvelope(adapter, validatedData, cacheKey, new Date());
+  const retentionTtl =
+    adapter.policy.ttlSeconds +
+    Math.max(adapter.policy.staleWhileRevalidateSeconds, adapter.policy.staleOnErrorSeconds);
+
+  await env.METAR_CACHE.put(cacheKey, JSON.stringify(envelope), {
+    expirationTtl: retentionTtl
+  });
+
+  await writeEdgeEnvelope(edgeCache, cacheKey, envelope, adapter.policy.ttlSeconds);
+
+  const record: CachedRecord<TData> = {
+    data: envelope.data,
+    fetchedAt: new Date(envelope.cacheMeta.fetchedAt),
+    expiresAt: new Date(envelope.cacheMeta.expiresAt)
+  };
+
+  return cacheResultFromRecord(adapter, cacheKey, record, new Date(), 'upstream_refresh', 'upstream');
+}
+
+async function refreshAsLeader<TInput, TUpstream, TData>(
+  adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
+  cacheKey: string,
+  input: TInput,
+  context: CacheAdapterContext,
+  env: CacheEngineInput<TInput, TUpstream, TData>['env'],
+  edgeCache: EdgeCacheLike | undefined,
+  staleCandidate: CachedRecord<TData> | null,
+  now: Date
+): Promise<CacheEngineResult<TData>> {
+  try {
+    return await refreshFromUpstream(adapter, cacheKey, input, context, env, edgeCache);
+  } catch (error) {
+    if (staleCandidate && isWithinStaleWindow(staleCandidate, now, adapter.policy.staleOnErrorSeconds)) {
+      return cacheResultFromRecord(adapter, cacheKey, staleCandidate, now, 'stale_on_error', 'stale');
+    }
+
+    if (error instanceof Error) {
+      throw error;
+    }
+
+    throw new CacheEngineError('Unexpected cache refresh failure.', 500);
+  }
+}
+
 export async function getOrRefreshCached<TInput, TUpstream, TData>(
   input: CacheEngineInput<TInput, TUpstream, TData>
 ): Promise<CacheEngineResult<TData>> {
@@ -275,137 +383,36 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
 
   const edgeRecord = await readEdgeEnvelope(edgeCache, adapter, cacheKey, now);
   if (edgeRecord && isFresh(edgeRecord, now)) {
-    return {
-      payload: edgeRecord.data,
-      cache: buildProvenance('edge_hit', 'edge', edgeRecord, now, cacheKey, adapter.resource, adapter.policy.ttlSeconds)
-    };
+    return cacheResultFromRecord(adapter, cacheKey, edgeRecord, now, 'edge_hit', 'edge');
   }
-
-  let staleCandidate = edgeRecord && !isFresh(edgeRecord, now) ? edgeRecord : null;
 
   const kvRecord = await readKvEnvelope(adapter, cacheKey, now, readKv);
   if (kvRecord && isFresh(kvRecord, now)) {
     await writeEdgeEnvelope(edgeCache, cacheKey, toEnvelope(adapter, kvRecord.data, cacheKey, now), adapter.policy.ttlSeconds);
-    return {
-      payload: kvRecord.data,
-      cache: buildProvenance('kv_hit', 'kv', kvRecord, now, cacheKey, adapter.resource, adapter.policy.ttlSeconds)
-    };
+    return cacheResultFromRecord(adapter, cacheKey, kvRecord, now, 'kv_hit', 'kv');
   }
 
-  staleCandidate = chooseFresher(kvRecord && !isFresh(kvRecord, now) ? kvRecord : null, staleCandidate);
+  const staleCandidate = toStaleCandidate(edgeRecord, kvRecord, now);
 
   const lease = await acquireSingleFlightLease(env.CACHE_COORDINATOR, cacheKey, 20);
   const hasCoordinator = Boolean(env.CACHE_COORDINATOR);
   const refreshLeader = !hasCoordinator || Boolean(lease);
 
   if (!refreshLeader) {
-    if (
-      staleCandidate &&
-      isWithinStaleWindow(staleCandidate, now, adapter.policy.staleWhileRevalidateSeconds)
-    ) {
-      return {
-        payload: staleCandidate.data,
-        cache: buildProvenance(
-          'stale_while_refresh',
-          'stale',
-          staleCandidate,
-          now,
-          cacheKey,
-          adapter.resource,
-          adapter.policy.ttlSeconds
-        )
-      };
-    }
-
-    const waitedRecord = await waitForFreshKvRecord(adapter, cacheKey, readKv, MAX_WAIT_FOR_REFRESH_MS);
-    if (waitedRecord) {
-      return {
-        payload: waitedRecord.data,
-        cache: buildProvenance(
-          'kv_hit',
-          'kv',
-          waitedRecord,
-          new Date(),
-          cacheKey,
-          adapter.resource,
-          adapter.policy.ttlSeconds
-        )
-      };
-    }
-
-    if (staleCandidate && isWithinStaleWindow(staleCandidate, now, adapter.policy.staleOnErrorSeconds)) {
-      return {
-        payload: staleCandidate.data,
-        cache: buildProvenance(
-          'stale_on_error',
-          'stale',
-          staleCandidate,
-          now,
-          cacheKey,
-          adapter.resource,
-          adapter.policy.ttlSeconds
-        )
-      };
-    }
-
-    throw new CacheEngineError('Cache refresh is already in progress.', 503);
+    return waitForLeaderOrServeStale(adapter, cacheKey, now, staleCandidate, readKv);
   }
 
   try {
-    const upstreamPayload = await adapter.fetchUpstream(input.input, adapterContext);
-    const validatedData = await adapter.validate(upstreamPayload, input.input, adapterContext);
-    const envelope = toEnvelope(adapter, validatedData, cacheKey, new Date());
-    const retentionTtl =
-      adapter.policy.ttlSeconds +
-      Math.max(adapter.policy.staleWhileRevalidateSeconds, adapter.policy.staleOnErrorSeconds);
-
-    await env.METAR_CACHE.put(cacheKey, JSON.stringify(envelope), {
-      expirationTtl: retentionTtl
-    });
-
-    await writeEdgeEnvelope(edgeCache, cacheKey, envelope, adapter.policy.ttlSeconds);
-
-    const record: CachedRecord<TData> = {
-      data: envelope.data,
-      fetchedAt: new Date(envelope.cacheMeta.fetchedAt),
-      expiresAt: new Date(envelope.cacheMeta.expiresAt)
-    };
-
-    const servedAt = new Date();
-
-    return {
-      payload: envelope.data,
-      cache: buildProvenance(
-        'upstream_refresh',
-        'upstream',
-        record,
-        servedAt,
-        cacheKey,
-        adapter.resource,
-        adapter.policy.ttlSeconds
-      )
-    };
-  } catch (error) {
-    if (staleCandidate && isWithinStaleWindow(staleCandidate, now, adapter.policy.staleOnErrorSeconds)) {
-      return {
-        payload: staleCandidate.data,
-        cache: buildProvenance(
-          'stale_on_error',
-          'stale',
-          staleCandidate,
-          now,
-          cacheKey,
-          adapter.resource,
-          adapter.policy.ttlSeconds
-        )
-      };
-    }
-
-    if (error instanceof Error) {
-      throw error;
-    }
-
-    throw new CacheEngineError('Unexpected cache refresh failure.', 500);
+    return await refreshAsLeader(
+      adapter,
+      cacheKey,
+      input.input,
+      adapterContext,
+      env,
+      edgeCache,
+      staleCandidate,
+      now
+    );
   } finally {
     try {
       await releaseSingleFlightLease(env.CACHE_COORDINATOR, lease);

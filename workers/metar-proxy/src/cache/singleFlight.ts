@@ -43,6 +43,77 @@ function createToken(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function readStringField(rawBody: unknown, field: string): string {
+  if (!rawBody || typeof rawBody !== 'object') {
+    return '';
+  }
+
+  const value = (rawBody as Record<string, unknown>)[field];
+  return typeof value === 'string' ? value : '';
+}
+
+async function parseRequestBody(request: Request): Promise<unknown> {
+  try {
+    return (await request.json()) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function readHoldSeconds(rawBody: unknown): number {
+  if (!rawBody || typeof rawBody !== 'object') {
+    return Number.NaN;
+  }
+
+  return Number((rawBody as { holdSeconds?: unknown }).holdSeconds);
+}
+
+async function handleAcquire(
+  request: Request,
+  storage: DurableObjectStorageLike
+): Promise<Response> {
+  const rawBody = await parseRequestBody(request);
+  const key = readStringField(rawBody, 'key');
+  const holdSecondsNumber = readHoldSeconds(rawBody);
+
+  if (!key || !Number.isFinite(holdSecondsNumber)) {
+    return Response.json({ error: 'Invalid request body.' }, { status: 400 });
+  }
+
+  const now = Date.now();
+  const lock = await storage.get<LockRecord>(key);
+  if (lock && lock.expiresAtMs > now) {
+    return Response.json({ acquired: false } satisfies AcquireResponse);
+  }
+
+  const safeHoldSeconds = Math.max(1, holdSecondsNumber);
+  const token = createToken();
+  await storage.put(key, {
+    token,
+    expiresAtMs: now + safeHoldSeconds * 1000
+  } satisfies LockRecord);
+
+  return Response.json({ acquired: true, token } satisfies AcquireResponse);
+}
+
+async function handleRelease(
+  request: Request,
+  storage: DurableObjectStorageLike
+): Promise<Response> {
+  const rawBody = await parseRequestBody(request);
+  const key = readStringField(rawBody, 'key');
+  const token = readStringField(rawBody, 'token');
+  if (!key || !token) {
+    return Response.json({ error: 'Invalid request body.' }, { status: 400 });
+  }
+
+  const lock = await storage.get<LockRecord>(key);
+  if (lock && lock.token === token) {
+    await storage.delete(key);
+  }
+  return new Response(null, { status: 204 });
+}
+
 export class CacheSingleFlightCoordinator {
   constructor(private readonly state: DurableObjectStateLike) {}
 
@@ -54,67 +125,11 @@ export class CacheSingleFlightCoordinator {
     }
 
     if (url.pathname === '/acquire') {
-      const rawBody = (await request.json()) as unknown;
-
-      const key =
-        rawBody &&
-        typeof rawBody === 'object' &&
-        typeof (rawBody as { key?: unknown }).key === 'string'
-          ? (rawBody as { key: string }).key
-          : '';
-
-      const holdSecondsValue =
-        rawBody && typeof rawBody === 'object'
-          ? (rawBody as { holdSeconds?: unknown }).holdSeconds
-          : undefined;
-      const holdSecondsNumber = Number(holdSecondsValue);
-
-      if (!key || !Number.isFinite(holdSecondsNumber)) {
-        return Response.json({ error: 'Invalid request body.' }, { status: 400 });
-      }
-
-      const now = Date.now();
-      const lock = await this.state.storage.get<LockRecord>(key);
-
-      if (lock && lock.expiresAtMs > now) {
-        return Response.json({ acquired: false } satisfies AcquireResponse);
-      }
-
-      const safeHoldSeconds = Math.max(1, holdSecondsNumber);
-      const token = createToken();
-      await this.state.storage.put(key, {
-        token,
-        expiresAtMs: now + safeHoldSeconds * 1000
-      } satisfies LockRecord);
-
-      return Response.json({ acquired: true, token } satisfies AcquireResponse);
+      return handleAcquire(request, this.state.storage);
     }
 
     if (url.pathname === '/release') {
-      const rawBody = (await request.json()) as unknown;
-
-      const key =
-        rawBody &&
-        typeof rawBody === 'object' &&
-        typeof (rawBody as { key?: unknown }).key === 'string'
-          ? (rawBody as { key: string }).key
-          : '';
-      const token =
-        rawBody &&
-        typeof rawBody === 'object' &&
-        typeof (rawBody as { token?: unknown }).token === 'string'
-          ? (rawBody as { token: string }).token
-          : '';
-
-      if (!key || !token) {
-        return Response.json({ error: 'Invalid request body.' }, { status: 400 });
-      }
-
-      const lock = await this.state.storage.get<LockRecord>(key);
-      if (lock && lock.token === token) {
-        await this.state.storage.delete(key);
-      }
-      return new Response(null, { status: 204 });
+      return handleRelease(request, this.state.storage);
     }
 
     return Response.json({ error: 'Not found.' }, { status: 404 });
