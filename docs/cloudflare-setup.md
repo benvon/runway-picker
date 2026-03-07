@@ -136,3 +136,7 @@ In GitHub branch protection for `main`:
   - `CI / security`
   - `CI / codeql (javascript-typescript)`
 - Prevent direct pushes
+
+## 11) Cache refresher operations
+- The hot-cache scheduler runbook is documented in [docs/cache-refresh-operations.md](./cache-refresh-operations.md).
+- Use it for monitoring, troubleshooting, and cost tuning of the scheduled cache refresh process.

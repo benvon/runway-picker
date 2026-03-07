@@ -82,3 +82,7 @@ Current adapters:
 - migration entry for `CacheSingleFlightCoordinator`
 
 The preview environment also binds `CACHE_COORDINATOR`.
+
+## Operations
+
+- Scheduler monitoring and operational procedures are in [cache-refresh-operations.md](./cache-refresh-operations.md).
