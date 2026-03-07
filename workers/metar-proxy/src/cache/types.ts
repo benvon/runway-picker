@@ -79,6 +79,12 @@ export interface DurableObjectNamespaceLike {
 export interface KvNamespaceLike {
   get(key: string, type: 'json'): Promise<unknown>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  list?(options?: { prefix?: string; cursor?: string; limit?: number }): Promise<{
+    keys: Array<{ name: string }>;
+    list_complete: boolean;
+    cursor?: string;
+  }>;
+  delete?(key: string): Promise<void>;
 }
 
 export interface CacheEngineEnv {
@@ -88,6 +94,11 @@ export interface CacheEngineEnv {
   AIRPORTDB_API_TOKEN?: string;
   APP_ENV?: string;
   ENABLE_DEBUG_ERRORS?: string;
+  CACHE_REFRESH_ENABLED?: string;
+  CACHE_REFRESH_METAR_INTERVAL_SECONDS?: string;
+  CACHE_REFRESH_AIRPORT_INTERVAL_SECONDS?: string;
+  CACHE_REFRESH_INACTIVITY_TTL_SECONDS?: string;
+  CACHE_REFRESH_MAX_ITEMS_PER_RUN?: string;
 }
 
 export interface EdgeCacheLike {
