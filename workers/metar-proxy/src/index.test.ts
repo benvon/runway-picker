@@ -22,6 +22,7 @@ class MemoryKv {
   }
 
   async put(key: string, value: string, _options?: { expirationTtl?: number }): Promise<void> {
+    void _options;
     this.values.set(key, JSON.parse(value) as unknown);
   }
 
