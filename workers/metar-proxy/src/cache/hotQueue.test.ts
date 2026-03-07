@@ -415,4 +415,50 @@ describe('listHotCacheQueueEntries', () => {
     expect(result).toHaveLength(1);
     expect(result[0]?.normalizedKey).toBe('KJFK');
   });
+
+  it('stops scanning once maxScanEntries is reached', async () => {
+    const allKeys = Array.from({ length: 10 }, (_, i) => `v1:hot:metar:K${String(i).padStart(3, '0')}`);
+    const store = new Map<string, unknown>(
+      allKeys.map((key) => [
+        key,
+        {
+          schemaVersion: 1,
+          resource: 'metar',
+          normalizedKey: key.split(':').pop(),
+          cacheKey: key.replace('hot:', ''),
+          lastAccessedAt: '2026-03-06T11:00:00.000Z',
+          lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+        }
+      ])
+    );
+    const listCalls: number[] = [];
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key) => store.get(key) ?? null,
+        put: async () => {},
+        list: async (opts) => {
+          const limit = opts?.limit ?? 1000;
+          listCalls.push(limit);
+          const start = Number.parseInt(opts?.cursor ?? '0', 10);
+          const pageKeys = allKeys.slice(start, start + limit);
+          const nextStart = start + pageKeys.length;
+          const listComplete = nextStart >= allKeys.length;
+          return {
+            keys: pageKeys.map((name) => ({ name })),
+            list_complete: listComplete,
+            cursor: listComplete ? undefined : `${nextStart}`
+          };
+        },
+        delete: async () => {}
+      }
+    });
+
+    // With maxScanEntries=3, only the first 3 keys should be fetched.
+    const result = await listHotCacheQueueEntries(env, 3);
+    expect(result).toHaveLength(3);
+    // The list call should have been issued with limit=3, not the default 1000.
+    expect(listCalls[0]).toBe(3);
+    // Only one page call should have been made since 3 entries exhausted the cap.
+    expect(listCalls).toHaveLength(1);
+  });
 });

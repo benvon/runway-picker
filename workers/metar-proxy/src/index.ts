@@ -281,7 +281,8 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
     return;
   }
 
-  const queueEntries = await listHotCacheQueueEntries(env);
+  const scanCap = config.maxItemsPerRun * 10;
+  const queueEntries = await listHotCacheQueueEntries(env, scanCap);
   if (queueEntries.length === 0) {
     return;
   }

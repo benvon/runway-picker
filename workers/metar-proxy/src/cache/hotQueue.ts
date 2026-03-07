@@ -25,6 +25,7 @@ export interface CacheRefresherConfig {
 
 const HOT_QUEUE_SCHEMA_VERSION = 1;
 const HOT_QUEUE_KEY_PREFIX = 'v1:hot:';
+const KV_LIST_PAGE_LIMIT = 1000;
 
 const DEFAULT_CONFIG: CacheRefresherConfig = {
   enabled: true,
@@ -149,7 +150,10 @@ export function refreshIntervalSecondsForResource(
   return config.airportRefreshIntervalSeconds;
 }
 
-export async function listHotCacheQueueEntries(env: CacheEngineEnv): Promise<HotCacheQueueEntry[]> {
+export async function listHotCacheQueueEntries(
+  env: CacheEngineEnv,
+  maxScanEntries?: number
+): Promise<HotCacheQueueEntry[]> {
   if (!env.METAR_CACHE.list) {
     return [];
   }
@@ -157,12 +161,18 @@ export async function listHotCacheQueueEntries(env: CacheEngineEnv): Promise<Hot
   const entries: HotCacheQueueEntry[] = [];
   let cursor: string | undefined;
   let complete = false;
+  let scanned = 0;
 
   while (!complete) {
+    const remaining = maxScanEntries !== undefined ? maxScanEntries - scanned : KV_LIST_PAGE_LIMIT;
+    if (remaining <= 0) {
+      break;
+    }
+
     const page = await env.METAR_CACHE.list({
       prefix: HOT_QUEUE_KEY_PREFIX,
       cursor,
-      limit: 1000
+      limit: Math.min(KV_LIST_PAGE_LIMIT, remaining)
     });
 
     const pageEntries = await Promise.all(
@@ -178,6 +188,7 @@ export async function listHotCacheQueueEntries(env: CacheEngineEnv): Promise<Hot
       }
     }
 
+    scanned += page.keys.length;
     complete = page.list_complete;
     cursor = page.cursor;
   }
