@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  __cacheRefreshHelpers,
   default as workerEntrypoint,
   extractMetarRaw,
   handleAirportRequest,
@@ -9,6 +10,8 @@ import {
   normalizeIcao,
   runScheduledCacheRefresh
 } from './index';
+import type { CacheRefresherConfig, HotCacheQueueEntry } from './cache/hotQueue';
+import type { CacheEngineEnv } from './cache/types';
 
 class MemoryKv {
   private values = new Map<string, unknown>();
@@ -153,6 +156,108 @@ function seedHotQueueEntry(
     lastRefreshedAt: entry.lastRefreshedAt
   });
 }
+
+describe('cache refresh helpers', () => {
+  it('computes inactivity with strict greater-than ttl boundary', () => {
+    const nowMs = Date.parse('2026-03-07T12:00:00.000Z');
+    const ttlMs = 5 * 24 * 60 * 60 * 1000;
+    const exactlyAtBoundary = nowMs - ttlMs;
+    const justBeyondBoundary = nowMs - ttlMs - 1;
+
+    expect(__cacheRefreshHelpers.isInactive(exactlyAtBoundary, nowMs, ttlMs)).toBe(false);
+    expect(__cacheRefreshHelpers.isInactive(justBeyondBoundary, nowMs, ttlMs)).toBe(true);
+    expect(__cacheRefreshHelpers.isInactive(0, nowMs, ttlMs)).toBe(true);
+  });
+
+  it('computes refresh due by resource-specific interval and timestamp validity', () => {
+    const config: CacheRefresherConfig = {
+      enabled: true,
+      metarRefreshIntervalSeconds: 1800,
+      airportRefreshIntervalSeconds: 86400,
+      inactivityTtlSeconds: 432000,
+      maxItemsPerRun: 25
+    };
+
+    const nowMs = Date.parse('2026-03-07T12:00:00.000Z');
+    const metarEntry: HotCacheQueueEntry = {
+      schemaVersion: 1,
+      resource: 'metar',
+      normalizedKey: 'KMCI',
+      cacheKey: 'v1:metar:KMCI',
+      lastAccessedAt: '2026-03-07T11:59:00.000Z',
+      lastRefreshedAt: '2026-03-07T11:30:00.000Z',
+      metadataKey: 'v1:hot:metar:KMCI'
+    };
+
+    const airportEntry: HotCacheQueueEntry = {
+      schemaVersion: 1,
+      resource: 'airport',
+      normalizedKey: 'KJFK',
+      cacheKey: 'v1:airport:KJFK',
+      lastAccessedAt: '2026-03-07T11:59:00.000Z',
+      lastRefreshedAt: '2026-03-06T12:00:00.000Z',
+      metadataKey: 'v1:hot:airport:KJFK'
+    };
+
+    expect(__cacheRefreshHelpers.isRefreshDue(metarEntry, nowMs, config)).toBe(true);
+    expect(__cacheRefreshHelpers.isRefreshDue(airportEntry, nowMs, config)).toBe(true);
+
+    const freshMetar = { ...metarEntry, lastRefreshedAt: '2026-03-07T11:45:01.000Z' };
+    expect(__cacheRefreshHelpers.isRefreshDue(freshMetar, nowMs, config)).toBe(false);
+
+    const invalidTimestamp = { ...metarEntry, lastRefreshedAt: 'invalid' };
+    expect(__cacheRefreshHelpers.isRefreshDue(invalidTimestamp, nowMs, config)).toBe(true);
+  });
+
+  it('keeps active entries and evicts inactive entries in keepOrEvictQueueEntry', async () => {
+    const nowMs = Date.parse('2026-03-07T12:00:00.000Z');
+    const ttlMs = 5 * 24 * 60 * 60 * 1000;
+    const kv = new MemoryKv();
+    const env: CacheEngineEnv = { METAR_CACHE: kv };
+
+    const activeEntry: HotCacheQueueEntry = {
+      schemaVersion: 1,
+      resource: 'metar',
+      normalizedKey: 'KMSN',
+      cacheKey: 'v1:metar:KMSN',
+      lastAccessedAt: '2026-03-07T11:59:00.000Z',
+      lastRefreshedAt: '2026-03-07T11:30:00.000Z',
+      metadataKey: 'v1:hot:metar:KMSN'
+    };
+
+    const activeResult = await __cacheRefreshHelpers.keepOrEvictQueueEntry(env, activeEntry, nowMs, ttlMs);
+    expect(activeResult).toEqual(activeEntry);
+
+    seedHotQueueEntry(kv, {
+      resource: 'metar',
+      normalizedKey: 'KDEN',
+      cacheKey: 'v1:metar:KDEN',
+      lastAccessedAt: '2026-02-28T11:00:00.000Z',
+      lastRefreshedAt: '2026-03-07T10:00:00.000Z'
+    });
+    kv.seed('v1:metar:KDEN', { cached: true });
+
+    const inactiveEntry: HotCacheQueueEntry = {
+      schemaVersion: 1,
+      resource: 'metar',
+      normalizedKey: 'KDEN',
+      cacheKey: 'v1:metar:KDEN',
+      lastAccessedAt: '2026-02-28T11:00:00.000Z',
+      lastRefreshedAt: '2026-03-07T10:00:00.000Z',
+      metadataKey: 'v1:hot:metar:KDEN'
+    };
+
+    const inactiveResult = await __cacheRefreshHelpers.keepOrEvictQueueEntry(
+      env,
+      inactiveEntry,
+      nowMs,
+      ttlMs
+    );
+    expect(inactiveResult).toBeNull();
+    expect(kv.has('v1:hot:metar:KDEN')).toBe(false);
+    expect(kv.has('v1:metar:KDEN')).toBe(false);
+  });
+});
 
 describe('metar worker', () => {
   afterEach(() => {

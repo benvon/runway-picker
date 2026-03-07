@@ -275,6 +275,53 @@ async function purgeEdgeCacheForKey(cacheKey: string): Promise<void> {
   }
 }
 
+function isInactive(lastAccessedAtMs: number, nowMs: number, inactivityTtlMs: number): boolean {
+  return lastAccessedAtMs <= 0 || nowMs - lastAccessedAtMs > inactivityTtlMs;
+}
+
+function isRefreshDue(entry: HotCacheQueueEntry, nowMs: number, config: ReturnType<typeof parseCacheRefresherConfig>): boolean {
+  const refreshIntervalMs = refreshIntervalSecondsForResource(entry.resource, config) * 1000;
+  const lastRefreshedAtMs = readIsoTimestamp(entry.lastRefreshedAt);
+  return lastRefreshedAtMs <= 0 || nowMs - lastRefreshedAtMs >= refreshIntervalMs;
+}
+
+async function keepOrEvictQueueEntry(
+  env: CacheEngineEnv,
+  entry: HotCacheQueueEntry,
+  nowMs: number,
+  inactivityTtlMs: number
+): Promise<HotCacheQueueEntry | null> {
+  let effectiveEntry: HotCacheQueueEntry = entry;
+  let lastAccessedAtMs = readIsoTimestamp(effectiveEntry.lastAccessedAt);
+
+  if (!isInactive(lastAccessedAtMs, nowMs, inactivityTtlMs)) {
+    return effectiveEntry;
+  }
+
+  // Re-read latest metadata before evicting to avoid racing with concurrent user requests.
+  const latest = await readHotCacheQueueEntry(env, entry.metadataKey);
+  if (!latest) {
+    return null;
+  }
+
+  effectiveEntry = latest;
+  lastAccessedAtMs = readIsoTimestamp(effectiveEntry.lastAccessedAt);
+  if (!isInactive(lastAccessedAtMs, nowMs, inactivityTtlMs)) {
+    return effectiveEntry;
+  }
+
+  await deleteHotCacheEntryAndPayload(env, effectiveEntry);
+  await purgeEdgeCacheForKey(effectiveEntry.cacheKey);
+  return null;
+}
+
+// Test-only export surface for targeted unit tests of scheduler helpers.
+export const __cacheRefreshHelpers = {
+  isInactive,
+  isRefreshDue,
+  keepOrEvictQueueEntry
+};
+
 export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Date()): Promise<void> {
   const config = parseCacheRefresherConfig(env);
   if (!config.enabled) {
@@ -292,32 +339,12 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
   const dueEntries: HotCacheQueueEntry[] = [];
 
   for (const entry of queueEntries) {
-    let effectiveEntry: HotCacheQueueEntry = entry;
-    let lastAccessedAtMs = readIsoTimestamp(effectiveEntry.lastAccessedAt);
-
-    if (lastAccessedAtMs <= 0 || nowMs - lastAccessedAtMs > inactivityTtlMs) {
-      // Re-read latest metadata before evicting to avoid racing with concurrent user requests.
-      const latest = await readHotCacheQueueEntry(env, entry.metadataKey);
-      if (!latest) {
-        // Entry was already deleted elsewhere.
-        continue;
-      }
-
-      effectiveEntry = latest;
-      lastAccessedAtMs = readIsoTimestamp(effectiveEntry.lastAccessedAt);
-
-      if (lastAccessedAtMs <= 0 || nowMs - lastAccessedAtMs > inactivityTtlMs) {
-        await deleteHotCacheEntryAndPayload(env, effectiveEntry);
-        await purgeEdgeCacheForKey(effectiveEntry.cacheKey);
-        continue;
-      }
-
-      // Entry was recently accessed by a concurrent request; fall through to refresh check.
+    const effectiveEntry = await keepOrEvictQueueEntry(env, entry, nowMs, inactivityTtlMs);
+    if (!effectiveEntry) {
+      continue;
     }
 
-    const refreshIntervalMs = refreshIntervalSecondsForResource(effectiveEntry.resource, config) * 1000;
-    const lastRefreshedAtMs = readIsoTimestamp(effectiveEntry.lastRefreshedAt);
-    if (lastRefreshedAtMs <= 0 || nowMs - lastRefreshedAtMs >= refreshIntervalMs) {
+    if (isRefreshDue(effectiveEntry, nowMs, config)) {
       dueEntries.push(effectiveEntry);
     }
   }
