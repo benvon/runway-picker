@@ -18,7 +18,7 @@ class MemoryKv {
     return this.values.get(key) ?? null;
   }
 
-  async put(key: string, value: string): Promise<void> {
+  async put(key: string, value: string, _options?: { expirationTtl?: number }): Promise<void> {
     this.values.set(key, JSON.parse(value) as unknown);
   }
 
@@ -586,6 +586,35 @@ describe('metar worker', () => {
       code: 'PROVIDER_PAYLOAD_INVALID'
     });
   });
+
+  it('defers hot queue write via ctx.waitUntil when ctx is provided on metar request', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 10 })])));
+
+    const waitUntilCalls: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => { waitUntilCalls.push(p); } };
+
+    const response = await handleMetarRequest(
+      new Request('https://metar.internal/api/metar?icao=KMCI'),
+      { METAR_CACHE: new MemoryKv() },
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    expect(waitUntilCalls).toHaveLength(1);
+  });
+
+  it('writes hot queue metadata with the inactivity TTL as expirationTtl on metar success', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 10 })])));
+
+    const kv = new MemoryKv();
+    const putSpy = vi.spyOn(kv, 'put');
+
+    await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), { METAR_CACHE: kv });
+
+    const hotQueuePut = putSpy.mock.calls.find(([key]) => key.startsWith('v1:hot:'));
+    expect(hotQueuePut).toBeDefined();
+    expect(hotQueuePut?.[2]).toEqual({ expirationTtl: 432000 });
+  });
 });
 
 describe('airport worker', () => {
@@ -910,5 +939,132 @@ describe('airport worker', () => {
 
     expect(airportResponse.status).toBe(400);
     expect(metarResponse.status).toBe(200);
+  });
+
+  it('defers hot queue write via ctx.waitUntil when ctx is provided on airport request', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
+
+    const waitUntilCalls: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => { waitUntilCalls.push(p); } };
+
+    const response = await handleAirportRequest(
+      new Request('https://metar.internal/api/airport?icao=KJFK'),
+      { METAR_CACHE: new MemoryKv(), AIRPORTDB_API_TOKEN: 'token' },
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    expect(waitUntilCalls).toHaveLength(1);
+  });
+
+  it('writes hot queue metadata with the inactivity TTL as expirationTtl on airport success', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
+
+    const kv = new MemoryKv();
+    const putSpy = vi.spyOn(kv, 'put');
+
+    await handleAirportRequest(
+      new Request('https://metar.internal/api/airport?icao=KJFK'),
+      { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' }
+    );
+
+    const hotQueuePut = putSpy.mock.calls.find(([key]) => key.startsWith('v1:hot:'));
+    expect(hotQueuePut).toBeDefined();
+    expect(hotQueuePut?.[2]).toEqual({ expirationTtl: 432000 });
+  });
+
+  it('scheduled refresh does not evict entry that was recently accessed concurrently', async () => {
+    const kv = new MemoryKv();
+    // Entry appears inactive in the initial snapshot (lastAccessedAt > inactivity TTL ago)…
+    kv.seed('v1:hot:metar:KORD', {
+      schemaVersion: 1,
+      resource: 'metar',
+      normalizedKey: 'KORD',
+      cacheKey: 'v1:metar:KORD',
+      lastAccessedAt: '2026-02-27T12:00:00.000Z',
+      lastRefreshedAt: '2026-03-06T11:55:00.000Z' // recently refreshed, not due for another refresh
+    });
+    kv.seed('v1:metar:KORD', { cached: true });
+
+    // …but the re-read before eviction sees a fresh lastAccessedAt from a concurrent request.
+    const originalGet = kv.get.bind(kv);
+    let hotKeyGetCount = 0;
+    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
+      if (key === 'v1:hot:metar:KORD') {
+        hotKeyGetCount++;
+        if (hotKeyGetCount > 1) {
+          return {
+            schemaVersion: 1,
+            resource: 'metar',
+            normalizedKey: 'KORD',
+            cacheKey: 'v1:metar:KORD',
+            lastAccessedAt: '2026-03-06T11:58:00.000Z',
+            lastRefreshedAt: '2026-03-06T11:55:00.000Z'
+          };
+        }
+      }
+      return originalGet(key, type);
+    });
+
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
+
+    expect(kv.has('v1:hot:metar:KORD')).toBe(true);
+    expect(kv.has('v1:metar:KORD')).toBe(true);
+  });
+
+  it('scheduled refresh skips eviction when entry was already deleted before the re-read', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v1:hot:metar:KORD', {
+      schemaVersion: 1,
+      resource: 'metar',
+      normalizedKey: 'KORD',
+      cacheKey: 'v1:metar:KORD',
+      lastAccessedAt: '2026-02-27T12:00:00.000Z',
+      lastRefreshedAt: '2026-03-01T12:00:00.000Z'
+    });
+    kv.seed('v1:metar:KORD', { cached: true });
+
+    // Simulate concurrent deletion: re-read returns null.
+    const originalGet = kv.get.bind(kv);
+    let hotKeyGetCount = 0;
+    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
+      if (key === 'v1:hot:metar:KORD') {
+        hotKeyGetCount++;
+        if (hotKeyGetCount > 1) {
+          return null;
+        }
+      }
+      return originalGet(key, type);
+    });
+
+    await expect(
+      runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'))
+    ).resolves.not.toThrow();
+    // The payload must not be deleted since the scheduler aborted after the null re-read.
+    expect(kv.has('v1:metar:KORD')).toBe(true);
+    expect(hotKeyGetCount).toBe(2);
+  });
+
+  it('scheduled refresh logs error via console.error when refresh fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('Service Unavailable', { status: 503 })));
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const kv = new MemoryKv();
+    seedHotQueueEntry(kv, {
+      resource: 'metar',
+      normalizedKey: 'KBOS',
+      cacheKey: 'v1:metar:KBOS',
+      lastAccessedAt: '2026-03-06T11:50:00.000Z',
+      lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+    });
+
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
+
+    expect(consoleErrorSpy).toHaveBeenCalledOnce();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      'Scheduled cache refresh failed for hot cache queue entry.',
+      expect.objectContaining({ entry: expect.objectContaining({ normalizedKey: 'KBOS' }) })
+    );
+    consoleErrorSpy.mockRestore();
   });
 });

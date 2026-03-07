@@ -30,14 +30,16 @@ Emergency stop:
 2. Deploy worker.
 3. Re-enable after upstream/provider stability is restored.
 
+> **Note:** Disabling the refresher also stops inactivity-based eviction (eviction runs inside the scheduled job). During an extended emergency stop, hot-entry keys will not be purged for inactivity by the scheduler. Hot-entry keys do carry a KV TTL aligned to `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` so they will eventually self-expire, but monitor hot-set size via KV list counts while the refresher is disabled to avoid unexpected growth.
+
 ## Monitoring checklist
 
 Use Cloudflare dashboard metrics for `runway-picker-metar-api`:
 
 - `Cron Trigger Invocations`: should run every 15 minutes.
-- `Worker Errors`: sustained increase indicates refresh failures or provider issues.
+- `Worker Errors`: indicates unexpected worker or runtime faults; individual cache refresh failures are caught and logged (not surfaced as Worker Errors — check Worker logs for `Scheduled cache refresh failed` entries instead).
 - `CPU Time`: monitor spikes when hot set grows.
-- `KV Operations` (`METAR_CACHE`): watch read/write/delete trends after releases.
+- `KV Operations` (`METAR_CACHE`): watch read/write/delete trends after releases and correlate with `X-Runway-Cache-Status` patterns to infer refresh health.
 
 Operational API signal:
 
