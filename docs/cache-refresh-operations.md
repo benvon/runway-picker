@@ -30,6 +30,7 @@ Emergency stop:
 2. Deploy worker.
 3. Re-enable after upstream/provider stability is restored.
 
+   > Note: Disabling the refresher also stops inactivity-based eviction (eviction runs inside the scheduled job). During an extended emergency stop, hot-entry keys will not be purged for inactivity and the hot queue/KV usage can grow over time. Consider ensuring hot-entry keys have an appropriate KV TTL and monitor hot-set size while the refresher is disabled.
 > **Note:** Disabling the refresher also stops inactivity-based eviction (eviction runs inside the scheduled job). During an extended emergency stop, hot-entry keys will not be purged for inactivity by the scheduler. Hot-entry keys do carry a KV TTL aligned to `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` so they will eventually self-expire, but monitor hot-set size via KV list counts while the refresher is disabled to avoid unexpected growth.
 
 ## Monitoring checklist
