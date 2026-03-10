@@ -30,6 +30,8 @@
 
 ### Browser/API security headers
 - Static content headers are set in `public/_headers` (strict CSP + hardening headers).
+- Static CSP allows Cloudflare Insights script loading from `https://static.cloudflareinsights.com`.
+- Build pipeline inlines the app stylesheet into `dist/index.html` and injects a matching `style-src 'sha256-...'` token into `dist/_headers`.
 - API responses include hardening headers and `X-Request-Id`.
 
 ### Worker exposure
