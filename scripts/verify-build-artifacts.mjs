@@ -31,8 +31,8 @@ async function main() {
   );
 
   assert(
-    distHeadersRaw.includes('https://static.cloudflareinsights.com'),
-    'dist/_headers CSP must allow Cloudflare Insights script origin.'
+    /script-src[^;\n]*\shttps:\/\/static\.cloudflareinsights\.com(?:\s|['";])/i.test(distHeadersRaw),
+    'dist/_headers CSP script-src must include https://static.cloudflareinsights.com as a source.'
   );
   assert(
     /style-src[^;]*'sha256-[^']+'/i.test(distHeadersRaw),
