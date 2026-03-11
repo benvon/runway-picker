@@ -1,0 +1,13 @@
+---
+description: Runway Picker shared coding standards
+alwaysApply: true
+---
+
+Use `AGENTS.md` in the repository root as the canonical instruction source.
+
+Required repository standards:
+- Preserve separation of concerns across `src/domain`, `src/application`, `src/services`, and `src/ui`.
+- Keep strict TypeScript contracts and avoid untyped interfaces at boundaries.
+- Maintain test coverage and quality gates (`typecheck`, `lint`, `test:coverage`, `build`, `lint:workflows`).
+- Follow Conventional Commits for PR titles and squash merge outcomes.
+- Keep release/deploy changes compatible with automated GitHub Releases and release-triggered production deploys.

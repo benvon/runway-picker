@@ -1,87 +1,26 @@
 name: Deploy METAR Worker Production
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  release:
+    types: [published]
 
 permissions:
-  checks: read
   contents: read
 
 jobs:
-  wait-for-ci:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for CI validate check to pass
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const ref = context.sha;
-            const targetCheckGroups = [
-              ['validate', 'CI / validate'],
-              ['security', 'CI / security'],
-              ['codeql', 'CI / codeql', 'codeql (javascript-typescript)', 'CI / codeql (javascript-typescript)']
-            ];
-            const maxAttempts = 40;
-            const delayMs = 15000;
-
-            function sleep(ms) {
-              return new Promise((resolve) => setTimeout(resolve, ms));
-            }
-
-            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-              const { data } = await github.rest.checks.listForRef({
-                owner,
-                repo,
-                ref,
-                per_page: 100,
-              });
-
-              let allChecksSuccessful = true;
-
-              for (const aliases of targetCheckGroups) {
-                const checkRun = data.check_runs.find((run) => aliases.includes(run.name));
-                if (!checkRun || checkRun.status !== 'completed') {
-                  allChecksSuccessful = false;
-                  break;
-                }
-
-                if (checkRun.conclusion !== 'success') {
-                  core.setFailed(
-                    `Required check '${checkRun.name}' completed with conclusion '${checkRun.conclusion}' for ${ref}.`
-                  );
-                  return;
-                }
-              }
-
-              if (allChecksSuccessful) {
-                core.info(`All required CI checks succeeded for ${ref}.`);
-                return;
-              }
-
-              core.info(
-                `Attempt ${attempt}/${maxAttempts}: required CI checks not completed yet for ${ref}.`
-              );
-              await sleep(delayMs);
-            }
-
-            core.setFailed(
-              `Timed out waiting for required CI checks to complete for ${ref}.`
-            );
-
   deploy-worker:
-    needs: wait-for-ci
+    if: github.event.release.draft == false && github.event.release.prerelease == false
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       AIRPORT_IO_TOKEN: ${{ secrets.AIRPORT_IO_TOKEN }}
     steps:
-      - name: Checkout tagged commit
+      - name: Checkout released tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Setup Node
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f

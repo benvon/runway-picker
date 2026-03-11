@@ -259,6 +259,14 @@ th {
   font-size: 0.86rem;
 }
 
+.app-footer {
+  margin-top: 0.25rem;
+  padding: 0.4rem 0.2rem 0.1rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: right;
+}
+
 @media (min-width: 640px) {
   #app {
     padding: 1rem;
