@@ -100,6 +100,23 @@ jobs:
             exit 1
           fi
 
+      - name: Configure git identity for release tag
+        if: steps.plan.outputs.should_release == 'true'
+        env:
+          GITHUB_ACTOR_NAME: ${{ github.actor }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+        shell: bash
+        run: |
+          actor_name="${GITHUB_ACTOR_NAME:-github-actions[bot]}"
+          if [ -n "${GITHUB_ACTOR_ID}" ] && [ -n "${GITHUB_ACTOR_NAME}" ]; then
+            actor_email="${GITHUB_ACTOR_ID}+${GITHUB_ACTOR_NAME}@users.noreply.github.com"
+          else
+            actor_email="github-actions[bot]@users.noreply.github.com"
+          fi
+
+          git config user.name "$actor_name"
+          git config user.email "$actor_email"
+
       - name: Create and push annotated tag
         if: steps.plan.outputs.should_release == 'true'
         env:
