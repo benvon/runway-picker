@@ -19,8 +19,9 @@ function normalizeVersion(value: string | undefined): string {
     return DEFAULT_VERSION;
   }
 
-  if (raw.startsWith('v')) {
-    return raw;
+  if (/^v/i.test(raw)) {
+    const withoutPrefix = raw.slice(1).trim();
+    return withoutPrefix ? `v${withoutPrefix}` : DEFAULT_VERSION;
   }
 
   return `v${raw}`;

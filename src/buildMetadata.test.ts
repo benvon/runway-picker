@@ -16,6 +16,15 @@ describe('buildMetadata', () => {
     });
   });
 
+  it('normalizes uppercase V prefixes to canonical lowercase v', () => {
+    expect(
+      readBuildMetadata({
+        VITE_APP_VERSION: 'V2.3.4',
+        VITE_APP_COMMIT_SHA: '0123456789abcdef'
+      }).version
+    ).toBe('v2.3.4');
+  });
+
   it('falls back when metadata is missing or invalid', () => {
     expect(
       readBuildMetadata({
