@@ -41,13 +41,24 @@ jobs:
             exit 1
           fi
 
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vX.Y.Z. Got: $tag"
+            exit 1
+          fi
+
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "Release tag $tag was not found in origin."
+            exit 1
+          fi
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
 
       - name: Checkout released tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
-          ref: ${{ steps.release.outputs.tag }}
+          ref: ${{ steps.release.outputs.tag_ref }}
 
       - name: Setup Node
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
