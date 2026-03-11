@@ -38,7 +38,7 @@ export function applyAlternateStageUi(elements: AppElements, primaryIcao: string
   elements.alternateHelp.textContent = `No METAR is currently available for ICAO ${primaryIcao}. Enter an alternate ICAO code for METAR data.`;
 }
 
-export function buildAppUi(root: HTMLElement): AppElements {
+export function buildAppUi(root: HTMLElement, footerBuildId: string): AppElements {
   root.textContent = '';
 
   const appShell = createElement('div', { className: 'app-shell' });
@@ -134,7 +134,13 @@ export function buildAppUi(root: HTMLElement): AppElements {
     }
   });
 
-  appendChildren(appShell, [header, bestSpotlightNode, inputSection, resultsNode]);
+  const footer = createElement('footer', {
+    className: 'app-footer',
+    attributes: { 'aria-label': 'Build version' }
+  });
+  footer.textContent = `Version ${footerBuildId}`;
+
+  appendChildren(appShell, [header, bestSpotlightNode, inputSection, resultsNode, footer]);
   root.appendChild(appShell);
 
   return {

@@ -1,0 +1,129 @@
+name: Release Create
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout merged main commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
+        with:
+          node-version: 22
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Detect latest semver tag
+        id: latest
+        shell: bash
+        run: |
+          latest_tag="$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1)"
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Compute release plan
+        id: plan
+        env:
+          CURRENT_TAG: ${{ steps.latest.outputs.latest_tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          node scripts/release-version.js --current-tag "$CURRENT_TAG" --to-ref "$HEAD_SHA" > release-plan.json
+
+          should_release="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(String(plan.shouldRelease));")"
+          next_tag="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(plan.nextTag ?? '');")"
+          bump_type="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(plan.bumpType ?? '');")"
+          analyzed_count="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(String(plan.analyzedCommitCount ?? 0));")"
+
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+          echo "next_tag=$next_tag" >> "$GITHUB_OUTPUT"
+          echo "bump_type=$bump_type" >> "$GITHUB_OUTPUT"
+          echo "analyzed_count=$analyzed_count" >> "$GITHUB_OUTPUT"
+
+      - name: Write release summary
+        shell: bash
+        env:
+          CURRENT_TAG: ${{ steps.latest.outputs.latest_tag }}
+          SHOULD_RELEASE: ${{ steps.plan.outputs.should_release }}
+          NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
+          BUMP_TYPE: ${{ steps.plan.outputs.bump_type }}
+          ANALYZED_COUNT: ${{ steps.plan.outputs.analyzed_count }}
+        run: |
+          if [ "$SHOULD_RELEASE" = "true" ]; then
+            {
+              echo "## Release Plan"
+              echo ""
+              echo "- Previous tag: ${CURRENT_TAG:-v0.0.0}"
+              echo "- Next tag: $NEXT_TAG"
+              echo "- Bump: $BUMP_TYPE"
+              echo "- Commits analyzed: $ANALYZED_COUNT"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Release Plan"
+              echo ""
+              echo "No releasable Conventional Commit types detected in this merge window."
+              echo ""
+              echo "- Previous tag: ${CURRENT_TAG:-v0.0.0}"
+              echo "- Commits analyzed: $ANALYZED_COUNT"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Ensure release tag does not exist
+        if: steps.plan.outputs.should_release == 'true'
+        env:
+          NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
+        shell: bash
+        run: |
+          if git rev-parse -q --verify "refs/tags/$NEXT_TAG" >/dev/null; then
+            echo "Tag $NEXT_TAG already exists."
+            exit 1
+          fi
+
+      - name: Create and push annotated tag
+        if: steps.plan.outputs.should_release == 'true'
+        env:
+          NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
+        shell: bash
+        run: |
+          git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG"
+          git push origin "$NEXT_TAG"
+
+      - name: Create GitHub release
+        if: steps.plan.outputs.should_release == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          RELEASE_TAG: ${{ steps.plan.outputs.next_tag }}
+          RELEASE_TARGET: ${{ github.event.workflow_run.head_sha }}
+        with:
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: process.env.RELEASE_TAG,
+              target_commitish: process.env.RELEASE_TARGET,
+              name: process.env.RELEASE_TAG,
+              draft: false,
+              prerelease: false,
+              generate_release_notes: true
+            });

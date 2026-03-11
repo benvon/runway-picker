@@ -111,6 +111,9 @@ jobs:
         run: npm run test
 
       - name: Build
+        env:
+          VITE_APP_VERSION: pr-${{ github.event.pull_request.number }}
+          VITE_APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
         run: npm run build
 
       - name: Generate preview deployment Wrangler configs

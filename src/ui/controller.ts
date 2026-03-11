@@ -106,8 +106,8 @@ function applyLookupExecution(elements: ReturnType<typeof buildAppUi>, result: L
   return result.state;
 }
 
-export function mountAppController(root: HTMLElement, gateway: LookupGateway): void {
-  const elements = buildAppUi(root);
+export function mountAppController(root: HTMLElement, gateway: LookupGateway, footerBuildId: string): void {
+  const elements = buildAppUi(root, footerBuildId);
   let lookupState = createPrimaryState();
   applyStateUi(elements, lookupState);
 

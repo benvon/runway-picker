@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../app';
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -70,7 +70,13 @@ function metarPayload(
 }
 
 describe('app integration', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_APP_VERSION', 'v9.9.9');
+    vi.stubEnv('VITE_APP_COMMIT_SHA', 'abcdef1234567890');
+  });
+
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
 
@@ -145,6 +151,7 @@ describe('app integration', () => {
     expect(root.textContent).toContain('METAR cache freshness: upstream_refresh via upstream');
     expect(root.textContent).toContain('Calculation Notes & Disclaimer');
     expect(root.textContent).toContain('Technical Details');
+    expect(root.textContent).toContain('Version v9.9.9 (abcdef1)');
   });
 
   it('shows variable wind speed in results when direction is VRB', async () => {

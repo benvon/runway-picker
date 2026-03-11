@@ -1,0 +1,31 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      - no-release-notes
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking
+        - major
+    - title: Features
+      labels:
+        - feature
+        - enhancement
+        - feat
+    - title: Fixes
+      labels:
+        - fix
+        - bug
+        - bugfix
+    - title: Performance
+      labels:
+        - perf
+        - performance
+    - title: Maintenance
+      labels:
+        - chore
+        - refactor
+        - ci
+        - docs
+        - dependencies
