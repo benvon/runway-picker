@@ -6,7 +6,6 @@ on:
     types: [completed]
 
 permissions:
-  actions: write
   contents: write
 
 concurrency:
@@ -127,13 +126,22 @@ jobs:
           git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG"
           git push origin "$NEXT_TAG"
 
+      - name: Validate release automation token
+        if: steps.plan.outputs.should_release == 'true'
+        env:
+          RELEASE_AUTOMATION_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "$RELEASE_AUTOMATION_TOKEN" ]; then
+            echo "Missing secret RELEASE_AUTOMATION_TOKEN. Configure a bot/App token with contents write access."
+            exit 1
+          fi
+
       - name: Create GitHub release
         if: steps.plan.outputs.should_release == 'true'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
-        env:
-          RELEASE_TAG: ${{ steps.plan.outputs.next_tag }}
-          RELEASE_TARGET: ${{ github.event.workflow_run.head_sha }}
         with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
           script: |
             await github.rest.repos.createRelease({
               owner: context.repo.owner,
@@ -145,24 +153,6 @@ jobs:
               prerelease: false,
               generate_release_notes: true
             });
-
-      - name: Dispatch production deploy workflows
-        if: steps.plan.outputs.should_release == 'true'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
         env:
           RELEASE_TAG: ${{ steps.plan.outputs.next_tag }}
-        with:
-          script: |
-            const workflows = ['deploy-production.yml', 'deploy-worker-production.yml'];
-
-            for (const workflow_id of workflows) {
-              await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id,
-                ref: 'main',
-                inputs: {
-                  release_tag: process.env.RELEASE_TAG
-                }
-              });
-            }
+          RELEASE_TARGET: ${{ github.event.workflow_run.head_sha }}
