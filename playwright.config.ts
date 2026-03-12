@@ -26,8 +26,17 @@ export default defineConfig({
   projects: [
     {
       name: 'mobile-chromium',
+      testMatch: /.*\.mobile\.spec\.ts/,
       use: {
         ...devices['Pixel 7']
+      }
+    },
+    {
+      name: 'desktop-chromium',
+      testMatch: /.*\.desktop\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1366, height: 900 }
       }
     }
   ]
