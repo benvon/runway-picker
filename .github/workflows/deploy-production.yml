@@ -3,21 +3,13 @@ name: Deploy Production
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Release tag to deploy (for workflow-dispatched production deploys)
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 jobs:
   deploy-production:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.release.draft == false && github.event.release.prerelease == false)
+    if: github.event.release.draft == false && github.event.release.prerelease == false
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -27,14 +19,8 @@ jobs:
       - name: Resolve release tag
         id: release
         shell: bash
-        env:
-          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
-          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          tag="${EVENT_RELEASE_TAG}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${DISPATCH_RELEASE_TAG}"
-          fi
+          tag="${{ github.event.release.tag_name }}"
 
           if [ -z "$tag" ]; then
             echo "Could not resolve release tag."
@@ -43,14 +29,6 @@ jobs:
 
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release tag must match vX.Y.Z. Got: $tag"
-            exit 1
-          fi
-
-          if ! curl -sSf \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/tags/$tag" >/dev/null; then
-            echo "Release tag $tag was not found in origin."
             exit 1
           fi
 
