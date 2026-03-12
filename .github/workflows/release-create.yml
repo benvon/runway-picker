@@ -6,6 +6,7 @@ on:
     types: [completed]
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -144,3 +145,24 @@ jobs:
               prerelease: false,
               generate_release_notes: true
             });
+
+      - name: Dispatch production deploy workflows
+        if: steps.plan.outputs.should_release == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          RELEASE_TAG: ${{ steps.plan.outputs.next_tag }}
+        with:
+          script: |
+            const workflows = ['deploy-production.yml', 'deploy-worker-production.yml'];
+
+            for (const workflow_id of workflows) {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id,
+                ref: 'main',
+                inputs: {
+                  release_tag: process.env.RELEASE_TAG
+                }
+              });
+            }

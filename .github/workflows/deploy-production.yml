@@ -3,24 +3,65 @@ name: Deploy Production
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to deploy (for workflow-dispatched production deploys)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   deploy-production:
-    if: github.event.release.draft == false && github.event.release.prerelease == false
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.release.draft == false && github.event.release.prerelease == false)
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
     steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          tag="${EVENT_RELEASE_TAG}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${DISPATCH_RELEASE_TAG}"
+          fi
+
+          if [ -z "$tag" ]; then
+            echo "Could not resolve release tag."
+            exit 1
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vX.Y.Z. Got: $tag"
+            exit 1
+          fi
+
+          if ! curl -sSf \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/tags/$tag" >/dev/null; then
+            echo "Release tag $tag was not found in origin."
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+
       - name: Checkout released tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ steps.release.outputs.tag_ref }}
 
       - name: Setup Node
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
@@ -50,7 +91,7 @@ jobs:
 
       - name: Build
         env:
-          VITE_APP_VERSION: ${{ github.event.release.tag_name }}
+          VITE_APP_VERSION: ${{ steps.release.outputs.tag }}
           VITE_APP_COMMIT_SHA: ${{ steps.metadata.outputs.commit_sha }}
         run: npm run build
 
