@@ -119,15 +119,33 @@ async function verifyResource(baseUrl, resource) {
   await ensureRepeatedRequestShowsCacheReuse(baseUrl, resource, icao);
 }
 
-async function main() {
-  const baseUrl = parsePreviewUrl(process.argv[2] ?? process.env.PREVIEW_URL);
-  console.log(`Verifying preview cache behavior at ${baseUrl}`);
-
+async function runAllResourceChecks(baseUrl) {
   for (const resource of RESOURCES) {
     await verifyResource(baseUrl, resource);
   }
+}
 
-  console.log('Preview cache smoke checks passed.');
+async function main() {
+  const baseUrl = parsePreviewUrl(process.argv[2] ?? process.env.PREVIEW_URL);
+  const maxAttempts = Math.max(1, Number(process.env.PREVIEW_VERIFY_ATTEMPTS ?? '6'));
+  const delayMs = Math.max(0, Number(process.env.PREVIEW_VERIFY_DELAY_MS ?? '5000'));
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    console.log(`Verifying preview cache behavior at ${baseUrl} (attempt ${attempt}/${maxAttempts})`);
+
+    try {
+      await runAllResourceChecks(baseUrl);
+      console.log('Preview cache smoke checks passed.');
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === maxAttempts) {
+        throw error;
+      }
+      console.warn(`${message} — retrying in ${delayMs}ms...`);
+      await sleep(delayMs);
+    }
+  }
 }
 
 main().catch((error) => {

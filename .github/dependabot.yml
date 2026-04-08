@@ -13,17 +13,9 @@ updates:
     commit-message:
       prefix: chore(deps)
     groups:
-      npm-minor-and-patch:
+      npm-all:
         patterns:
           - "*"
-        update-types:
-          - minor
-          - patch
-      npm-major:
-        patterns:
-          - "*"
-        update-types:
-          - major
 
   - package-ecosystem: github-actions
     directory: /

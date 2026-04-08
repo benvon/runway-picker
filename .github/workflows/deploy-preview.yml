@@ -212,18 +212,23 @@ jobs:
             sleep "$sleep_seconds"
           done
 
-          preview_url="$(grep -Eo 'https://[^ ]+\.pages\.dev[^ ]*' deploy-output.txt | tail -n1)"
-          if [ -z "$preview_url" ]; then
+          # Wrangler prints the unique deployment URL first, then the branch alias.
+          # The branch alias can briefly return errors right after deploy; CI checks
+          # use the deployment URL so smoke/E2E hit the build we just uploaded.
+          preview_deployment_url="$(grep -Eo 'https://[^ ]+\.pages\.dev[^ ]*' deploy-output.txt | head -n1)"
+          preview_branch_url="$(grep -Eo 'https://[^ ]+\.pages\.dev[^ ]*' deploy-output.txt | tail -n1)"
+          if [ -z "$preview_deployment_url" ]; then
             echo "Could not extract preview URL from wrangler output."
             exit 1
           fi
 
-          echo "preview_url=$preview_url" >> "$GITHUB_OUTPUT"
+          echo "preview_url=$preview_branch_url" >> "$GITHUB_OUTPUT"
+          echo "preview_deployment_url=$preview_deployment_url" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test preview cache behavior
         shell: bash
         env:
-          PREVIEW_URL: ${{ steps.deploy.outputs.preview_url }}
+          PREVIEW_URL: ${{ steps.deploy.outputs.preview_deployment_url }}
         run: |
           node scripts/verify-preview-cache.mjs "$PREVIEW_URL"
 
@@ -233,7 +238,7 @@ jobs:
       - name: Run preview UI E2E tests
         shell: bash
         env:
-          PREVIEW_URL: ${{ steps.deploy.outputs.preview_url }}
+          PREVIEW_URL: ${{ steps.deploy.outputs.preview_deployment_url }}
         run: |
           npm run test:e2e
 
