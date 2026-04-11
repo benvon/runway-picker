@@ -27,7 +27,10 @@ function sleep(ms) {
   return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
-/** @param {NodeJS.ProcessEnv} env */
+/**
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{ maxAttempts: number, delayMs: number }}
+ */
 export function parsePreviewRetryEnv(env) {
   const parsedMaxAttempts = Number(env.PREVIEW_VERIFY_ATTEMPTS ?? '6');
   const parsedDelayMs = Number(env.PREVIEW_VERIFY_DELAY_MS ?? '5000');
