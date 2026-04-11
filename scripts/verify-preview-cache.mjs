@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { fileURLToPath } from 'node:url';
+
 const ALLOWED_STATUSES = new Set([
   'edge_hit',
   'kv_hit',
@@ -23,6 +25,19 @@ function assert(condition, message) {
 
 function sleep(ms) {
   return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
+/**
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{ maxAttempts: number, delayMs: number }}
+ */
+export function parsePreviewRetryEnv(env) {
+  const parsedMaxAttempts = Number(env.PREVIEW_VERIFY_ATTEMPTS ?? '6');
+  const parsedDelayMs = Number(env.PREVIEW_VERIFY_DELAY_MS ?? '5000');
+  return {
+    maxAttempts: Math.max(1, Number.isFinite(parsedMaxAttempts) ? parsedMaxAttempts : 6),
+    delayMs: Math.max(0, Number.isFinite(parsedDelayMs) ? parsedDelayMs : 5000)
+  };
 }
 
 function parsePreviewUrl(input) {
@@ -127,8 +142,7 @@ async function runAllResourceChecks(baseUrl) {
 
 async function main() {
   const baseUrl = parsePreviewUrl(process.argv[2] ?? process.env.PREVIEW_URL);
-  const maxAttempts = Math.max(1, Number(process.env.PREVIEW_VERIFY_ATTEMPTS ?? '6'));
-  const delayMs = Math.max(0, Number(process.env.PREVIEW_VERIFY_DELAY_MS ?? '5000'));
+  const { maxAttempts, delayMs } = parsePreviewRetryEnv(process.env);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     console.log(`Verifying preview cache behavior at ${baseUrl} (attempt ${attempt}/${maxAttempts})`);
@@ -148,7 +162,21 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+function isDirectRun() {
+  const invoked = process.argv[1];
+  if (!invoked) {
+    return false;
+  }
+  try {
+    return fileURLToPath(import.meta.url) === invoked;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

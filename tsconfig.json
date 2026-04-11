@@ -10,6 +10,8 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -19,6 +21,7 @@
   "include": [
     "src/**/*.ts",
     "scripts/**/*.ts",
+    "scripts/**/*.mjs",
     "functions/**/*.ts",
     "functions/**/*.d.ts",
     "workers/**/*.ts"

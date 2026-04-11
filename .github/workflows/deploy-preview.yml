@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   wait-for-ci:
+    if: github.event.pull_request.head.repo.fork == false && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI validate check to pass
@@ -76,7 +77,7 @@ jobs:
   deploy-preview:
     needs: wait-for-ci
     runs-on: ubuntu-latest
-    if: github.event.pull_request.head.repo.fork == false
+    if: github.event.pull_request.head.repo.fork == false && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
