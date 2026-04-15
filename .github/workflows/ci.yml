@@ -45,7 +45,7 @@ jobs:
 
       - name: Upload artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ci-failure-artifacts-${{ github.run_id }}
           if-no-files-found: ignore
@@ -77,7 +77,7 @@ jobs:
         run: npm run lint:complexity:report | tee complexity-report.txt
 
       - name: Upload quality report artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: quality-report-${{ github.run_id }}
           if-no-files-found: error
