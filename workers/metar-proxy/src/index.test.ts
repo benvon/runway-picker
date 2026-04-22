@@ -135,7 +135,7 @@ function buildAirportReport(icao: string): Record<string, unknown> {
         he_ident: '31'
       }
     ],
-    frequencies: [
+    freqs: [
       { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
       { type: 'TWR', description: 'TOWER', frequency_mhz: '119.1' },
       { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
@@ -775,6 +775,55 @@ describe('airport worker', () => {
     ]);
     expect(payload.cache.source).toBe('upstream');
     expect(payload.cache.status).toBe('upstream_refresh');
+  });
+
+  it('invalidates previously cached airport frequency payloads when the schema changes', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v1:airport:KJFK', {
+      schemaVersion: 5,
+      resource: 'airport',
+      key: 'v1:airport:KJFK',
+      data: {
+        requestedIcao: 'KJFK',
+        icao: 'KJFK',
+        name: 'John F Kennedy International Airport',
+        municipality: 'New York',
+        countryCode: 'US',
+        countryName: 'United States',
+        elevationFt: 13,
+        runwayEnds: [{ id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 }],
+        frequencies: [],
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      },
+      cacheMeta: {
+        fetchedAt: '2026-03-03T12:00:00.000Z',
+        expiresAt: '2099-03-03T12:00:00.000Z',
+        policyVersion: 'airport-v3',
+        source: 'upstream'
+      }
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
+
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
+      METAR_CACHE: kv,
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+
+    const payload = (await response.json()) as {
+      frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
+    };
+
+    expect(payload.frequencies).toEqual([
+      { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
+      { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
+    ]);
   });
 
   it('tracks successful airport lookups in the hot queue metadata', async () => {

@@ -177,7 +177,7 @@ describe('resource adapters', () => {
             he_ident: '22R'
           }
         ],
-        frequencies: [
+        freqs: [
           { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
           { type: 'TWR', description: 'KENNEDY TWR', frequency_mhz: '119.1' },
           { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
@@ -214,6 +214,53 @@ describe('resource adapters', () => {
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
       { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
     ]);
+  });
+
+  it('supports the current airportdb frequency field name and the legacy one', async () => {
+    const withFrequencies = await airportResourceAdapter.validate(
+      {
+        ident: 'KLAS',
+        runways: [{ closed: '0', le_ident: '01L', he_ident: '19R', length_ft: '8988' }],
+        frequencies: [
+          { type: 'APP', description: 'LAS VEGAS APP', frequency_mhz: '125.9' },
+          { type: 'TWR', description: 'LAS VEGAS TWR', frequency_mhz: '132.4' }
+        ]
+      },
+      { icao: 'KLAS' },
+      {
+        request: new Request('https://example.com'),
+        env: {
+          METAR_CACHE: { get: async () => null, put: async () => {} },
+          AIRPORTDB_API_TOKEN: 'token'
+        }
+      }
+    );
+
+    expect(withFrequencies.frequencies).toEqual([
+      { type: 'APP', description: 'LAS VEGAS APP', frequencyMhz: '125.9' },
+      { type: 'TWR', description: 'LAS VEGAS TWR', frequencyMhz: '132.4' }
+    ]);
+  });
+
+  it('returns an empty frequency list when both airportdb frequency fields are missing or malformed', async () => {
+    const validated = await airportResourceAdapter.validate(
+      {
+        ident: 'KMSN',
+        runways: [{ closed: '0', le_ident: '18', he_ident: '36', length_ft: '5000' }],
+        frequencies: { type: 'APP', description: 'BROKEN', frequency_mhz: '118.5' },
+        freqs: [null, { type: 'APP', description: 'BROKEN' }]
+      },
+      { icao: 'KMSN' },
+      {
+        request: new Request('https://example.com'),
+        env: {
+          METAR_CACHE: { get: async () => null, put: async () => {} },
+          AIRPORTDB_API_TOKEN: 'token'
+        }
+      }
+    );
+
+    expect(validated.frequencies).toEqual([]);
   });
 
   it('supports airports where all runways are closed', async () => {

@@ -3,7 +3,7 @@ import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
 const AIRPORT_DB_BASE_URL = 'https://airportdb.io/api/v1/airport';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const AIRPORT_SCHEMA_VERSION = 5;
+export const AIRPORT_SCHEMA_VERSION = 6;
 
 export interface AirportResourceInput {
   icao: string;
@@ -56,6 +56,7 @@ interface AirportDbPayload {
   elevation_ft?: unknown;
   runways?: unknown;
   frequencies?: unknown;
+  freqs?: unknown;
 }
 
 interface AirportDbRunway {
@@ -361,8 +362,20 @@ function collectRunwayEnds(payload: AirportDbPayload): AirportRunwayEnd[] {
   return [...runwayMap.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
+function getAirportDbFrequencyCandidates(payload: AirportDbPayload): AirportDbFrequency[] {
+  if (Array.isArray(payload.frequencies)) {
+    return payload.frequencies as AirportDbFrequency[];
+  }
+
+  if (Array.isArray(payload.freqs)) {
+    return payload.freqs as AirportDbFrequency[];
+  }
+
+  return [];
+}
+
 function collectFrequencies(payload: AirportDbPayload): AirportResourceFrequency[] {
-  const frequencies = Array.isArray(payload.frequencies) ? (payload.frequencies as AirportDbFrequency[]) : [];
+  const frequencies = getAirportDbFrequencyCandidates(payload);
   const uniqueFrequencies = new Map<string, AirportResourceFrequency>();
 
   for (const frequency of frequencies) {
@@ -475,7 +488,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
     staleWhileRevalidateSeconds: 43200,
     staleOnErrorSeconds: 259200,
     negativeCacheTtlSeconds: 3600,
-    policyVersion: 'airport-v3'
+    policyVersion: 'airport-v4'
   },
   observability: (input, key) => ({
     labels: {
