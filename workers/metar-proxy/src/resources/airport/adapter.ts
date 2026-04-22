@@ -71,6 +71,10 @@ interface AirportDbFrequency {
   frequency_mhz?: unknown;
 }
 
+type AirportResourceShapeCandidate = Omit<AirportResourceData, 'frequencies'> & {
+  frequencies?: AirportResourceData['frequencies'];
+};
+
 export class AirportWorkerError extends Error {
   status: number;
   code: AirportWorkerErrorCode;
@@ -157,7 +161,9 @@ function toRunwayEnd(identCandidate: unknown, isClosed: boolean, lengthFt: numbe
   };
 }
 
-function isAirportResourceShape(asData: Partial<AirportResourceData>): asData is AirportResourceData {
+function isAirportResourceShape(
+  asData: Partial<AirportResourceShapeCandidate>
+): asData is AirportResourceShapeCandidate {
   return (
     typeof asData.requestedIcao === 'string' &&
     typeof asData.icao === 'string' &&
@@ -166,6 +172,7 @@ function isAirportResourceShape(asData: Partial<AirportResourceData>): asData is
     typeof asData.countryCode === 'string' &&
     typeof asData.countryName === 'string' &&
     Array.isArray(asData.runwayEnds) &&
+    (typeof asData.frequencies === 'undefined' || Array.isArray(asData.frequencies)) &&
     typeof asData.fetchedAt === 'string' &&
     asData.source === 'airportdb'
   );
@@ -221,7 +228,7 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
     return null;
   }
 
-  const asData = candidate as Partial<AirportResourceData>;
+  const asData = candidate as Partial<AirportResourceShapeCandidate>;
   if (!isAirportResourceShape(asData)) {
     return null;
   }

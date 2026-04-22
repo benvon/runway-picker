@@ -271,6 +271,27 @@ describe('resource adapters', () => {
     expect(parsed?.frequencies).toEqual([{ type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }]);
   });
 
+  it('deserializes cached airport payloads without frequencies as an empty list', () => {
+    const cached = {
+      data: {
+        requestedIcao: 'KMSP',
+        icao: 'KMSP',
+        name: 'Minneapolis-Saint Paul International Airport',
+        municipality: 'Minneapolis',
+        countryCode: 'US',
+        countryName: 'United States',
+        elevationFt: 841,
+        runwayEnds: [{ id: '12L', headingDegMag: 120, isClosed: false, lengthFt: 10000 }],
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      }
+    };
+
+    const parsed = airportResourceAdapter.deserialize(cached);
+    expect(parsed?.icao).toBe('KMSP');
+    expect(parsed?.frequencies).toEqual([]);
+  });
+
   it('ignores invalid runway entries and exposes observability labels', async () => {
     const validated = await airportResourceAdapter.validate(
       {
