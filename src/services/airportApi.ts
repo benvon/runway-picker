@@ -1,4 +1,4 @@
-import type { RunwayEnd } from '../domain/types';
+import type { AirportFrequency, RunwayEnd } from '../domain/types';
 import {
   normalizeCacheMetadata as normalizeSharedCacheMetadata,
   type NormalizedCacheMetadata
@@ -34,6 +34,7 @@ export interface AirportLookupResponse {
   countryName: string;
   elevationFt: number | null;
   runwayEnds: RunwayEnd[];
+  frequencies: AirportFrequency[];
   source: 'airportdb';
   fetchedAt: string;
   cache: AirportCacheMetadata;
@@ -194,6 +195,28 @@ function normalizeRunwayEnds(runwayCandidate: unknown): RunwayEnd[] {
   return parsed;
 }
 
+function normalizeFrequencies(frequencyCandidate: unknown): AirportFrequency[] {
+  if (!Array.isArray(frequencyCandidate)) {
+    return [];
+  }
+
+  return frequencyCandidate
+    .filter((frequency): frequency is AirportFrequency => {
+      return (
+        Boolean(frequency) &&
+        typeof frequency === 'object' &&
+        typeof (frequency as { type?: unknown }).type === 'string' &&
+        typeof (frequency as { description?: unknown }).description === 'string' &&
+        typeof (frequency as { frequencyMhz?: unknown }).frequencyMhz === 'string'
+      );
+    })
+    .map((frequency) => ({
+      type: frequency.type,
+      description: frequency.description,
+      frequencyMhz: frequency.frequencyMhz
+    }));
+}
+
 export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
   if (!/^[A-Z0-9]{4}$/.test(icao)) {
@@ -215,6 +238,7 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
   const payload = (await response.json()) as Omit<AirportLookupResponse, 'cache' | 'runwayEnds'> & {
     cache?: unknown;
     runwayEnds?: unknown;
+    frequencies?: unknown;
   };
   assertAirportPayloadShape(payload);
 
@@ -227,6 +251,7 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
     countryName: typeof payload.countryName === 'string' ? payload.countryName : '',
     elevationFt: typeof payload.elevationFt === 'number' ? payload.elevationFt : null,
     runwayEnds: normalizeRunwayEnds(payload.runwayEnds),
+    frequencies: normalizeFrequencies(payload.frequencies),
     source: payload.source,
     fetchedAt: payload.fetchedAt,
     cache: normalizeCacheMetadataValue(payload.cache, response.headers, payload.fetchedAt)

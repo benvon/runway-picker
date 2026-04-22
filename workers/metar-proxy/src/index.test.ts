@@ -134,6 +134,12 @@ function buildAirportReport(icao: string): Record<string, unknown> {
         le_ident: '13',
         he_ident: '31'
       }
+    ],
+    frequencies: [
+      { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
+      { type: 'TWR', description: 'TOWER', frequency_mhz: '119.1' },
+      { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequency_mhz: '123.0' }
     ]
   };
 }
@@ -748,6 +754,7 @@ describe('airport worker', () => {
       icao: string;
       source: string;
       runwayEnds: Array<{ id: string; headingDegMag: number; isClosed: boolean; lengthFt: number | null }>;
+      frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
       cache: { source: string; status: string };
     };
 
@@ -759,6 +766,12 @@ describe('airport worker', () => {
       { id: '13', headingDegMag: 130, isClosed: true, lengthFt: 10000 },
       { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12000 },
       { id: '31', headingDegMag: 310, isClosed: true, lengthFt: 10000 }
+    ]);
+    expect(payload.frequencies).toEqual([
+      { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
+      { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
     ]);
     expect(payload.cache.source).toBe('upstream');
     expect(payload.cache.status).toBe('upstream_refresh');

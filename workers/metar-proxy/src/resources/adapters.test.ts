@@ -176,6 +176,14 @@ describe('resource adapters', () => {
             le_ident: '04L',
             he_ident: '22R'
           }
+        ],
+        frequencies: [
+          { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
+          { type: 'TWR', description: 'KENNEDY TWR', frequency_mhz: '119.1' },
+          { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
+          { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
+          { type: 'CTAF', description: 'CTAF', frequency_mhz: '123.0' },
+          { type: 'APP', description: 'BROKEN' }
         ]
       },
       { icao: 'KJFK' },
@@ -199,6 +207,12 @@ describe('resource adapters', () => {
       { id: '13R', headingDegMag: 130, isClosed: true, lengthFt: 14511 },
       { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12079 },
       { id: '31L', headingDegMag: 310, isClosed: true, lengthFt: 14511 }
+    ]);
+    expect(validated.frequencies).toEqual([
+      { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
+      { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
     ]);
   });
 
@@ -243,6 +257,9 @@ describe('resource adapters', () => {
         runwayEnds: [
           { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 }
         ],
+        frequencies: [
+          { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
+        ],
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
       }
@@ -251,6 +268,7 @@ describe('resource adapters', () => {
     const parsed = airportResourceAdapter.deserialize(cached);
     expect(parsed?.icao).toBe('KJFK');
     expect(parsed?.runwayEnds[0]?.id).toBe('04L');
+    expect(parsed?.frequencies).toEqual([{ type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }]);
   });
 
   it('ignores invalid runway entries and exposes observability labels', async () => {

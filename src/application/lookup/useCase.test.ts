@@ -20,6 +20,7 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
       countryName: 'United States',
       elevationFt: null,
       runwayEnds: [{ id: '18', headingDegMag: 180, isClosed: false, lengthFt: 8000 }],
+      frequencies: [],
       source: 'airportdb',
       fetchedAt: '2026-03-01T00:00:00.000Z',
       cache: {

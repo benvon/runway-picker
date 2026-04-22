@@ -5,6 +5,7 @@ import type {
   RunwayWindComponent,
   RunwayWindComponentValue
 } from '../domain/types';
+import { summarizeAirportFrequencies } from '../application/lookup/airportInfo';
 import { MetarLookupError } from '../services/metarApi';
 import type { LookupResolution } from '../application/lookup/useCase';
 import { appendChildren, createElement, createTextParagraph, strongLabel } from './dom';
@@ -65,16 +66,33 @@ function findBestRunway(result: EvaluationResult): RunwayWindComponent | null {
   return result.runwayResults.find((runway) => runway.runwayId === result.bestRunwayId) ?? null;
 }
 
-function renderBestRunway(result: EvaluationResult): HTMLElement {
-  const bestRunway = findBestRunway(result);
+function renderAirportInfo(resolution: LookupResolution, bestRunwayId: string | null): HTMLElement {
+  const frequencySummary = summarizeAirportFrequencies(
+    resolution.airport.runwayEnds,
+    resolution.airport.frequencies,
+    bestRunwayId
+  );
+  const section = createElement('section', {
+    className: 'airport-info-box',
+    attributes: { 'aria-label': 'Airport information' }
+  });
+  const grid = createElement('div', { className: 'airport-info-grid' });
+
+  appendChildren(grid, [
+    createTextParagraph('Approach:', frequencySummary.approach, 'airport-info-item'),
+    createTextParagraph('Tower:', frequencySummary.tower, 'airport-info-item'),
+    createTextParagraph('AWOS / ATIS:', frequencySummary.awosAtis, 'airport-info-item'),
+    createTextParagraph('CTAF:', frequencySummary.ctaf, 'airport-info-item')
+  ]);
+
+  appendChildren(section, [createElement('h2', { textContent: 'Airport Info' }), grid]);
+  return section;
+}
+
+function renderBestRunwayRow(bestRunway: RunwayWindComponent | null): HTMLElement {
   const runwayDisplay = bestRunway?.runwayId ?? 'Not determinable';
   const headwindSummary = formatBestHeadwindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
   const crosswindSummary = formatBestCrosswindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
-
-  const section = createElement('section', {
-    className: 'panel panel-accent panel-spotlight',
-    attributes: { 'aria-label': 'Best runway summary' }
-  });
   const row = createElement('div', { className: 'best-runway-row' });
 
   const bestRunwayCell = createElement('p', { className: 'best-runway-cell' });
@@ -84,7 +102,17 @@ function renderBestRunway(result: EvaluationResult): HTMLElement {
   const crosswindCell = createElement('p', { className: 'best-runway-cell', textContent: crosswindSummary });
 
   appendChildren(row, [bestRunwayCell, headwindCell, crosswindCell]);
-  section.appendChild(row);
+  return row;
+}
+
+function renderBestRunway(resolution: LookupResolution, result: EvaluationResult): HTMLElement {
+  const bestRunway = findBestRunway(result);
+  const section = createElement('section', {
+    className: 'panel panel-accent panel-spotlight',
+    attributes: { 'aria-label': 'Best runway summary' }
+  });
+
+  appendChildren(section, [renderBestRunwayRow(bestRunway), renderAirportInfo(resolution, bestRunway?.runwayId ?? null)]);
   return section;
 }
 
@@ -293,7 +321,7 @@ export function renderLookupPanels(resolution: LookupResolution): {
   );
 
   return {
-    bestRunway: renderBestRunway(evaluation),
+    bestRunway: renderBestRunway(resolution, evaluation),
     details: renderDetailsPanel(resolution, evaluation)
   };
 }

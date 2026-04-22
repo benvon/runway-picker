@@ -7,6 +7,12 @@ export interface RunwayEnd {
   lengthFt?: number | null;
 }
 
+export interface AirportFrequency {
+  type: string;
+  description: string;
+  frequencyMhz: string;
+}
+
 export interface ParsedWind {
   raw: string;
   directionType: WindDirectionType;
