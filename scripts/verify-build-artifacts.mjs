@@ -16,6 +16,26 @@ function normalizeEol(text) {
   return text.replace(/\r\n/g, '\n');
 }
 
+export function hasVersionJsonNoStoreCacheControl(headersRaw) {
+  const versionJsonHeadersBlock = headersRaw.match(/(?:^|\n)\/version\.json\s*\n((?:[ \t]+[^\n]*\n?)*)/);
+  if (!versionJsonHeadersBlock) {
+    return false;
+  }
+
+  return /(?:^|\n)[ \t]+Cache-Control:\s*[^\n]*\bno-store\b/i.test(versionJsonHeadersBlock[1]);
+}
+
+export function parseVersionManifest(versionManifestRaw) {
+  let parsedManifest;
+  try {
+    parsedManifest = JSON.parse(versionManifestRaw);
+  } catch {
+    throw new Error('dist/version.json must contain valid JSON.');
+  }
+
+  return parsedManifest;
+}
+
 async function main() {
   const [distIndexHtml, distHeadersRaw, publicRobotsRaw, distRobotsRaw, distVersionManifestRaw] = await Promise.all([
     readFile(path.join(DIST_DIR, 'index.html'), 'utf8'),
@@ -40,7 +60,7 @@ async function main() {
     "dist/_headers CSP style-src must include a sha256 hash token for inline styles."
   );
   assert(
-    /(^|\n)\/version\.json\s*\n\s+Cache-Control:\s*no-store,\s*max-age=0\s*$/m.test(distHeadersRaw),
+    hasVersionJsonNoStoreCacheControl(distHeadersRaw),
     'dist/_headers must mark /version.json as non-cacheable.'
   );
 
@@ -48,7 +68,7 @@ async function main() {
   assert(normalizeEol(publicRobotsRaw) === expectedRobots, 'public/robots.txt must match expected crawl policy.');
   assert(normalizeEol(distRobotsRaw) === expectedRobots, 'dist/robots.txt must match expected crawl policy.');
 
-  const distVersionManifest = JSON.parse(distVersionManifestRaw);
+  const distVersionManifest = parseVersionManifest(distVersionManifestRaw);
   assert(typeof distVersionManifest.version === 'string', 'dist/version.json must contain a string version.');
   assert(typeof distVersionManifest.commitSha === 'string', 'dist/version.json must contain a string commitSha.');
   assert(/^v/.test(distVersionManifest.version), 'dist/version.json version must be normalized with a leading v.');
