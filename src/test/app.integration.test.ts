@@ -156,7 +156,7 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Departure: 121.7 MHz');
     expect(root.textContent).toContain('Tower: 118.5 MHz');
     expect(root.textContent).toContain('Ground: 121.9 MHz');
-    expect(root.textContent).toContain('AWOS / ATIS: 124.7 MHz');
+    expect(root.textContent).toContain('ATIS: 124.7 MHz');
     expect(root.textContent).toContain('CTAF: 122.8 MHz');
     expect(root.textContent).toContain('Lookup Summary');
     expect(root.textContent).toContain('Runway ends loaded: 2');
@@ -337,7 +337,7 @@ describe('app integration', () => {
     expect(root.textContent).not.toContain('Approach: 124.2 MHz');
     expect(root.textContent).toContain('Departure: 120.1 MHz, 121.7 MHz');
     expect(root.textContent).toContain('Ground: 121.9 MHz');
-    expect(root.textContent).toContain('AWOS / ATIS: 121.0 MHz');
+    expect(root.textContent).toContain('AWOS: 121.0 MHz');
   });
 
   it('renders N/A for missing airport frequencies', async () => {
@@ -393,7 +393,7 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Departure: N/A');
     expect(root.textContent).toContain('Tower: N/A');
     expect(root.textContent).toContain('Ground: N/A');
-    expect(root.textContent).toContain('AWOS / ATIS: N/A');
+    expect(root.textContent).toContain('AWOS / ATIS / ASOS: N/A');
     expect(root.textContent).toContain('CTAF: N/A');
   });
 

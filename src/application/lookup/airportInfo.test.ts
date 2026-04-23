@@ -29,7 +29,8 @@ describe('airportInfo', () => {
       departure: 'N/A',
       tower: '118.5 MHz',
       ground: 'N/A',
-      awosAtis: '126.8 MHz',
+      weatherLabel: 'ATIS',
+      weather: '126.8 MHz',
       ctaf: '122.8 MHz'
     });
   });
@@ -92,7 +93,8 @@ describe('airportInfo', () => {
       departure: 'N/A',
       tower: '118.5 MHz',
       ground: '121.9 MHz',
-      awosAtis: 'N/A',
+      weatherLabel: 'AWOS / ATIS / ASOS',
+      weather: 'N/A',
       ctaf: '122.8 MHz'
     });
   });
@@ -110,7 +112,7 @@ describe('airportInfo', () => {
     expect(summary.approach).toBe('119.4 MHz, 121.2 MHz');
   });
 
-  it('returns N/A for unavailable frequencies and combines ATIS/AWOS style weather sources', () => {
+  it('labels weather frequencies with the specific detected service types', () => {
     const summary = summarizeAirportFrequencies(
       [runway('36', 360)],
       [frequency('AWOS', 'AWOS', '118.0'), frequency('ASOS', 'ASOS', '135.4')],
@@ -122,7 +124,8 @@ describe('airportInfo', () => {
       departure: 'N/A',
       tower: 'N/A',
       ground: 'N/A',
-      awosAtis: '118.0 MHz, 135.4 MHz',
+      weatherLabel: 'AWOS / ASOS',
+      weather: '118.0 MHz, 135.4 MHz',
       ctaf: 'N/A'
     });
   });

@@ -5,7 +5,8 @@ export interface AirportInfoSummary {
   departure: string;
   tower: string;
   ground: string;
-  awosAtis: string;
+  weatherLabel: string;
+  weather: string;
   ctaf: string;
 }
 
@@ -148,17 +149,28 @@ function selectFrequencies(frequencies: AirportFrequency[], allowedTypes: readon
   return frequencies.filter((frequency) => hasType(frequency, allowedTypes));
 }
 
+function weatherServiceLabel(frequencies: AirportFrequency[]): string {
+  const labels = ['ATIS', 'AWOS', 'ASOS'].filter((type) =>
+    frequencies.some((frequency) => hasType(frequency, [type]))
+  );
+
+  return labels.length > 0 ? labels.join(' / ') : 'AWOS / ATIS / ASOS';
+}
+
 export function summarizeAirportFrequencies(
   runwayEnds: RunwayEnd[],
   frequencies: AirportFrequency[],
   bestRunwayId: string | null
 ): AirportInfoSummary {
+  const weatherFrequencies = selectFrequencies(frequencies, ['ATIS', 'AWOS', 'ASOS']);
+
   return {
     approach: formatFrequencyList(selectApproachFrequencies(runwayEnds, frequencies, bestRunwayId)),
     departure: formatFrequencyList(selectFrequencies(frequencies, ['DEP'])),
     tower: formatFrequencyList(selectFrequencies(frequencies, ['TWR'])),
     ground: formatFrequencyList(selectFrequencies(frequencies, ['GND'])),
-    awosAtis: formatFrequencyList(selectFrequencies(frequencies, ['ATIS', 'AWOS', 'ASOS'])),
+    weatherLabel: weatherServiceLabel(weatherFrequencies),
+    weather: formatFrequencyList(weatherFrequencies),
     ctaf: formatFrequencyList(selectFrequencies(frequencies, ['CTAF']))
   };
 }

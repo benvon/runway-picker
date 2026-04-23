@@ -83,7 +83,7 @@ function renderAirportInfo(resolution: LookupResolution, bestRunwayId: string | 
     createTextParagraph('Departure:', frequencySummary.departure, 'airport-info-item'),
     createTextParagraph('Tower:', frequencySummary.tower, 'airport-info-item'),
     createTextParagraph('Ground:', frequencySummary.ground, 'airport-info-item'),
-    createTextParagraph('AWOS / ATIS:', frequencySummary.awosAtis, 'airport-info-item'),
+    createTextParagraph(`${frequencySummary.weatherLabel}:`, frequencySummary.weather, 'airport-info-item'),
     createTextParagraph('CTAF:', frequencySummary.ctaf, 'airport-info-item')
   ]);
 
