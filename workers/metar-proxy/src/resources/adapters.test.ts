@@ -157,6 +157,7 @@ describe('resource adapters', () => {
         iso_country: 'US',
         country: { name: 'United States' },
         elevation_ft: '13',
+        home_link: 'https://www.jfkairport.com',
         runways: [
           {
             closed: '0',
@@ -214,6 +215,20 @@ describe('resource adapters', () => {
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
       { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
     ]);
+    expect(validated.upstreamPayload.ident).toBe('KJFK');
+    expect(validated.upstreamPayload.home_link).toBe('https://www.jfkairport.com');
+    expect(Array.isArray(validated.upstreamPayload.freqs)).toBe(true);
+    const upstreamFrequencies = validated.upstreamPayload.freqs as Array<Record<string, unknown>>;
+    expect(upstreamFrequencies[0]).toMatchObject({
+      type: 'APP',
+      description: 'NORTH APP',
+      frequency_mhz: '125.7'
+    });
+    expect(upstreamFrequencies[1]).toMatchObject({
+      type: 'TWR',
+      description: 'KENNEDY TWR',
+      frequency_mhz: '119.1'
+    });
   });
 
   it('supports the current airportdb frequency field name and the legacy one', async () => {
@@ -307,6 +322,10 @@ describe('resource adapters', () => {
         frequencies: [
           { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
         ],
+        upstreamPayload: {
+          ident: 'KJFK',
+          home_link: 'https://www.jfkairport.com'
+        },
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
       }
@@ -316,9 +335,13 @@ describe('resource adapters', () => {
     expect(parsed?.icao).toBe('KJFK');
     expect(parsed?.runwayEnds[0]?.id).toBe('04L');
     expect(parsed?.frequencies).toEqual([{ type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }]);
+    expect(parsed?.upstreamPayload).toMatchObject({
+      ident: 'KJFK',
+      home_link: 'https://www.jfkairport.com'
+    });
   });
 
-  it('deserializes cached airport payloads without frequencies as an empty list', () => {
+  it('deserializes cached airport payloads without frequencies or upstream payload as safe defaults', () => {
     const cached = {
       data: {
         requestedIcao: 'KMSP',
@@ -337,6 +360,7 @@ describe('resource adapters', () => {
     const parsed = airportResourceAdapter.deserialize(cached);
     expect(parsed?.icao).toBe('KMSP');
     expect(parsed?.frequencies).toEqual([]);
+    expect(parsed?.upstreamPayload).toEqual({});
   });
 
   it('ignores invalid runway entries and exposes observability labels', async () => {

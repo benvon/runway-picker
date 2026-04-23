@@ -121,6 +121,7 @@ function buildAirportReport(icao: string): Record<string, unknown> {
     iso_country: 'US',
     country: { name: 'United States' },
     elevation_ft: '100',
+    home_link: `https://${icao.toLowerCase()}.example.com`,
     runways: [
       {
         closed: '0',
@@ -755,6 +756,7 @@ describe('airport worker', () => {
       source: string;
       runwayEnds: Array<{ id: string; headingDegMag: number; isClosed: boolean; lengthFt: number | null }>;
       frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
+      upstreamPayload: { ident?: string; home_link?: string; freqs?: Array<{ type: string; description: string }> };
       cache: { source: string; status: string };
     };
 
@@ -773,6 +775,10 @@ describe('airport worker', () => {
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
       { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
     ]);
+    expect(payload.upstreamPayload.ident).toBe('KJFK');
+    expect(payload.upstreamPayload.home_link).toBe('https://kjfk.example.com');
+    expect(Array.isArray(payload.upstreamPayload.freqs)).toBe(true);
+    expect(payload.upstreamPayload.freqs?.[0]).toMatchObject({ type: 'APP', description: 'NORTH APP' });
     expect(payload.cache.source).toBe('upstream');
     expect(payload.cache.status).toBe('upstream_refresh');
   });
@@ -780,7 +786,7 @@ describe('airport worker', () => {
   it('invalidates previously cached airport frequency payloads when the schema changes', async () => {
     const kv = new MemoryKv();
     kv.seed('v1:airport:KJFK', {
-      schemaVersion: 5,
+      schemaVersion: 6,
       resource: 'airport',
       key: 'v1:airport:KJFK',
       data: {
@@ -799,7 +805,7 @@ describe('airport worker', () => {
       cacheMeta: {
         fetchedAt: '2026-03-03T12:00:00.000Z',
         expiresAt: '2099-03-03T12:00:00.000Z',
-        policyVersion: 'airport-v3',
+        policyVersion: 'airport-v4',
         source: 'upstream'
       }
     });
@@ -816,6 +822,7 @@ describe('airport worker', () => {
 
     const payload = (await response.json()) as {
       frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
+      upstreamPayload: { ident?: string; home_link?: string };
     };
 
     expect(payload.frequencies).toEqual([
@@ -824,6 +831,8 @@ describe('airport worker', () => {
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
       { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
     ]);
+    expect(payload.upstreamPayload.ident).toBe('KJFK');
+    expect(payload.upstreamPayload.home_link).toBe('https://kjfk.example.com');
   });
 
   it('tracks successful airport lookups in the hot queue metadata', async () => {
