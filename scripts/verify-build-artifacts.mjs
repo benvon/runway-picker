@@ -2,6 +2,7 @@
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const ROOT_DIR = process.cwd();
 const DIST_DIR = path.join(ROOT_DIR, 'dist');
@@ -78,4 +79,22 @@ async function main() {
   );
 }
 
-await main();
+function isDirectRun() {
+  const invoked = process.argv[1];
+  if (!invoked) {
+    return false;
+  }
+
+  try {
+    return fileURLToPath(import.meta.url) === invoked;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}
