@@ -12,7 +12,17 @@ type CardinalDirection = 'north' | 'south' | 'east' | 'west';
 const NOT_AVAILABLE = 'N/A';
 
 function normalizeType(value: string): string {
-  return value.trim().toUpperCase();
+  const normalized = value.trim().toUpperCase();
+
+  if (normalized === 'A/D') {
+    return 'APP';
+  }
+
+  if (normalized === 'UNIC') {
+    return 'CTAF';
+  }
+
+  return normalized;
 }
 
 function formatFrequencyList(frequencies: AirportFrequency[]): string {
