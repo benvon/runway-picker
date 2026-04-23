@@ -2,7 +2,9 @@ import type { AirportFrequency, RunwayEnd } from '../../domain/types';
 
 export interface AirportInfoSummary {
   approach: string;
+  departure: string;
   tower: string;
+  ground: string;
   awosAtis: string;
   ctaf: string;
 }
@@ -14,8 +16,8 @@ const NOT_AVAILABLE = 'N/A';
 function normalizeType(value: string): string {
   const normalized = value.trim().toUpperCase();
 
-  if (normalized === 'A/D') {
-    return 'APP';
+  if (normalized === 'DEPT') {
+    return 'DEP';
   }
 
   if (normalized === 'UNIC') {
@@ -25,13 +27,23 @@ function normalizeType(value: string): string {
   return normalized;
 }
 
+function canonicalTypes(value: string): string[] {
+  const normalized = normalizeType(value);
+
+  if (normalized === 'A/D') {
+    return ['APP', 'DEP'];
+  }
+
+  return [normalized];
+}
+
 function formatFrequencyList(frequencies: AirportFrequency[]): string {
   const unique = [...new Set(frequencies.map((frequency) => frequency.frequencyMhz.trim()).filter(Boolean))];
   return unique.length > 0 ? unique.map((frequency) => `${frequency} MHz`).join(', ') : NOT_AVAILABLE;
 }
 
 function hasType(frequency: AirportFrequency, allowedTypes: readonly string[]): boolean {
-  return allowedTypes.includes(normalizeType(frequency.type));
+  return canonicalTypes(frequency.type).some((type) => allowedTypes.includes(type));
 }
 
 function findRunwayHeading(runwayEnds: RunwayEnd[], runwayId: string | null): number | null {
@@ -143,7 +155,9 @@ export function summarizeAirportFrequencies(
 ): AirportInfoSummary {
   return {
     approach: formatFrequencyList(selectApproachFrequencies(runwayEnds, frequencies, bestRunwayId)),
+    departure: formatFrequencyList(selectFrequencies(frequencies, ['DEP'])),
     tower: formatFrequencyList(selectFrequencies(frequencies, ['TWR'])),
+    ground: formatFrequencyList(selectFrequencies(frequencies, ['GND'])),
     awosAtis: formatFrequencyList(selectFrequencies(frequencies, ['ATIS', 'AWOS', 'ASOS'])),
     ctaf: formatFrequencyList(selectFrequencies(frequencies, ['CTAF']))
   };

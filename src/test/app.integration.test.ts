@@ -27,7 +27,9 @@ function airportPayload(icao: string) {
     ],
     frequencies: [
       { type: 'APP', description: 'CITY APPROACH', frequencyMhz: '120.4' },
+      { type: 'DEP', description: 'CITY DEPARTURE', frequencyMhz: '121.7' },
       { type: 'TWR', description: 'CITY TOWER', frequencyMhz: '118.5' },
+      { type: 'GND', description: 'CITY GROUND', frequencyMhz: '121.9' },
       { type: 'ATIS', description: 'ATIS', frequencyMhz: '124.7' },
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '122.8' }
     ],
@@ -151,7 +153,9 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Best runway:');
     expect(root.textContent).toContain('Airport Info');
     expect(root.textContent).toContain('Approach: 120.4 MHz');
+    expect(root.textContent).toContain('Departure: 121.7 MHz');
     expect(root.textContent).toContain('Tower: 118.5 MHz');
+    expect(root.textContent).toContain('Ground: 121.9 MHz');
     expect(root.textContent).toContain('AWOS / ATIS: 124.7 MHz');
     expect(root.textContent).toContain('CTAF: 122.8 MHz');
     expect(root.textContent).toContain('Lookup Summary');
@@ -282,9 +286,11 @@ describe('app integration', () => {
               { id: '36', headingDegMag: 360, isClosed: false, lengthFt: 8000 }
             ],
             frequencies: [
-              { type: 'APP', description: 'NORTH APPROACH', frequencyMhz: '120.1' },
+              { type: 'A/D', description: 'NORTH APPROACH', frequencyMhz: '120.1' },
               { type: 'APP', description: 'SOUTH APPROACH', frequencyMhz: '124.2' },
+              { type: 'DEP', description: 'CITY DEPARTURE', frequencyMhz: '121.7' },
               { type: 'TWR', description: 'TOWER', frequencyMhz: '118.5' },
+              { type: 'GND', description: 'GROUND', frequencyMhz: '121.9' },
               { type: 'AWOS', description: 'AWOS', frequencyMhz: '121.0' },
               { type: 'CTAF', description: 'CTAF', frequencyMhz: '122.8' }
             ]
@@ -329,6 +335,8 @@ describe('app integration', () => {
 
     expect(root.textContent).toContain('Approach: 120.1 MHz');
     expect(root.textContent).not.toContain('Approach: 124.2 MHz');
+    expect(root.textContent).toContain('Departure: 120.1 MHz, 121.7 MHz');
+    expect(root.textContent).toContain('Ground: 121.9 MHz');
     expect(root.textContent).toContain('AWOS / ATIS: 121.0 MHz');
   });
 
@@ -382,7 +390,9 @@ describe('app integration', () => {
     await waitFor(() => (root.textContent?.includes('Airport Info') ?? false));
 
     expect(root.textContent).toContain('Approach: N/A');
+    expect(root.textContent).toContain('Departure: N/A');
     expect(root.textContent).toContain('Tower: N/A');
+    expect(root.textContent).toContain('Ground: N/A');
     expect(root.textContent).toContain('AWOS / ATIS: N/A');
     expect(root.textContent).toContain('CTAF: N/A');
   });

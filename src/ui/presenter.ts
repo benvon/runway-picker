@@ -80,7 +80,9 @@ function renderAirportInfo(resolution: LookupResolution, bestRunwayId: string | 
 
   appendChildren(grid, [
     createTextParagraph('Approach:', frequencySummary.approach, 'airport-info-item'),
+    createTextParagraph('Departure:', frequencySummary.departure, 'airport-info-item'),
     createTextParagraph('Tower:', frequencySummary.tower, 'airport-info-item'),
+    createTextParagraph('Ground:', frequencySummary.ground, 'airport-info-item'),
     createTextParagraph('AWOS / ATIS:', frequencySummary.awosAtis, 'airport-info-item'),
     createTextParagraph('CTAF:', frequencySummary.ctaf, 'airport-info-item')
   ]);

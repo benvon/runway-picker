@@ -26,7 +26,9 @@ describe('airportInfo', () => {
 
     expect(summary).toEqual({
       approach: '120.1 MHz',
+      departure: 'N/A',
       tower: '118.5 MHz',
+      ground: 'N/A',
       awosAtis: '126.8 MHz',
       ctaf: '122.8 MHz'
     });
@@ -58,20 +60,22 @@ describe('airportInfo', () => {
     expect(summary.approach).toBe('119.4 MHz, 125.3 MHz');
   });
 
-  it('treats a/d and lowercase app as approach aliases', () => {
+  it('treats a/d as both approach and departure and lowercase app as approach', () => {
     const summary = summarizeAirportFrequencies(
       [runway('18', 180)],
       [
         frequency('a/d', 'NORTH APPROACH', '120.1'),
-        frequency('app', 'SOUTH APPROACH', '124.2')
+        frequency('app', 'SOUTH APPROACH', '124.2'),
+        frequency('dep', 'CITY DEPARTURE', '121.7')
       ],
       '18'
     );
 
     expect(summary.approach).toBe('120.1 MHz');
+    expect(summary.departure).toBe('120.1 MHz, 121.7 MHz');
   });
 
-  it('treats unic as a ctaf alias and lowercase twr as tower', () => {
+  it('treats unic as a ctaf alias, lowercase twr as tower, and lowercase gnd as ground', () => {
     const summary = summarizeAirportFrequencies(
       [runway('36', 360)],
       [
@@ -85,7 +89,9 @@ describe('airportInfo', () => {
 
     expect(summary).toEqual({
       approach: 'N/A',
+      departure: 'N/A',
       tower: '118.5 MHz',
+      ground: '121.9 MHz',
       awosAtis: 'N/A',
       ctaf: '122.8 MHz'
     });
@@ -113,7 +119,9 @@ describe('airportInfo', () => {
 
     expect(summary).toEqual({
       approach: 'N/A',
+      departure: 'N/A',
       tower: 'N/A',
+      ground: 'N/A',
       awosAtis: '118.0 MHz, 135.4 MHz',
       ctaf: 'N/A'
     });
