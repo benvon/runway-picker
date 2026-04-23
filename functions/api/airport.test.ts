@@ -35,6 +35,7 @@ describe('pages airport proxy', () => {
             { id: '01L', headingDegMag: 10 },
             { id: '19R', headingDegMag: 190 }
           ],
+          frequencies: [{ type: 'TWR', description: 'TOWER', frequencyMhz: '123.9' }],
           source: 'airportdb',
           fetchedAt: '2026-03-03T00:00:00.000Z',
           cache: {

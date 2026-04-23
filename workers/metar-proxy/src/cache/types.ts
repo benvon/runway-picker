@@ -45,7 +45,7 @@ export interface CacheResourceAdapter<TInput, TUpstream, TData> {
   normalizeKey: (input: TInput) => string;
   fetchUpstream: (input: TInput, ctx: CacheAdapterContext) => Promise<TUpstream>;
   validate: (upstream: TUpstream, input: TInput, ctx: CacheAdapterContext) => Promise<TData> | TData;
-  serialize: (data: TData, key: string, resource: string) => CacheEnvelope<TData>;
+  serialize: (data: TData, key: string, resource: string, upstream?: TUpstream) => CacheEnvelope<TData>;
   deserialize: (cached: unknown) => TData | null;
   policy: CachePolicy;
   observability: (input: TInput, key: string) => CacheObservability;

@@ -31,6 +31,12 @@ export function airportPayload(icao: string): Record<string, unknown> {
       { id: '04', headingDegMag: 40, isClosed: false, lengthFt: 8000 },
       { id: '22', headingDegMag: 220, isClosed: false, lengthFt: 8000 }
     ],
+    frequencies: [
+      { type: 'APP', description: 'CITY APPROACH', frequencyMhz: '120.4' },
+      { type: 'TWR', description: 'CITY TOWER', frequencyMhz: '118.5' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '124.7' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '122.8' }
+    ],
     source: 'airportdb',
     fetchedAt: '2026-03-02T00:00:00.000Z',
     cache: {

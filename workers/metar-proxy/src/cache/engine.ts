@@ -14,6 +14,7 @@ interface CachedRecord<TData> {
   data: TData;
   fetchedAt: Date;
   expiresAt: Date;
+  envelope: CacheEnvelope<TData>;
 }
 
 const KEY_VERSION = 'v1';
@@ -112,7 +113,8 @@ function toCachedRecord<TInput, TUpstream, TData>(
   return {
     data,
     fetchedAt,
-    expiresAt
+    expiresAt,
+    envelope: candidate as CacheEnvelope<TData>
   };
 }
 
@@ -199,9 +201,10 @@ function toEnvelope<TInput, TUpstream, TData>(
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
   data: TData,
   cacheKey: string,
-  now: Date
+  now: Date,
+  upstream?: TUpstream
 ): CacheEnvelope<TData> {
-  const candidate = adapter.serialize(data, cacheKey, adapter.resource);
+  const candidate = adapter.serialize(data, cacheKey, adapter.resource, upstream);
   const serializedData = candidate.data;
   const fetchedAt = parseIsoDate(candidate?.cacheMeta?.fetchedAt) ?? extractFetchedAt(serializedData) ?? now;
   const expiresAt =
@@ -209,6 +212,7 @@ function toEnvelope<TInput, TUpstream, TData>(
     new Date(fetchedAt.getTime() + adapter.policy.ttlSeconds * 1000);
 
   return {
+    ...((candidate as unknown) as Record<string, unknown>),
     schemaVersion: adapter.schemaVersion,
     resource: adapter.resource,
     key: cacheKey,
@@ -325,7 +329,7 @@ async function refreshFromUpstream<TInput, TUpstream, TData>(
 ): Promise<CacheEngineResult<TData>> {
   const upstreamPayload = await adapter.fetchUpstream(input, context);
   const validatedData = await adapter.validate(upstreamPayload, input, context);
-  const envelope = toEnvelope(adapter, validatedData, cacheKey, new Date());
+  const envelope = toEnvelope(adapter, validatedData, cacheKey, new Date(), upstreamPayload);
   const retentionTtl =
     adapter.policy.ttlSeconds +
     Math.max(adapter.policy.staleWhileRevalidateSeconds, adapter.policy.staleOnErrorSeconds);
@@ -339,7 +343,8 @@ async function refreshFromUpstream<TInput, TUpstream, TData>(
   const record: CachedRecord<TData> = {
     data: envelope.data,
     fetchedAt: new Date(envelope.cacheMeta.fetchedAt),
-    expiresAt: new Date(envelope.cacheMeta.expiresAt)
+    expiresAt: new Date(envelope.cacheMeta.expiresAt),
+    envelope
   };
 
   return cacheResultFromRecord(adapter, cacheKey, record, new Date(), 'upstream_refresh', 'upstream');
@@ -388,7 +393,7 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
 
   const kvRecord = await readKvEnvelope(adapter, cacheKey, now, readKv);
   if (kvRecord && isFresh(kvRecord, now)) {
-    await writeEdgeEnvelope(edgeCache, cacheKey, toEnvelope(adapter, kvRecord.data, cacheKey, now), adapter.policy.ttlSeconds);
+    await writeEdgeEnvelope(edgeCache, cacheKey, kvRecord.envelope, adapter.policy.ttlSeconds);
     return cacheResultFromRecord(adapter, cacheKey, kvRecord, now, 'kv_hit', 'kv');
   }
 

@@ -3,7 +3,7 @@ import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
 const AIRPORT_DB_BASE_URL = 'https://airportdb.io/api/v1/airport';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const AIRPORT_SCHEMA_VERSION = 4;
+export const AIRPORT_SCHEMA_VERSION = 7;
 
 export interface AirportResourceInput {
   icao: string;
@@ -16,6 +16,31 @@ export interface AirportRunwayEnd {
   lengthFt: number | null;
 }
 
+export interface AirportResourceFrequency {
+  type: string;
+  description: string;
+  frequencyMhz: string;
+}
+
+interface AirportDbCountry {
+  name?: unknown;
+  [key: string]: unknown;
+}
+
+export interface AirportUpstreamSnapshot {
+  ident?: unknown;
+  icao_code?: unknown;
+  name?: unknown;
+  municipality?: unknown;
+  iso_country?: unknown;
+  country?: AirportDbCountry | unknown;
+  elevation_ft?: unknown;
+  runways?: unknown;
+  frequencies?: unknown;
+  freqs?: unknown;
+  [key: string]: unknown;
+}
+
 export interface AirportResourceData {
   requestedIcao: string;
   icao: string;
@@ -25,6 +50,7 @@ export interface AirportResourceData {
   countryName: string;
   elevationFt: number | null;
   runwayEnds: AirportRunwayEnd[];
+  frequencies: AirportResourceFrequency[];
   source: 'airportdb';
   fetchedAt: string;
 }
@@ -39,22 +65,29 @@ export type AirportWorkerErrorCode =
   | 'PROVIDER_PAYLOAD_INVALID'
   | 'UNEXPECTED';
 
-interface AirportDbPayload {
-  ident?: unknown;
-  icao_code?: unknown;
-  name?: unknown;
-  municipality?: unknown;
-  iso_country?: unknown;
-  country?: unknown;
-  elevation_ft?: unknown;
-  runways?: unknown;
-}
+type AirportDbPayload = AirportUpstreamSnapshot;
 
 interface AirportDbRunway {
   closed?: unknown;
   length_ft?: unknown;
   le_ident?: unknown;
   he_ident?: unknown;
+  [key: string]: unknown;
+}
+
+interface AirportDbFrequency {
+  type?: unknown;
+  description?: unknown;
+  frequency_mhz?: unknown;
+  [key: string]: unknown;
+}
+
+type AirportResourceShapeCandidate = Omit<AirportResourceData, 'frequencies'> & {
+  frequencies?: AirportResourceData['frequencies'];
+};
+
+export interface AirportCacheEnvelope extends CacheEnvelope<AirportResourceData> {
+  upstreamSnapshot?: AirportUpstreamSnapshot;
 }
 
 export class AirportWorkerError extends Error {
@@ -143,7 +176,20 @@ function toRunwayEnd(identCandidate: unknown, isClosed: boolean, lengthFt: numbe
   };
 }
 
-function isAirportResourceShape(asData: Partial<AirportResourceData>): asData is AirportResourceData {
+function isOptionalArray(value: unknown): boolean {
+  return typeof value === 'undefined' || Array.isArray(value);
+}
+
+function isOptionalPlainObject(value: unknown): boolean {
+  return (
+    typeof value === 'undefined' ||
+    (Boolean(value) && typeof value === 'object' && !Array.isArray(value))
+  );
+}
+
+function isAirportResourceShape(
+  asData: Partial<AirportResourceShapeCandidate>
+): asData is AirportResourceShapeCandidate {
   return (
     typeof asData.requestedIcao === 'string' &&
     typeof asData.icao === 'string' &&
@@ -152,6 +198,7 @@ function isAirportResourceShape(asData: Partial<AirportResourceData>): asData is
     typeof asData.countryCode === 'string' &&
     typeof asData.countryName === 'string' &&
     Array.isArray(asData.runwayEnds) &&
+    isOptionalArray(asData.frequencies) &&
     typeof asData.fetchedAt === 'string' &&
     asData.source === 'airportdb'
   );
@@ -169,6 +216,16 @@ function isAirportRunwayEndCandidate(runway: unknown): runway is AirportRunwayEn
   );
 }
 
+function isAirportFrequencyCandidate(frequency: unknown): frequency is AirportResourceFrequency {
+  return (
+    Boolean(frequency) &&
+    typeof frequency === 'object' &&
+    typeof (frequency as { type?: unknown }).type === 'string' &&
+    typeof (frequency as { description?: unknown }).description === 'string' &&
+    typeof (frequency as { frequencyMhz?: unknown }).frequencyMhz === 'string'
+  );
+}
+
 function normalizeCachedRunways(runways: AirportResourceData['runwayEnds']): AirportRunwayEnd[] {
   return runways
     .filter(isAirportRunwayEndCandidate)
@@ -180,12 +237,24 @@ function normalizeCachedRunways(runways: AirportResourceData['runwayEnds']): Air
     }));
 }
 
+function normalizeCachedFrequencies(
+  frequencies: AirportResourceData['frequencies']
+): AirportResourceFrequency[] {
+  return frequencies
+    .filter(isAirportFrequencyCandidate)
+    .map((frequency) => ({
+      type: frequency.type,
+      description: frequency.description,
+      frequencyMhz: frequency.frequencyMhz
+    }));
+}
+
 function toAirportData(candidate: unknown): AirportResourceData | null {
   if (!candidate || typeof candidate !== 'object') {
     return null;
   }
 
-  const asData = candidate as Partial<AirportResourceData>;
+  const asData = candidate as Partial<AirportResourceShapeCandidate>;
   if (!isAirportResourceShape(asData)) {
     return null;
   }
@@ -205,14 +274,29 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
     countryName: asData.countryName,
     elevationFt: typeof asData.elevationFt === 'number' ? asData.elevationFt : null,
     runwayEnds,
+    frequencies: normalizeCachedFrequencies(Array.isArray(asData.frequencies) ? asData.frequencies : []),
     fetchedAt: asData.fetchedAt,
     source: asData.source
   };
 }
 
-function serializeAirport(data: AirportResourceData, key: string, resource: string): CacheEnvelope<AirportResourceData> {
+function toUpstreamSnapshot(candidate: unknown): AirportUpstreamSnapshot | undefined {
+  if (!isOptionalPlainObject(candidate) || typeof candidate === 'undefined') {
+    return undefined;
+  }
+
+  return candidate as AirportUpstreamSnapshot;
+}
+
+function serializeAirport(
+  data: AirportResourceData,
+  key: string,
+  resource: string,
+  upstream?: unknown
+): AirportCacheEnvelope {
   const fetchedAt = new Date(data.fetchedAt);
   const fallbackFetchedAt = Number.isNaN(fetchedAt.getTime()) ? new Date() : fetchedAt;
+  const upstreamSnapshot = toUpstreamSnapshot(upstream);
 
   return {
     schemaVersion: airportResourceAdapter.schemaVersion,
@@ -226,7 +310,8 @@ function serializeAirport(data: AirportResourceData, key: string, resource: stri
       ).toISOString(),
       policyVersion: airportResourceAdapter.policy.policyVersion,
       source: 'upstream'
-    }
+    },
+    ...(upstreamSnapshot ? { upstreamSnapshot } : {})
   };
 }
 
@@ -245,12 +330,34 @@ function toAirportDbPayload(candidate: unknown): AirportDbPayload {
 }
 
 function toCountryName(payload: AirportDbPayload): string {
-  const direct = toStringValue((payload.country as { name?: unknown } | undefined)?.name);
+  const direct = toStringValue((payload.country as AirportDbCountry | undefined)?.name);
   if (direct) {
     return direct;
   }
 
   return '';
+}
+
+function toFrequencyValue(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `${value}`;
+  }
+
+  return toStringValue(value);
+}
+
+function toAirportFrequency(candidate: AirportDbFrequency): AirportResourceFrequency | null {
+  const type = toStringValue(candidate.type)?.toUpperCase() ?? null;
+  const frequencyMhz = toFrequencyValue(candidate.frequency_mhz);
+  if (!type || !frequencyMhz) {
+    return null;
+  }
+
+  return {
+    type,
+    description: toStringValue(candidate.description) ?? '',
+    frequencyMhz
+  };
 }
 
 function shouldReplaceRunway(existing: AirportRunwayEnd | undefined, candidate: AirportRunwayEnd): boolean {
@@ -293,6 +400,51 @@ function collectRunwayEnds(payload: AirportDbPayload): AirportRunwayEnd[] {
   }
 
   return [...runwayMap.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function getAirportDbFrequencyCandidates(payload: AirportDbPayload): AirportDbFrequency[] {
+  if (Array.isArray(payload.frequencies)) {
+    return payload.frequencies as AirportDbFrequency[];
+  }
+
+  if (Array.isArray(payload.freqs)) {
+    return payload.freqs as AirportDbFrequency[];
+  }
+
+  return [];
+}
+
+function collectFrequencies(payload: AirportDbPayload): AirportResourceFrequency[] {
+  const frequencies = getAirportDbFrequencyCandidates(payload);
+  const uniqueFrequencies = new Map<string, AirportResourceFrequency>();
+
+  for (const frequency of frequencies) {
+    if (!frequency || typeof frequency !== 'object') {
+      continue;
+    }
+
+    const normalized = toAirportFrequency(frequency);
+    if (!normalized) {
+      continue;
+    }
+
+    const key = `${normalized.type}|${normalized.description}|${normalized.frequencyMhz}`;
+    uniqueFrequencies.set(key, normalized);
+  }
+
+  return [...uniqueFrequencies.values()].sort((left, right) => {
+    const typeCompare = left.type.localeCompare(right.type);
+    if (typeCompare !== 0) {
+      return typeCompare;
+    }
+
+    const descriptionCompare = left.description.localeCompare(right.description);
+    if (descriptionCompare !== 0) {
+      return descriptionCompare;
+    }
+
+    return left.frequencyMhz.localeCompare(right.frequencyMhz);
+  });
 }
 
 function resolvePayloadIcao(payload: AirportDbPayload, requestedIcao: string): string {
@@ -357,6 +509,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
       countryName: toCountryName(payload),
       elevationFt: toIntegerValue(payload.elevation_ft),
       runwayEnds,
+      frequencies: collectFrequencies(payload),
       source: 'airportdb',
       fetchedAt: new Date().toISOString()
     };
@@ -375,7 +528,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
     staleWhileRevalidateSeconds: 43200,
     staleOnErrorSeconds: 259200,
     negativeCacheTtlSeconds: 3600,
-    policyVersion: 'airport-v2'
+    policyVersion: 'airport-v5'
   },
   observability: (input, key) => ({
     labels: {

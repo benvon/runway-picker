@@ -86,6 +86,8 @@ body {
 .panel-spotlight {
   border-width: 4px;
   box-shadow: 0 0 0 3px #000;
+  display: grid;
+  gap: 0.75rem;
 }
 
 #best-runway-spotlight:empty {
@@ -113,6 +115,31 @@ body {
   font-weight: 700;
   min-width: 0;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.airport-info-box {
+  border: 2px solid #111;
+  background: #fff;
+  padding: 0.75rem;
+}
+
+.airport-info-box h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+
+.airport-info-grid {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.airport-info-item {
+  margin: 0;
+  border: 2px solid #111;
+  background: #f7fafc;
+  padding: 0.6rem;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -280,6 +307,10 @@ th {
 
   .panel {
     padding: 1rem;
+  }
+
+  .airport-info-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
