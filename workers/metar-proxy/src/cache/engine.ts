@@ -212,6 +212,7 @@ function toEnvelope<TInput, TUpstream, TData>(
     new Date(fetchedAt.getTime() + adapter.policy.ttlSeconds * 1000);
 
   return {
+    ...((candidate as unknown) as Record<string, unknown>),
     schemaVersion: adapter.schemaVersion,
     resource: adapter.resource,
     key: cacheKey,

@@ -869,6 +869,12 @@ describe('airport worker', () => {
 
     expect(response.status).toBe(200);
     expect(kv.has('v1:airport:KJFK')).toBe(true);
+    const cached = kv.read<{
+      upstreamSnapshot?: { ident?: string; home_link?: string; freqs?: Array<{ type: string; description: string }> };
+    }>('v1:airport:KJFK');
+    expect(cached?.upstreamSnapshot?.ident).toBe('KJFK');
+    expect(cached?.upstreamSnapshot?.home_link).toBe('https://kjfk.example.com');
+    expect(cached?.upstreamSnapshot?.freqs?.[0]).toMatchObject({ type: 'APP', description: 'NORTH APP' });
 
     const payload = (await response.json()) as Record<string, unknown>;
     expect(payload.upstreamPayload).toBeUndefined();

@@ -282,6 +282,54 @@ describe('cache engine', () => {
     expect(cachedEdgeEnvelope.upstreamSnapshot?.value).toBe('raw-provider-value');
   });
 
+  it('persists adapter-defined cache-only envelope fields during upstream refresh', async () => {
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn().mockResolvedValue('provider-raw-value'),
+      serialize: (data, key, resource, upstream) => ({
+        schemaVersion: 2,
+        resource,
+        key,
+        data,
+        cacheMeta: {
+          fetchedAt: data.fetchedAt,
+          expiresAt: new Date(new Date(data.fetchedAt).getTime() + 30 * 1000).toISOString(),
+          policyVersion: 'demo-v1',
+          source: 'upstream'
+        },
+        upstreamSnapshot: {
+          rawValue: upstream
+        }
+      })
+    });
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.payload.value).toBe('provider-raw-value');
+    expect(result.cache.status).toBe('upstream_refresh');
+
+    const kvEnvelope = (await kv.get('v1:demo:alpha')) as {
+      upstreamSnapshot?: { rawValue?: string };
+    };
+    expect(kvEnvelope.upstreamSnapshot?.rawValue).toBe('provider-raw-value');
+
+    const cachedEdgeResponse = await edge.match(
+      new Request('https://cache.runway.internal/v1%3Ademo%3Aalpha')
+    );
+    const cachedEdgeEnvelope = (await cachedEdgeResponse?.json()) as {
+      upstreamSnapshot?: { rawValue?: string };
+    };
+    expect(cachedEdgeEnvelope.upstreamSnapshot?.rawValue).toBe('provider-raw-value');
+  });
+
   it('uses single-flight so concurrent misses perform one upstream fetch', async () => {
     const fetchUpstream = vi.fn().mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 120));
