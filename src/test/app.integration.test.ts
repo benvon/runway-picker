@@ -25,6 +25,14 @@ function airportPayload(icao: string) {
       { id: '04', headingDegMag: 40, isClosed: false, lengthFt: 8000 },
       { id: '22', headingDegMag: 220, isClosed: false, lengthFt: 8000 }
     ],
+    frequencies: [
+      { type: 'APP', description: 'CITY APPROACH', frequencyMhz: '120.4' },
+      { type: 'DEP', description: 'CITY DEPARTURE', frequencyMhz: '121.7' },
+      { type: 'TWR', description: 'CITY TOWER', frequencyMhz: '118.5' },
+      { type: 'GND', description: 'CITY GROUND', frequencyMhz: '121.9' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '124.7' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '122.8' }
+    ],
     source: 'airportdb',
     fetchedAt: '2026-03-02T00:00:00.000Z',
     cache: {
@@ -143,6 +151,13 @@ describe('app integration', () => {
       headers: { Accept: 'application/json' }
     });
     expect(root.textContent).toContain('Best runway:');
+    expect(root.textContent).toContain('Airport Info');
+    expect(root.textContent).toContain('Approach: 120.4 MHz');
+    expect(root.textContent).toContain('Departure: 121.7 MHz');
+    expect(root.textContent).toContain('Tower: 118.5 MHz');
+    expect(root.textContent).toContain('Ground: 121.9 MHz');
+    expect(root.textContent).toContain('ATIS: 124.7 MHz');
+    expect(root.textContent).toContain('CTAF: 122.8 MHz');
     expect(root.textContent).toContain('Lookup Summary');
     expect(root.textContent).toContain('Runway ends loaded: 2');
     expect(root.textContent).toContain('All Runway Components');
@@ -255,6 +270,131 @@ describe('app integration', () => {
     await waitFor(() => (root.textContent?.includes('Best runway:') ?? false));
 
     expect(root.textContent).toContain('Best runway: 18R');
+  });
+
+  it('selects the directional approach frequency that matches the recommended runway approach path', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KAPP') {
+        return Promise.resolve(
+          Response.json({
+            ...airportPayload('KAPP'),
+            runwayEnds: [
+              { id: '18', headingDegMag: 180, isClosed: false, lengthFt: 8000 },
+              { id: '36', headingDegMag: 360, isClosed: false, lengthFt: 8000 }
+            ],
+            frequencies: [
+              { type: 'A/D', description: 'NORTH APPROACH', frequencyMhz: '120.1' },
+              { type: 'APP', description: 'SOUTH APPROACH', frequencyMhz: '124.2' },
+              { type: 'DEP', description: 'CITY DEPARTURE', frequencyMhz: '121.7' },
+              { type: 'TWR', description: 'TOWER', frequencyMhz: '118.5' },
+              { type: 'GND', description: 'GROUND', frequencyMhz: '121.9' },
+              { type: 'AWOS', description: 'AWOS', frequencyMhz: '121.0' },
+              { type: 'CTAF', description: 'CTAF', frequencyMhz: '122.8' }
+            ]
+          })
+        );
+      }
+
+      if (url === '/api/metar?icao=KAPP') {
+        return Promise.resolve(
+          Response.json(
+            metarPayload('KAPP', {
+              raw: '18012KT',
+              directionType: 'fixed',
+              directionDegTrue: 180,
+              speedKt: 12,
+              gustKt: null
+            })
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KAPP';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (root.textContent?.includes('Best runway: 18') ?? false));
+
+    expect(root.textContent).toContain('Approach: 120.1 MHz');
+    expect(root.textContent).not.toContain('Approach: 124.2 MHz');
+    expect(root.textContent).toContain('Departure: 120.1 MHz, 121.7 MHz');
+    expect(root.textContent).toContain('Ground: 121.9 MHz');
+    expect(root.textContent).toContain('AWOS: 121.0 MHz');
+  });
+
+  it('renders N/A for missing airport frequencies', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=KNUL') {
+        return Promise.resolve(
+          Response.json({
+            ...airportPayload('KNUL'),
+            frequencies: []
+          })
+        );
+      }
+
+      if (url === '/api/metar?icao=KNUL') {
+        return Promise.resolve(
+          Response.json(
+            metarPayload('KNUL', {
+              raw: '22008KT',
+              directionType: 'fixed',
+              directionDegTrue: 220,
+              speedKt: 8,
+              gustKt: null
+            })
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KNUL';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (root.textContent?.includes('Airport Info') ?? false));
+
+    expect(root.textContent).toContain('Approach: N/A');
+    expect(root.textContent).toContain('Departure: N/A');
+    expect(root.textContent).toContain('Tower: N/A');
+    expect(root.textContent).toContain('Ground: N/A');
+    expect(root.textContent).toContain('AWOS / ATIS / ASOS: N/A');
+    expect(root.textContent).toContain('CTAF: N/A');
   });
 
   it('reveals alternate METAR flow only after primary METAR 404 and locks primary input', async () => {

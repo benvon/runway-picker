@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { airportResourceAdapter } from './airport/adapter';
+import { airportResourceAdapter, type AirportCacheEnvelope } from './airport/adapter';
 import { metarResourceAdapter } from './metar/adapter';
 
 describe('resource adapters', () => {
@@ -157,6 +157,7 @@ describe('resource adapters', () => {
         iso_country: 'US',
         country: { name: 'United States' },
         elevation_ft: '13',
+        home_link: 'https://www.jfkairport.com',
         runways: [
           {
             closed: '0',
@@ -176,6 +177,14 @@ describe('resource adapters', () => {
             le_ident: '04L',
             he_ident: '22R'
           }
+        ],
+        freqs: [
+          { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
+          { type: 'TWR', description: 'KENNEDY TWR', frequency_mhz: '119.1' },
+          { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
+          { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
+          { type: 'CTAF', description: 'CTAF', frequency_mhz: '123.0' },
+          { type: 'APP', description: 'BROKEN' }
         ]
       },
       { icao: 'KJFK' },
@@ -200,6 +209,83 @@ describe('resource adapters', () => {
       { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12079 },
       { id: '31L', headingDegMag: 310, isClosed: true, lengthFt: 14511 }
     ]);
+    expect(validated.frequencies).toEqual([
+      { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
+      { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
+    ]);
+
+    const envelope = airportResourceAdapter.serialize(validated, 'v1:airport:KJFK', 'airport', {
+      ident: 'KJFK',
+      home_link: 'https://www.jfkairport.com',
+      freqs: [
+        { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
+        { type: 'TWR', description: 'KENNEDY TWR', frequency_mhz: '119.1' }
+      ]
+    }) as AirportCacheEnvelope;
+
+    expect(envelope.upstreamSnapshot?.ident).toBe('KJFK');
+    expect(envelope.upstreamSnapshot?.home_link).toBe('https://www.jfkairport.com');
+    expect(Array.isArray(envelope.upstreamSnapshot?.freqs)).toBe(true);
+    const upstreamFrequencies = envelope.upstreamSnapshot?.freqs as Array<Record<string, unknown>>;
+    expect(upstreamFrequencies[0]).toMatchObject({
+      type: 'APP',
+      description: 'NORTH APP',
+      frequency_mhz: '125.7'
+    });
+    expect(upstreamFrequencies[1]).toMatchObject({
+      type: 'TWR',
+      description: 'KENNEDY TWR',
+      frequency_mhz: '119.1'
+    });
+  });
+
+  it('supports the current airportdb frequency field name and the legacy one', async () => {
+    const withFrequencies = await airportResourceAdapter.validate(
+      {
+        ident: 'KLAS',
+        runways: [{ closed: '0', le_ident: '01L', he_ident: '19R', length_ft: '8988' }],
+        frequencies: [
+          { type: 'APP', description: 'LAS VEGAS APP', frequency_mhz: '125.9' },
+          { type: 'TWR', description: 'LAS VEGAS TWR', frequency_mhz: '132.4' }
+        ]
+      },
+      { icao: 'KLAS' },
+      {
+        request: new Request('https://example.com'),
+        env: {
+          METAR_CACHE: { get: async () => null, put: async () => {} },
+          AIRPORTDB_API_TOKEN: 'token'
+        }
+      }
+    );
+
+    expect(withFrequencies.frequencies).toEqual([
+      { type: 'APP', description: 'LAS VEGAS APP', frequencyMhz: '125.9' },
+      { type: 'TWR', description: 'LAS VEGAS TWR', frequencyMhz: '132.4' }
+    ]);
+  });
+
+  it('returns an empty frequency list when both airportdb frequency fields are missing or malformed', async () => {
+    const validated = await airportResourceAdapter.validate(
+      {
+        ident: 'KMSN',
+        runways: [{ closed: '0', le_ident: '18', he_ident: '36', length_ft: '5000' }],
+        frequencies: { type: 'APP', description: 'BROKEN', frequency_mhz: '118.5' },
+        freqs: [null, { type: 'APP', description: 'BROKEN' }]
+      },
+      { icao: 'KMSN' },
+      {
+        request: new Request('https://example.com'),
+        env: {
+          METAR_CACHE: { get: async () => null, put: async () => {} },
+          AIRPORTDB_API_TOKEN: 'token'
+        }
+      }
+    );
+
+    expect(validated.frequencies).toEqual([]);
   });
 
   it('supports airports where all runways are closed', async () => {
@@ -243,14 +329,43 @@ describe('resource adapters', () => {
         runwayEnds: [
           { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 }
         ],
+        frequencies: [
+          { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
+        ],
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
+      },
+      upstreamSnapshot: {
+        ident: 'KJFK',
+        home_link: 'https://www.jfkairport.com'
       }
     };
 
     const parsed = airportResourceAdapter.deserialize(cached);
     expect(parsed?.icao).toBe('KJFK');
     expect(parsed?.runwayEnds[0]?.id).toBe('04L');
+    expect(parsed?.frequencies).toEqual([{ type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }]);
+  });
+
+  it('deserializes cached airport payloads without frequencies as safe defaults', () => {
+    const cached = {
+      data: {
+        requestedIcao: 'KMSP',
+        icao: 'KMSP',
+        name: 'Minneapolis-Saint Paul International Airport',
+        municipality: 'Minneapolis',
+        countryCode: 'US',
+        countryName: 'United States',
+        elevationFt: 841,
+        runwayEnds: [{ id: '12L', headingDegMag: 120, isClosed: false, lengthFt: 10000 }],
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      }
+    };
+
+    const parsed = airportResourceAdapter.deserialize(cached);
+    expect(parsed?.icao).toBe('KMSP');
+    expect(parsed?.frequencies).toEqual([]);
   });
 
   it('ignores invalid runway entries and exposes observability labels', async () => {

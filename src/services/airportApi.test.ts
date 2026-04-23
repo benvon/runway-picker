@@ -30,6 +30,10 @@ describe('airportApi service', () => {
               { id: '04L', headingDegMag: 40, lengthFt: 12079 },
               { id: '22R', headingDegMag: 220, lengthFt: 12079 }
             ],
+            frequencies: [
+              { type: 'APP', description: 'NORTH APPROACH', frequencyMhz: '125.7' },
+              { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
+            ],
             source: 'airportdb',
             fetchedAt: '2026-03-02T00:00:00.000Z',
             cache: {
@@ -64,6 +68,10 @@ describe('airportApi service', () => {
       { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 },
       { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12079 }
     ]);
+    expect(payload.frequencies).toEqual([
+      { type: 'APP', description: 'NORTH APPROACH', frequencyMhz: '125.7' },
+      { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
+    ]);
     expect(payload.cache.status).toBe('kv_hit');
     expect(payload.cache.source).toBe('kv');
     expect(payload.cache.key).toBe('v1:airport:KJFK');
@@ -86,6 +94,7 @@ describe('airportApi service', () => {
               { id: '01L', headingDegMag: 10, isClosed: false, lengthFt: 8000 },
               { id: '19R', headingDegMag: 190, isClosed: true, lengthFt: 8000 }
             ],
+            frequencies: [{ type: 'TWR', description: 'TOWER', frequencyMhz: '123.9' }],
             source: 'airportdb',
             fetchedAt: '2026-03-02T00:00:00.000Z'
           },
@@ -106,6 +115,55 @@ describe('airportApi service', () => {
     });
     expect(payload.cache.status).toBe('upstream_refresh');
     expect(payload.cache.source).toBe('upstream');
+  });
+
+  it('ignores malformed frequency entries and defaults to empty frequency list when missing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json({
+          requestedIcao: 'KDSM',
+          icao: 'KDSM',
+          name: 'Des Moines International Airport',
+          municipality: 'Des Moines',
+          countryCode: 'US',
+          countryName: 'United States',
+          elevationFt: 958,
+          runwayEnds: [{ id: '05', headingDegMag: 50, isClosed: false, lengthFt: 9000 }],
+          frequencies: [
+            { type: 'APP', description: 'DES MOINES APPROACH', frequencyMhz: '118.3' },
+            { type: 'TWR', frequencyMhz: '126.8' },
+            null
+          ],
+          source: 'airportdb',
+          fetchedAt: '2026-03-02T00:00:00.000Z'
+        })
+      )
+    );
+
+    const payload = await fetchAirportByIcao('kdsm');
+    expect(payload.frequencies).toEqual([{ type: 'APP', description: 'DES MOINES APPROACH', frequencyMhz: '118.3' }]);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json({
+          requestedIcao: 'KOTG',
+          icao: 'KOTG',
+          name: 'Worthington Municipal',
+          municipality: 'Worthington',
+          countryCode: 'US',
+          countryName: 'United States',
+          elevationFt: 1574,
+          runwayEnds: [{ id: '11', headingDegMag: 110, isClosed: false, lengthFt: 5500 }],
+          source: 'airportdb',
+          fetchedAt: '2026-03-02T00:00:00.000Z'
+        })
+      )
+    );
+
+    const fallbackPayload = await fetchAirportByIcao('kotg');
+    expect(fallbackPayload.frequencies).toEqual([]);
   });
 
   it('throws when response lacks runway fields', async () => {

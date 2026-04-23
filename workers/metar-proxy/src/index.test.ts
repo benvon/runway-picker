@@ -121,6 +121,7 @@ function buildAirportReport(icao: string): Record<string, unknown> {
     iso_country: 'US',
     country: { name: 'United States' },
     elevation_ft: '100',
+    home_link: `https://${icao.toLowerCase()}.example.com`,
     runways: [
       {
         closed: '0',
@@ -134,6 +135,12 @@ function buildAirportReport(icao: string): Record<string, unknown> {
         le_ident: '13',
         he_ident: '31'
       }
+    ],
+    freqs: [
+      { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
+      { type: 'TWR', description: 'TOWER', frequency_mhz: '119.1' },
+      { type: 'ATIS', description: 'ATIS', frequency_mhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequency_mhz: '123.0' }
     ]
   };
 }
@@ -748,6 +755,7 @@ describe('airport worker', () => {
       icao: string;
       source: string;
       runwayEnds: Array<{ id: string; headingDegMag: number; isClosed: boolean; lengthFt: number | null }>;
+      frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
       cache: { source: string; status: string };
     };
 
@@ -760,8 +768,65 @@ describe('airport worker', () => {
       { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12000 },
       { id: '31', headingDegMag: 310, isClosed: true, lengthFt: 10000 }
     ]);
+    expect(payload.frequencies).toEqual([
+      { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
+      { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
+    ]);
+    expect('upstreamPayload' in payload).toBe(false);
     expect(payload.cache.source).toBe('upstream');
     expect(payload.cache.status).toBe('upstream_refresh');
+  });
+
+  it('invalidates previously cached airport frequency payloads when the schema changes', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v1:airport:KJFK', {
+      schemaVersion: 6,
+      resource: 'airport',
+      key: 'v1:airport:KJFK',
+      data: {
+        requestedIcao: 'KJFK',
+        icao: 'KJFK',
+        name: 'John F Kennedy International Airport',
+        municipality: 'New York',
+        countryCode: 'US',
+        countryName: 'United States',
+        elevationFt: 13,
+        runwayEnds: [{ id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 }],
+        frequencies: [],
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      },
+      cacheMeta: {
+        fetchedAt: '2026-03-03T12:00:00.000Z',
+        expiresAt: '2099-03-03T12:00:00.000Z',
+        policyVersion: 'airport-v4',
+        source: 'upstream'
+      }
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
+
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
+      METAR_CACHE: kv,
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+
+    const payload = (await response.json()) as {
+      frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
+    };
+
+    expect(payload.frequencies).toEqual([
+      { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
+      { type: 'ATIS', description: 'ATIS', frequencyMhz: '128.725' },
+      { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
+      { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
+    ]);
+    expect('upstreamPayload' in payload).toBe(false);
   });
 
   it('tracks successful airport lookups in the hot queue metadata', async () => {
@@ -791,6 +856,28 @@ describe('airport worker', () => {
     });
     expect(typeof queueEntry?.lastAccessedAt).toBe('string');
     expect(typeof queueEntry?.lastRefreshedAt).toBe('string');
+  });
+
+  it('does not return the raw airport provider snapshot to clients', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
+
+    const kv = new MemoryKv();
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
+      METAR_CACHE: kv,
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(200);
+    expect(kv.has('v1:airport:KJFK')).toBe(true);
+    const cached = kv.read<{
+      upstreamSnapshot?: { ident?: string; home_link?: string; freqs?: Array<{ type: string; description: string }> };
+    }>('v1:airport:KJFK');
+    expect(cached?.upstreamSnapshot?.ident).toBe('KJFK');
+    expect(cached?.upstreamSnapshot?.home_link).toBe('https://kjfk.example.com');
+    expect(cached?.upstreamSnapshot?.freqs?.[0]).toMatchObject({ type: 'APP', description: 'NORTH APP' });
+
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload.upstreamPayload).toBeUndefined();
   });
 
   it('returns 500 when airportdb token is missing', async () => {
