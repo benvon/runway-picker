@@ -756,7 +756,6 @@ describe('airport worker', () => {
       source: string;
       runwayEnds: Array<{ id: string; headingDegMag: number; isClosed: boolean; lengthFt: number | null }>;
       frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
-      upstreamPayload: { ident?: string; home_link?: string; freqs?: Array<{ type: string; description: string }> };
       cache: { source: string; status: string };
     };
 
@@ -775,10 +774,7 @@ describe('airport worker', () => {
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
       { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
     ]);
-    expect(payload.upstreamPayload.ident).toBe('KJFK');
-    expect(payload.upstreamPayload.home_link).toBe('https://kjfk.example.com');
-    expect(Array.isArray(payload.upstreamPayload.freqs)).toBe(true);
-    expect(payload.upstreamPayload.freqs?.[0]).toMatchObject({ type: 'APP', description: 'NORTH APP' });
+    expect('upstreamPayload' in payload).toBe(false);
     expect(payload.cache.source).toBe('upstream');
     expect(payload.cache.status).toBe('upstream_refresh');
   });
@@ -822,7 +818,6 @@ describe('airport worker', () => {
 
     const payload = (await response.json()) as {
       frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
-      upstreamPayload: { ident?: string; home_link?: string };
     };
 
     expect(payload.frequencies).toEqual([
@@ -831,8 +826,7 @@ describe('airport worker', () => {
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
       { type: 'TWR', description: 'TOWER', frequencyMhz: '119.1' }
     ]);
-    expect(payload.upstreamPayload.ident).toBe('KJFK');
-    expect(payload.upstreamPayload.home_link).toBe('https://kjfk.example.com');
+    expect('upstreamPayload' in payload).toBe(false);
   });
 
   it('tracks successful airport lookups in the hot queue metadata', async () => {
@@ -862,6 +856,22 @@ describe('airport worker', () => {
     });
     expect(typeof queueEntry?.lastAccessedAt).toBe('string');
     expect(typeof queueEntry?.lastRefreshedAt).toBe('string');
+  });
+
+  it('does not return the raw airport provider snapshot to clients', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
+
+    const kv = new MemoryKv();
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
+      METAR_CACHE: kv,
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(200);
+    expect(kv.has('v1:airport:KJFK')).toBe(true);
+
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload.upstreamPayload).toBeUndefined();
   });
 
   it('returns 500 when airportdb token is missing', async () => {

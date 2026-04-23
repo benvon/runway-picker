@@ -51,7 +51,6 @@ export interface AirportResourceData {
   elevationFt: number | null;
   runwayEnds: AirportRunwayEnd[];
   frequencies: AirportResourceFrequency[];
-  upstreamPayload: AirportUpstreamSnapshot;
   source: 'airportdb';
   fetchedAt: string;
 }
@@ -83,10 +82,13 @@ interface AirportDbFrequency {
   [key: string]: unknown;
 }
 
-type AirportResourceShapeCandidate = Omit<AirportResourceData, 'frequencies' | 'upstreamPayload'> & {
+type AirportResourceShapeCandidate = Omit<AirportResourceData, 'frequencies'> & {
   frequencies?: AirportResourceData['frequencies'];
-  upstreamPayload?: unknown;
 };
+
+export interface AirportCacheEnvelope extends CacheEnvelope<AirportResourceData> {
+  upstreamSnapshot?: AirportUpstreamSnapshot;
+}
 
 export class AirportWorkerError extends Error {
   status: number;
@@ -197,7 +199,6 @@ function isAirportResourceShape(
     typeof asData.countryName === 'string' &&
     Array.isArray(asData.runwayEnds) &&
     isOptionalArray(asData.frequencies) &&
-    isOptionalPlainObject(asData.upstreamPayload) &&
     typeof asData.fetchedAt === 'string' &&
     asData.source === 'airportdb'
   );
@@ -248,14 +249,6 @@ function normalizeCachedFrequencies(
     }));
 }
 
-function normalizeUpstreamPayload(candidate: unknown): AirportUpstreamSnapshot {
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-    return {};
-  }
-
-  return candidate as AirportUpstreamSnapshot;
-}
-
 function toAirportData(candidate: unknown): AirportResourceData | null {
   if (!candidate || typeof candidate !== 'object') {
     return null;
@@ -282,15 +275,28 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
     elevationFt: typeof asData.elevationFt === 'number' ? asData.elevationFt : null,
     runwayEnds,
     frequencies: normalizeCachedFrequencies(Array.isArray(asData.frequencies) ? asData.frequencies : []),
-    upstreamPayload: normalizeUpstreamPayload(asData.upstreamPayload),
     fetchedAt: asData.fetchedAt,
     source: asData.source
   };
 }
 
-function serializeAirport(data: AirportResourceData, key: string, resource: string): CacheEnvelope<AirportResourceData> {
+function toUpstreamSnapshot(candidate: unknown): AirportUpstreamSnapshot | undefined {
+  if (!isOptionalPlainObject(candidate) || typeof candidate === 'undefined') {
+    return undefined;
+  }
+
+  return candidate as AirportUpstreamSnapshot;
+}
+
+function serializeAirport(
+  data: AirportResourceData,
+  key: string,
+  resource: string,
+  upstream?: unknown
+): AirportCacheEnvelope {
   const fetchedAt = new Date(data.fetchedAt);
   const fallbackFetchedAt = Number.isNaN(fetchedAt.getTime()) ? new Date() : fetchedAt;
+  const upstreamSnapshot = toUpstreamSnapshot(upstream);
 
   return {
     schemaVersion: airportResourceAdapter.schemaVersion,
@@ -304,7 +310,8 @@ function serializeAirport(data: AirportResourceData, key: string, resource: stri
       ).toISOString(),
       policyVersion: airportResourceAdapter.policy.policyVersion,
       source: 'upstream'
-    }
+    },
+    ...(upstreamSnapshot ? { upstreamSnapshot } : {})
   };
 }
 
@@ -503,7 +510,6 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
       elevationFt: toIntegerValue(payload.elevation_ft),
       runwayEnds,
       frequencies: collectFrequencies(payload),
-      upstreamPayload: payload,
       source: 'airportdb',
       fetchedAt: new Date().toISOString()
     };

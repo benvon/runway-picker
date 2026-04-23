@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { airportResourceAdapter } from './airport/adapter';
+import { airportResourceAdapter, type AirportCacheEnvelope } from './airport/adapter';
 import { metarResourceAdapter } from './metar/adapter';
 
 describe('resource adapters', () => {
@@ -215,10 +215,20 @@ describe('resource adapters', () => {
       { type: 'CTAF', description: 'CTAF', frequencyMhz: '123.0' },
       { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
     ]);
-    expect(validated.upstreamPayload.ident).toBe('KJFK');
-    expect(validated.upstreamPayload.home_link).toBe('https://www.jfkairport.com');
-    expect(Array.isArray(validated.upstreamPayload.freqs)).toBe(true);
-    const upstreamFrequencies = validated.upstreamPayload.freqs as Array<Record<string, unknown>>;
+
+    const envelope = airportResourceAdapter.serialize(validated, 'v1:airport:KJFK', 'airport', {
+      ident: 'KJFK',
+      home_link: 'https://www.jfkairport.com',
+      freqs: [
+        { type: 'APP', description: 'NORTH APP', frequency_mhz: '125.7' },
+        { type: 'TWR', description: 'KENNEDY TWR', frequency_mhz: '119.1' }
+      ]
+    }) as AirportCacheEnvelope;
+
+    expect(envelope.upstreamSnapshot?.ident).toBe('KJFK');
+    expect(envelope.upstreamSnapshot?.home_link).toBe('https://www.jfkairport.com');
+    expect(Array.isArray(envelope.upstreamSnapshot?.freqs)).toBe(true);
+    const upstreamFrequencies = envelope.upstreamSnapshot?.freqs as Array<Record<string, unknown>>;
     expect(upstreamFrequencies[0]).toMatchObject({
       type: 'APP',
       description: 'NORTH APP',
@@ -322,12 +332,12 @@ describe('resource adapters', () => {
         frequencies: [
           { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
         ],
-        upstreamPayload: {
-          ident: 'KJFK',
-          home_link: 'https://www.jfkairport.com'
-        },
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
+      },
+      upstreamSnapshot: {
+        ident: 'KJFK',
+        home_link: 'https://www.jfkairport.com'
       }
     };
 
@@ -335,13 +345,9 @@ describe('resource adapters', () => {
     expect(parsed?.icao).toBe('KJFK');
     expect(parsed?.runwayEnds[0]?.id).toBe('04L');
     expect(parsed?.frequencies).toEqual([{ type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }]);
-    expect(parsed?.upstreamPayload).toMatchObject({
-      ident: 'KJFK',
-      home_link: 'https://www.jfkairport.com'
-    });
   });
 
-  it('deserializes cached airport payloads without frequencies or upstream payload as safe defaults', () => {
+  it('deserializes cached airport payloads without frequencies as safe defaults', () => {
     const cached = {
       data: {
         requestedIcao: 'KMSP',
@@ -360,7 +366,6 @@ describe('resource adapters', () => {
     const parsed = airportResourceAdapter.deserialize(cached);
     expect(parsed?.icao).toBe('KMSP');
     expect(parsed?.frequencies).toEqual([]);
-    expect(parsed?.upstreamPayload).toEqual({});
   });
 
   it('ignores invalid runway entries and exposes observability labels', async () => {
