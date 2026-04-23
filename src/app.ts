@@ -3,10 +3,10 @@ import { fetchMetarByIcao } from './services/metarApi';
 import { readBuildMetadata } from './buildMetadata';
 import { mountAppController, type AppControllerOptions } from './ui/controller';
 
-export function mountApp(root: HTMLElement, options: AppControllerOptions = {}): void {
+export function mountApp(root: HTMLElement, options: AppControllerOptions = {}): () => void {
   const buildMetadata = readBuildMetadata();
 
-  mountAppController(root, {
+  return mountAppController(root, {
     fetchAirportByIcao,
     fetchMetarByIcao
   }, buildMetadata, options);

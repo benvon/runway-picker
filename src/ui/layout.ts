@@ -43,7 +43,7 @@ export function applyAlternateStageUi(elements: AppElements, primaryIcao: string
 }
 
 export function showAppUpdateNotice(elements: AppElements, latestBuild: BuildMetadata): void {
-  elements.updateBannerMessage.textContent = `A new version of Runway Picker (${latestBuild.version}) is available. Reload to update.`;
+  elements.updateBannerMessage.textContent = `A new build of Runway Picker is available (${latestBuild.footerLabel}). Reload to update.`;
   elements.updateBanner.hidden = false;
 }
 
@@ -55,6 +55,7 @@ export function buildAppUi(root: HTMLElement, buildMetadata: BuildMetadata): App
     className: 'panel panel-accent update-banner',
     attributes: {
       'aria-label': 'Application update available',
+      role: 'status',
       'aria-live': 'polite'
     }
   });

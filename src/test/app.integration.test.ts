@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mountApp } from '../app';
+import { mountApp as mountRealApp } from '../app';
 import { createBuildMetadata } from '../buildMetadata';
+
+let appCleanup: (() => void) | null = null;
+
+function mountApp(root: HTMLElement, options?: Parameters<typeof mountRealApp>[1]): () => void {
+  appCleanup?.();
+  appCleanup = mountRealApp(root, options);
+  return appCleanup;
+}
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -85,6 +93,8 @@ describe('app integration', () => {
   });
 
   afterEach(() => {
+    appCleanup?.();
+    appCleanup = null;
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -987,10 +997,11 @@ describe('app integration', () => {
     });
 
     window.dispatchEvent(new Event('focus'));
-    await waitFor(() => (root.textContent?.includes('A new version of Runway Picker') ?? false));
+    await waitFor(() => (root.textContent?.includes('A new build of Runway Picker') ?? false));
 
-    expect(root.textContent).toContain('v9.9.10');
+    expect(root.textContent).toContain('v9.9.10 (0123456)');
     expect(root.textContent).toContain('Reload now');
+    expect(root.querySelector('.update-banner')?.getAttribute('role')).toBe('status');
   });
 
   it('shows the update prompt when the interval check detects a newer release', async () => {
@@ -1015,7 +1026,7 @@ describe('app integration', () => {
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
     expect(updateCheck).toHaveBeenCalledTimes(1);
-    expect(root.textContent).toContain('A new version of Runway Picker');
+    expect(root.textContent).toContain('A new build of Runway Picker');
   });
 
   it('reloads the page when the user accepts the update prompt', async () => {
@@ -1069,10 +1080,66 @@ describe('app integration', () => {
     });
 
     window.dispatchEvent(new Event('focus'));
-    await waitFor(() => (root.textContent?.includes('A new version of Runway Picker') ?? false));
+    await waitFor(() => (root.textContent?.includes('A new build of Runway Picker') ?? false));
 
     window.dispatchEvent(new Event('focus'));
     expect(updateCheck).toHaveBeenCalledTimes(1);
     expect(root.querySelectorAll('.update-banner').length).toBe(1);
+  });
+
+  it('treats update-check failures as silent retries instead of surfacing unhandled errors', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const updateCheck = vi
+      .fn<() => Promise<ReturnType<typeof createBuildMetadata> | null>>()
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce(
+        createBuildMetadata({
+          version: 'v9.9.10',
+          commitSha: '0123456789abcdef'
+        })
+      );
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root, {
+      fetchLatestBuildMetadata: updateCheck
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => updateCheck.mock.calls.length === 1);
+    expect(root.textContent).not.toContain('A new build of Runway Picker');
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => (root.textContent?.includes('A new build of Runway Picker') ?? false));
+    expect(updateCheck).toHaveBeenCalledTimes(2);
+  });
+
+  it('removes update-monitor listeners and interval when the app is cleaned up', async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<main id="app"></main>';
+    const updateCheck = vi.fn().mockResolvedValue(
+      createBuildMetadata({
+        version: 'v9.9.10',
+        commitSha: '0123456789abcdef'
+      })
+    );
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    const cleanup = mountApp(root, {
+      fetchLatestBuildMetadata: updateCheck
+    });
+
+    cleanup();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    window.dispatchEvent(new Event('focus'));
+
+    expect(updateCheck).not.toHaveBeenCalled();
   });
 });

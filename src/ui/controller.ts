@@ -22,6 +22,7 @@ import { renderErrorTechnicalDetails, renderLookupPanels } from './presenter';
 
 const MIN_FEEDBACK_MS = 250;
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+type CleanupFn = () => void;
 
 export interface AppControllerOptions {
   fetchLatestBuildMetadata?: () => Promise<BuildMetadata | null>;
@@ -127,9 +128,9 @@ function registerUpdateMonitor(
   elements: ReturnType<typeof buildAppUi>,
   buildMetadata: BuildMetadata,
   options: AppControllerOptions
-): void {
+): CleanupFn {
   if (!shouldEnableUpdateChecks(buildMetadata)) {
-    return;
+    return () => {};
   }
 
   const fetchLatestBuildMetadata = options.fetchLatestBuildMetadata ?? fetchLatestBuildMetadataDefault;
@@ -138,9 +139,10 @@ function registerUpdateMonitor(
   let updatePromptShown = false;
   let updateCheckInFlight = false;
 
-  elements.reloadButton.addEventListener('click', () => {
+  const handleReloadClick = (): void => {
     reloadPage();
-  });
+  };
+  elements.reloadButton.addEventListener('click', handleReloadClick);
 
   async function checkForAppUpdate(): Promise<void> {
     if (updatePromptShown || updateCheckInFlight) {
@@ -158,26 +160,42 @@ function registerUpdateMonitor(
 
       updatePromptShown = true;
       showAppUpdateNotice(elements, latestBuild);
+    } catch {
+      // Treat network or injected implementation failures as "no update available".
+      return;
     } finally {
       updateCheckInFlight = false;
     }
   }
 
-  window.addEventListener('focus', () => {
+  const handleWindowFocus = (): void => {
     void checkForAppUpdate();
-  });
+  };
+  window.addEventListener('focus', handleWindowFocus);
 
-  document.addEventListener('visibilitychange', () => {
+  const handleVisibilityChange = (): void => {
     if (!document.hidden) {
       void checkForAppUpdate();
     }
-  });
+  };
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 
-  window.setInterval(() => {
+  const intervalHandle = window.setInterval(() => {
     if (!document.hidden) {
       void checkForAppUpdate();
     }
   }, updateCheckIntervalMs);
+  const maybeNodeTimer = intervalHandle as unknown as { unref?: () => void };
+  if (typeof maybeNodeTimer.unref === 'function') {
+    maybeNodeTimer.unref();
+  }
+
+  return () => {
+    elements.reloadButton.removeEventListener('click', handleReloadClick);
+    window.removeEventListener('focus', handleWindowFocus);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+    window.clearInterval(intervalHandle);
+  };
 }
 
 export function mountAppController(
@@ -185,13 +203,13 @@ export function mountAppController(
   gateway: LookupGateway,
   buildMetadata: BuildMetadata,
   options: AppControllerOptions = {}
-): void {
+): CleanupFn {
   const elements = buildAppUi(root, buildMetadata);
   let lookupState = createPrimaryState();
   applyStateUi(elements, lookupState);
-  registerUpdateMonitor(elements, buildMetadata, options);
+  const cleanupUpdateMonitor = registerUpdateMonitor(elements, buildMetadata, options);
 
-  elements.form.addEventListener('submit', async (event) => {
+  const handleSubmit = async (event: Event): Promise<void> => {
     event.preventDefault();
     blurActiveElement();
 
@@ -220,5 +238,12 @@ export function mountAppController(
       elements.submitButton.disabled = false;
       setIdleSubmitLabel(elements.submitButton, lookupState.stage);
     }
-  });
+  };
+
+  elements.form.addEventListener('submit', handleSubmit);
+
+  return () => {
+    cleanupUpdateMonitor();
+    elements.form.removeEventListener('submit', handleSubmit);
+  };
 }
