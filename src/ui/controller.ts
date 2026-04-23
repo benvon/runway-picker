@@ -7,10 +7,27 @@ import {
   type LookupResolution,
   type LookupState
 } from '../application/lookup/useCase';
-import { applyAlternateStageUi, applyPrimaryStageUi, buildAppUi, setBusySubmitLabel, setIdleSubmitLabel } from './layout';
+import { shouldEnableUpdateChecks, shouldPromptForAppUpdate } from '../application/updateMonitor';
+import type { BuildMetadata } from '../buildMetadata';
+import { fetchLatestBuildMetadata as fetchLatestBuildMetadataDefault } from '../services/versionManifest';
+import {
+  applyAlternateStageUi,
+  applyPrimaryStageUi,
+  buildAppUi,
+  setBusySubmitLabel,
+  setIdleSubmitLabel,
+  showAppUpdateNotice
+} from './layout';
 import { renderErrorTechnicalDetails, renderLookupPanels } from './presenter';
 
 const MIN_FEEDBACK_MS = 250;
+const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+export interface AppControllerOptions {
+  fetchLatestBuildMetadata?: () => Promise<BuildMetadata | null>;
+  reloadPage?: () => void;
+  updateCheckIntervalMs?: number;
+}
 
 interface SuccessfulLookupExecution {
   type: 'success';
@@ -106,10 +123,73 @@ function applyLookupExecution(elements: ReturnType<typeof buildAppUi>, result: L
   return result.state;
 }
 
-export function mountAppController(root: HTMLElement, gateway: LookupGateway, footerBuildId: string): void {
-  const elements = buildAppUi(root, footerBuildId);
+function registerUpdateMonitor(
+  elements: ReturnType<typeof buildAppUi>,
+  buildMetadata: BuildMetadata,
+  options: AppControllerOptions
+): void {
+  if (!shouldEnableUpdateChecks(buildMetadata)) {
+    return;
+  }
+
+  const fetchLatestBuildMetadata = options.fetchLatestBuildMetadata ?? fetchLatestBuildMetadataDefault;
+  const reloadPage = options.reloadPage ?? (() => window.location.reload());
+  const updateCheckIntervalMs = options.updateCheckIntervalMs ?? UPDATE_CHECK_INTERVAL_MS;
+  let updatePromptShown = false;
+  let updateCheckInFlight = false;
+
+  elements.reloadButton.addEventListener('click', () => {
+    reloadPage();
+  });
+
+  async function checkForAppUpdate(): Promise<void> {
+    if (updatePromptShown || updateCheckInFlight) {
+      return;
+    }
+
+    // Focus and visibility events can land close together; keep only one request active.
+    updateCheckInFlight = true;
+
+    try {
+      const latestBuild = await fetchLatestBuildMetadata();
+      if (!latestBuild || !shouldPromptForAppUpdate(buildMetadata, latestBuild)) {
+        return;
+      }
+
+      updatePromptShown = true;
+      showAppUpdateNotice(elements, latestBuild);
+    } finally {
+      updateCheckInFlight = false;
+    }
+  }
+
+  window.addEventListener('focus', () => {
+    void checkForAppUpdate();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      void checkForAppUpdate();
+    }
+  });
+
+  window.setInterval(() => {
+    if (!document.hidden) {
+      void checkForAppUpdate();
+    }
+  }, updateCheckIntervalMs);
+}
+
+export function mountAppController(
+  root: HTMLElement,
+  gateway: LookupGateway,
+  buildMetadata: BuildMetadata,
+  options: AppControllerOptions = {}
+): void {
+  const elements = buildAppUi(root, buildMetadata);
   let lookupState = createPrimaryState();
   applyStateUi(elements, lookupState);
+  registerUpdateMonitor(elements, buildMetadata, options);
 
   elements.form.addEventListener('submit', async (event) => {
     event.preventDefault();

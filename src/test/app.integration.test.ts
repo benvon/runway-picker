@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../app';
+import { createBuildMetadata } from '../buildMetadata';
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -86,6 +87,8 @@ describe('app integration', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it('calculates and renders best runway from primary airport + METAR lookup with details collapsed by default', async () => {
@@ -938,5 +941,138 @@ describe('app integration', () => {
     expect(root.textContent).toContain(`Raw METAR: ${maliciousMetar}`);
     expect(root.querySelector('script')).toBeNull();
     expect(root.querySelector('img[onerror]')).toBeNull();
+  });
+
+  it('does not show the update prompt when the fetched build matches the current release', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const updateCheck = vi.fn().mockResolvedValue(
+      createBuildMetadata({
+        version: 'v9.9.9',
+        commitSha: 'abcdef1234567890'
+      })
+    );
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root, {
+      fetchLatestBuildMetadata: updateCheck
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => updateCheck.mock.calls.length === 1);
+
+    const updateBanner = root.querySelector<HTMLElement>('.update-banner');
+    expect(updateBanner?.hidden).toBe(true);
+  });
+
+  it('shows the update prompt when a focus check detects a newer release', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const updateCheck = vi.fn().mockResolvedValue(
+      createBuildMetadata({
+        version: 'v9.9.10',
+        commitSha: '0123456789abcdef'
+      })
+    );
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root, {
+      fetchLatestBuildMetadata: updateCheck
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => (root.textContent?.includes('A new version of Runway Picker') ?? false));
+
+    expect(root.textContent).toContain('v9.9.10');
+    expect(root.textContent).toContain('Reload now');
+  });
+
+  it('shows the update prompt when the interval check detects a newer release', async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<main id="app"></main>';
+    const updateCheck = vi.fn().mockResolvedValue(
+      createBuildMetadata({
+        version: 'v9.9.10',
+        commitSha: '0123456789abcdef'
+      })
+    );
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root, {
+      fetchLatestBuildMetadata: updateCheck
+    });
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+    expect(updateCheck).toHaveBeenCalledTimes(1);
+    expect(root.textContent).toContain('A new version of Runway Picker');
+  });
+
+  it('reloads the page when the user accepts the update prompt', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const updateCheck = vi.fn().mockResolvedValue(
+      createBuildMetadata({
+        version: 'v9.9.10',
+        commitSha: '0123456789abcdef'
+      })
+    );
+    const reloadPage = vi.fn();
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root, {
+      fetchLatestBuildMetadata: updateCheck,
+      reloadPage
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => (root.textContent?.includes('Reload now') ?? false));
+
+    const reloadButton = root.querySelector<HTMLButtonElement>('.update-banner-button');
+    if (!reloadButton) {
+      throw new Error('Expected reload button in test.');
+    }
+
+    reloadButton.click();
+    expect(reloadPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the update prompt only once per session', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const updateCheck = vi.fn().mockResolvedValue(
+      createBuildMetadata({
+        version: 'v9.9.10',
+        commitSha: '0123456789abcdef'
+      })
+    );
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root, {
+      fetchLatestBuildMetadata: updateCheck
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => (root.textContent?.includes('A new version of Runway Picker') ?? false));
+
+    window.dispatchEvent(new Event('focus'));
+    expect(updateCheck).toHaveBeenCalledTimes(1);
+    expect(root.querySelectorAll('.update-banner').length).toBe(1);
   });
 });

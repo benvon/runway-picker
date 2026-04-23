@@ -1,8 +1,16 @@
-export interface BuildMetadata {
+export interface BuildIdentity {
   version: string;
   commitSha: string;
+}
+
+export interface BuildMetadata extends BuildIdentity {
   shortCommitSha: string;
   footerLabel: string;
+}
+
+export interface BuildMetadataInput {
+  version?: string;
+  commitSha?: string;
 }
 
 interface BuildMetadataEnv {
@@ -12,6 +20,7 @@ interface BuildMetadataEnv {
 
 const DEFAULT_VERSION = 'v0.0.0-dev';
 const DEFAULT_COMMIT_SHA = 'local';
+const STABLE_RELEASE_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 
 function normalizeVersion(value: string | undefined): string {
   const raw = value?.trim();
@@ -41,9 +50,9 @@ function normalizeCommitSha(value: string | undefined): string {
   return DEFAULT_COMMIT_SHA;
 }
 
-export function readBuildMetadata(env: BuildMetadataEnv = import.meta.env): BuildMetadata {
-  const version = normalizeVersion(env.VITE_APP_VERSION);
-  const commitSha = normalizeCommitSha(env.VITE_APP_COMMIT_SHA);
+export function createBuildMetadata(input: BuildMetadataInput): BuildMetadata {
+  const version = normalizeVersion(input.version);
+  const commitSha = normalizeCommitSha(input.commitSha);
   const shortCommitSha =
     commitSha === DEFAULT_COMMIT_SHA ? DEFAULT_COMMIT_SHA : commitSha.slice(0, 7);
 
@@ -53,4 +62,19 @@ export function readBuildMetadata(env: BuildMetadataEnv = import.meta.env): Buil
     shortCommitSha,
     footerLabel: `${version} (${shortCommitSha})`
   };
+}
+
+export function readBuildMetadata(env: BuildMetadataEnv = import.meta.env): BuildMetadata {
+  return createBuildMetadata({
+    version: env.VITE_APP_VERSION,
+    commitSha: env.VITE_APP_COMMIT_SHA
+  });
+}
+
+export function isStableReleaseVersion(version: string): boolean {
+  return STABLE_RELEASE_VERSION_PATTERN.test(version);
+}
+
+export function isStableReleaseBuild(build: Pick<BuildIdentity, 'version'>): boolean {
+  return isStableReleaseVersion(build.version);
 }

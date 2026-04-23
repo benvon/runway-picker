@@ -1,5 +1,6 @@
 import { appendChildren, createElement } from './dom';
 import type { LookupStage } from '../application/lookup/useCase';
+import type { BuildMetadata } from '../buildMetadata';
 
 export interface AppElements {
   form: HTMLFormElement;
@@ -11,6 +12,9 @@ export interface AppElements {
   submitButton: HTMLButtonElement;
   bestSpotlightNode: HTMLElement;
   resultsNode: HTMLElement;
+  updateBanner: HTMLElement;
+  updateBannerMessage: HTMLElement;
+  reloadButton: HTMLButtonElement;
 }
 
 export function setIdleSubmitLabel(submitButton: HTMLButtonElement, stage: LookupStage): void {
@@ -38,10 +42,36 @@ export function applyAlternateStageUi(elements: AppElements, primaryIcao: string
   elements.alternateHelp.textContent = `No METAR is currently available for ICAO ${primaryIcao}. Enter an alternate ICAO code for METAR data.`;
 }
 
-export function buildAppUi(root: HTMLElement, footerBuildId: string): AppElements {
+export function showAppUpdateNotice(elements: AppElements, latestBuild: BuildMetadata): void {
+  elements.updateBannerMessage.textContent = `A new version of Runway Picker (${latestBuild.version}) is available. Reload to update.`;
+  elements.updateBanner.hidden = false;
+}
+
+export function buildAppUi(root: HTMLElement, buildMetadata: BuildMetadata): AppElements {
   root.textContent = '';
 
   const appShell = createElement('div', { className: 'app-shell' });
+  const updateBanner = createElement('section', {
+    className: 'panel panel-accent update-banner',
+    attributes: {
+      'aria-label': 'Application update available',
+      'aria-live': 'polite'
+    }
+  });
+  updateBanner.hidden = true;
+
+  const updateBannerMessage = createElement('p', {
+    className: 'update-banner-message',
+    textContent: 'A new version of Runway Picker is available.'
+  });
+
+  const reloadButton = createElement('button', {
+    className: 'update-banner-button',
+    textContent: 'Reload now'
+  });
+  reloadButton.type = 'button';
+  appendChildren(updateBanner, [updateBannerMessage, reloadButton]);
+
   const header = createElement('header', { className: 'panel hero-panel' });
   header.appendChild(createElement('h1', { textContent: 'Runway Picker' }));
 
@@ -138,9 +168,9 @@ export function buildAppUi(root: HTMLElement, footerBuildId: string): AppElement
     className: 'app-footer',
     attributes: { 'aria-label': 'Build version' }
   });
-  footer.textContent = `Version ${footerBuildId}`;
+  footer.textContent = `Version ${buildMetadata.footerLabel}`;
 
-  appendChildren(appShell, [header, bestSpotlightNode, inputSection, resultsNode, footer]);
+  appendChildren(appShell, [updateBanner, header, bestSpotlightNode, inputSection, resultsNode, footer]);
   root.appendChild(appShell);
 
   return {
@@ -152,6 +182,9 @@ export function buildAppUi(root: HTMLElement, footerBuildId: string): AppElement
     errorNode,
     submitButton,
     bestSpotlightNode,
-    resultsNode
+    resultsNode,
+    updateBanner,
+    updateBannerMessage,
+    reloadButton
   };
 }
