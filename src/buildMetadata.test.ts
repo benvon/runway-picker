@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readBuildMetadata } from './buildMetadata';
+import { isStableReleaseBuild, isStableReleaseVersion, readBuildMetadata } from './buildMetadata';
 
 describe('buildMetadata', () => {
   it('normalizes version and short commit SHA for footer label', () => {
@@ -53,5 +53,16 @@ describe('buildMetadata', () => {
       shortCommitSha: 'local',
       footerLabel: 'v0.0.0-dev (local)'
     });
+  });
+
+  it('identifies stable release versions', () => {
+    expect(isStableReleaseVersion('v1.2.3')).toBe(true);
+    expect(isStableReleaseVersion('pr-42')).toBe(false);
+    expect(isStableReleaseVersion('v0.0.0-dev')).toBe(false);
+    expect(
+      isStableReleaseBuild({
+        version: 'v3.4.5'
+      })
+    ).toBe(true);
   });
 });

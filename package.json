@@ -6,7 +6,7 @@
   "description": "Simple web app to help you choose which runway to use.",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/postbuild-inline-css.mjs && node scripts/verify-build-artifacts.mjs",
+    "build": "vite build && node scripts/write-version-manifest.mjs && node scripts/postbuild-inline-css.mjs && node scripts/verify-build-artifacts.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",

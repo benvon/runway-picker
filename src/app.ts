@@ -1,13 +1,13 @@
 import { fetchAirportByIcao } from './services/airportApi';
 import { fetchMetarByIcao } from './services/metarApi';
 import { readBuildMetadata } from './buildMetadata';
-import { mountAppController } from './ui/controller';
+import { mountAppController, type AppControllerOptions } from './ui/controller';
 
-export function mountApp(root: HTMLElement): void {
+export function mountApp(root: HTMLElement, options: AppControllerOptions = {}): () => void {
   const buildMetadata = readBuildMetadata();
 
-  mountAppController(root, {
+  return mountAppController(root, {
     fetchAirportByIcao,
     fetchMetarByIcao
-  }, buildMetadata.footerLabel);
+  }, buildMetadata, options);
 }
