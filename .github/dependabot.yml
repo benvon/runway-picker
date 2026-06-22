@@ -13,6 +13,10 @@ updates:
     commit-message:
       prefix: chore(deps)
     groups:
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
       npm-all:
         patterns:
           - "*"
