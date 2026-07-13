@@ -36,15 +36,15 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.61.1",
-    "@types/node": "^26.0.1",
-    "@typescript-eslint/eslint-plugin": "^8.62.0",
+    "@types/node": "^26.1.1",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.56.1",
-    "@vitest/coverage-v8": "^4.1.9",
-    "eslint": "^10.6.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.7.0",
     "jsdom": "^29.1.1",
-    "typescript": "^6.0.3",
-    "vite": "^8.1.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4",
     "vitest": "^4.0.18",
-    "wrangler": "^4.105.0"
+    "wrangler": "^4.110.0"
   }
 }
