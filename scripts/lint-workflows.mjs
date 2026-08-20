@@ -102,7 +102,7 @@ for (const file of files) {
     }
 
     if (
-      !/\n  verify-preview:\n[\s\S]*?permissions:\n\s+contents: read[\s\S]*?persist-credentials: false/m.test(
+      !/\n\s{2}verify-preview:\n[\s\S]*?permissions:\n\s+contents: read[\s\S]*?persist-credentials: false/m.test(
         content
       )
     ) {
