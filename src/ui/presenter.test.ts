@@ -44,6 +44,19 @@ describe('lookup presentation safety', () => {
     expect(panels.bestRunway.textContent).not.toContain('Runway recommendation suppressed');
   });
 
+  it('shows unavailable METAR cache provenance without presenting it as a timestamp', () => {
+    const resolution = buildResolution({
+      allowed: false,
+      reasons: ['METAR_OBSERVATION_TIME_UNAVAILABLE'],
+      observationAgeMinutes: null
+    });
+    resolution.metar.cache.servedAt = null;
+
+    const panels = renderLookupPanels(resolution);
+    expect(panels.details.textContent).toContain('METAR cache served at: not provided');
+    expect(panels.details.textContent).not.toContain('METAR cache served at: null');
+  });
+
   it('shows the verified alternate METAR source and distance beside an allowed recommendation', () => {
     const resolution = buildResolution({ alternateDistanceNm: 12 });
     resolution.weatherSourceIcao = 'KLGA';

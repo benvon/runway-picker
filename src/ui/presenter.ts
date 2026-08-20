@@ -314,7 +314,7 @@ function renderTechnicalDetails(resolution: LookupResolution): HTMLElement {
     `METAR cache freshness: ${metar.cache.status} via ${metar.cache.source}`,
     `METAR cache age: ${metar.cache.ageSeconds}s (TTL ${metar.cache.ttlSeconds}s)`,
     `METAR cache fetched at: ${metar.cache.fetchedAt}`,
-    `METAR cache served at: ${metar.cache.servedAt}`,
+    `METAR cache served at: ${metar.cache.servedAt ?? 'not provided'}`,
     metar.cache.key ? `METAR cache key: ${metar.cache.key}` : 'METAR cache key: not provided',
     `Raw METAR: ${metar.metarRaw}`
   ];

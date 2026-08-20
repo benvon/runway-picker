@@ -172,6 +172,29 @@ describe('lookup use case', () => {
     });
   });
 
+  it('suppresses a recommendation when the worker cache provenance is unavailable', async () => {
+    const gateway = buildGateway();
+    const metar = await gateway.fetchMetarByIcao('KJFK');
+    const result = await runPrimaryLookup('KJFK', buildGateway({
+      fetchMetarByIcao: async () => ({
+        ...metar,
+        cache: {
+          ...metar.cache,
+          servedAt: null
+        }
+      })
+    }));
+    if (result.type !== 'success') {
+      throw new Error('Expected a successful lookup.');
+    }
+
+    expect(result.resolution.recommendation).toMatchObject({
+      allowed: false,
+      observationAgeMinutes: null,
+      reasons: ['METAR_OBSERVATION_TIME_UNAVAILABLE']
+    });
+  });
+
   it('returns alternate prompt when METAR is unavailable', async () => {
     const gateway = buildGateway({
       fetchMetarByIcao: async () => {

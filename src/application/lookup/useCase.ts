@@ -85,8 +85,8 @@ function isStaleMetarCache(status: MetarLookupResponse['cache']['status']): bool
   return status === 'stale_on_error' || status === 'stale_while_refresh';
 }
 
-function observationAgeMilliseconds(observedAt: string | null, servedAt: string): number | null {
-  if (!observedAt) {
+function observationAgeMilliseconds(observedAt: string | null, servedAt: string | null): number | null {
+  if (!observedAt || !servedAt) {
     return null;
   }
 
