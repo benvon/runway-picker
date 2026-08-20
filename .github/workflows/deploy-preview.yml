@@ -85,6 +85,7 @@ jobs:
       CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
       CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID: ${{ vars.CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID }}
       CLOUDFLARE_METAR_WORKER_NAME: ${{ vars.CLOUDFLARE_METAR_WORKER_NAME }}
+      PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -128,40 +129,9 @@ jobs:
           PREVIEW_WORKER_CONFIG="$preview_worker_config" \
           PREVIEW_PAGES_CONFIG="$preview_pages_config" \
           METAR_WORKER_NAME="$worker_name" \
+          PULL_REQUEST_NUMBER="$PULL_REQUEST_NUMBER" \
           METAR_CACHE_PREVIEW_NAMESPACE_ID="$CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID" \
-          node <<'EOF'
-          const fs = require('node:fs');
-
-          const workerConfig = JSON.parse(
-            fs.readFileSync('workers/metar-proxy/wrangler.jsonc', 'utf8')
-          );
-          workerConfig.env = workerConfig.env ?? {};
-          workerConfig.env.preview = workerConfig.env.preview ?? {};
-          workerConfig.env.preview.kv_namespaces = [
-            {
-              binding: 'METAR_CACHE',
-              id: process.env.METAR_CACHE_PREVIEW_NAMESPACE_ID
-            }
-          ];
-          fs.writeFileSync(
-            process.env.PREVIEW_WORKER_CONFIG,
-            `${JSON.stringify(workerConfig, null, 2)}\n`
-          );
-
-          const pagesConfig = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
-          pagesConfig.env = pagesConfig.env ?? {};
-          pagesConfig.env.preview = pagesConfig.env.preview ?? {};
-          pagesConfig.env.preview.services = [
-            {
-              binding: 'METAR_API',
-              service: `${process.env.METAR_WORKER_NAME}-preview`
-            }
-          ];
-          fs.writeFileSync(
-            process.env.PREVIEW_PAGES_CONFIG,
-            `${JSON.stringify(pagesConfig, null, 2)}\n`
-          );
-          EOF
+          node scripts/generate-preview-wrangler-config.mjs
 
           echo "preview_worker_config=$preview_worker_config" >> "$GITHUB_OUTPUT"
           echo "preview_pages_config=$preview_pages_config" >> "$GITHUB_OUTPUT"
