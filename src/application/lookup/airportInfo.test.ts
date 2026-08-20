@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { summarizeAirportFrequencies } from './airportInfo';
 import type { AirportFrequency, RunwayEnd } from '../../domain/types';
 
-function runway(id: string, headingDegMag: number): RunwayEnd {
-  return { id, headingDegMag, isClosed: false, lengthFt: 8000 };
+function runway(id: string, headingDegTrue: number): RunwayEnd {
+  return { id, headingDegTrue, isClosed: false, lengthFt: 8000 };
 }
 
 function frequency(type: string, description: string, frequencyMhz: string): AirportFrequency {

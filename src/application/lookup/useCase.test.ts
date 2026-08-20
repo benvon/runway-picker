@@ -19,7 +19,7 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
       countryCode: 'US',
       countryName: 'United States',
       elevationFt: null,
-      runwayEnds: [{ id: '18', headingDegMag: 180, isClosed: false, lengthFt: 8000 }],
+      runwayEnds: [{ id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 8000 }],
       frequencies: [],
       source: 'airportdb',
       fetchedAt: '2026-03-01T00:00:00.000Z',
@@ -41,6 +41,7 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
         raw: '18010KT',
         directionType: 'fixed',
         directionDegTrue: 180,
+        directionVariation: null,
         speedKt: 10,
         gustKt: null
       },

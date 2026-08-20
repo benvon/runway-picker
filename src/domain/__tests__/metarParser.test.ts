@@ -14,6 +14,11 @@ describe('metarParser', () => {
     });
   });
 
+  it('parses a fixed-wind directional-variation sector as true-referenced bounds', () => {
+    const parsed = parseWindInput('KJFK 021651Z 22012G20KT 180V260 10SM CLR 07/M01 A3012');
+    expect(parsed.wind.directionVariation).toEqual({ fromDegTrue: 180, toDegTrue: 260 });
+  });
+
   it('parses a standalone wind group', () => {
     const parsed = parseWindInput('18008KT');
     expect(parsed.wind).toMatchObject({
