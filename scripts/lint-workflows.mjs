@@ -100,6 +100,14 @@ for (const file of files) {
     if (/npx wrangler deploy/.test(content) || /AIRPORT_IO_TOKEN/.test(content)) {
       errors.push(`${filePath}: preview deployment must not deploy Worker code or access AirportDB credentials`);
     }
+
+    if (
+      !/\n  verify-preview:\n[\s\S]*?permissions:\n\s+contents: read[\s\S]*?persist-credentials: false/m.test(
+        content
+      )
+    ) {
+      errors.push(`${filePath}: preview E2E must run in a separate read-only job without persisted credentials`);
+    }
   }
 
   if (file === 'deploy-production.yml' || file === 'deploy-worker-production.yml') {

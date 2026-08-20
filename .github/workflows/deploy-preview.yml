@@ -19,6 +19,10 @@ jobs:
     # Configure this environment with required reviewers and a least-privilege
     # preview-only Cloudflare credential before enabling this workflow.
     environment: preview
+    outputs:
+      preview_url: ${{ steps.deploy.outputs.preview_deployment_url }}
+      pull_number: ${{ steps.pull-request.outputs.number }}
+      head_sha: ${{ steps.pull-request.outputs.headSha }}
     steps:
       - name: Resolve trusted pull request metadata
         id: pull-request
@@ -144,25 +148,6 @@ jobs:
           PREVIEW_URL: ${{ steps.deploy.outputs.preview_deployment_url }}
         run: node scripts/verify-preview-cache.mjs "$PREVIEW_URL"
 
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
-
-      - name: Run preview UI E2E tests
-        shell: bash
-        env:
-          PREVIEW_URL: ${{ steps.deploy.outputs.preview_deployment_url }}
-        run: npm run test:e2e
-
-      - name: Upload Playwright artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: preview-ui-artifacts-${{ github.run_id }}
-          if-no-files-found: ignore
-          path: |
-            playwright-report/
-            test-results/
-
       - name: Post or update PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
@@ -198,3 +183,33 @@ jobs:
                 body,
               });
             }
+
+  verify-preview:
+    needs: deploy-preview
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout pull request test suite without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.deploy-preview.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install pull request test dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run preview UI E2E tests without deployment credentials
+        shell: bash
+        env:
+          PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url }}
+        run: npm run test:e2e

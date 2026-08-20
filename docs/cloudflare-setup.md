@@ -99,6 +99,7 @@ Open local URL and verify:
   - waits for protected `preview` environment approval before it receives the least-privilege Pages credential
   - deploys Pages preview for the validated PR branch and commit
   - runs preview smoke tests against `/api/metar` to verify cache metadata contract and repeated-request cache reuse
+  - runs browser E2E tests in a separate read-only job that checks out the PR test suite without persisted credentials or deployment secrets
   - comments preview URL on the PR
 
 ## 8) Release flow
