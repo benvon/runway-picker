@@ -21,7 +21,7 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
       countryName: 'United States',
       elevationFt: null,
       coordinates: { latitudeDeg: 39.1, longitudeDeg: -94.6 },
-      runwayEnds: [{ id: '18', headingDegMag: 180, isClosed: false, lengthFt: 8000 }],
+      runwayEnds: [{ id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 8000 }],
       frequencies: [],
       source: 'airportdb',
       fetchedAt: '2026-03-01T00:00:00.000Z',
@@ -45,6 +45,7 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
         raw: '18010KT',
         directionType: 'fixed',
         directionDegTrue: 180,
+        directionVariation: null,
         speedKt: 10,
         gustKt: null
       },
@@ -87,7 +88,7 @@ describe('lookup use case', () => {
       fetchMetarByIcao: async (icao) => ({
         icao,
         metarRaw: `METAR ${icao} 010000Z 18010KT 10SM CLR 10/05 A3000`,
-        wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, speedKt: 10, gustKt: null },
+        wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, directionVariation: null, speedKt: 10, gustKt: null },
         source: 'aviationweather',
         fetchedAt: new Date().toISOString(),
         observedAt: new Date(Date.now() - 61 * 60_000).toISOString(),
@@ -115,7 +116,7 @@ describe('lookup use case', () => {
     const gateway = buildGateway({
       fetchMetarByIcao: async (icao) => ({
         icao, metarRaw: `METAR ${icao} 010000Z 18010KT 10SM CLR 10/05 A3000`,
-        wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, speedKt: 10, gustKt: null },
+        wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, directionVariation: null, speedKt: 10, gustKt: null },
         source: 'aviationweather', fetchedAt: servedAt, observedAt: new Date(Date.parse(servedAt) - 60 * 60_000).toISOString(),
         cache: { status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: servedAt, servedAt, ttlSeconds: 1800, key: `v1:metar:${icao}`, resource: 'metar' }
       })
@@ -248,7 +249,7 @@ describe('lookup use case', () => {
       },
       fetchMetarByIcao: async () => ({
         icao: 'PHNL', metarRaw: 'METAR PHNL 010000Z 18010KT 10SM CLR 10/05 A3000',
-        wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, speedKt: 10, gustKt: null },
+        wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, directionVariation: null, speedKt: 10, gustKt: null },
         source: 'aviationweather', fetchedAt: new Date().toISOString(), observedAt: new Date().toISOString(),
         cache: { status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: new Date().toISOString(), servedAt: new Date().toISOString(), ttlSeconds: 1800, key: 'v1:metar:PHNL', resource: 'metar' }
       })

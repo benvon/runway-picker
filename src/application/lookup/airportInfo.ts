@@ -54,7 +54,7 @@ function findRunwayHeading(runwayEnds: RunwayEnd[], runwayId: string | null): nu
 
   const matchingRunway = runwayEnds.find((runway) => runway.id === runwayId);
   if (matchingRunway) {
-    return matchingRunway.headingDegMag;
+    return matchingRunway.headingDegTrue;
   }
 
   const runwayNumber = Number.parseInt(runwayId.slice(0, 2), 10);
@@ -65,16 +65,16 @@ function findRunwayHeading(runwayEnds: RunwayEnd[], runwayId: string | null): nu
   return runwayNumber === 36 ? 360 : runwayNumber * 10;
 }
 
-function reciprocalHeading(headingDegMag: number): number {
-  return ((headingDegMag + 180 - 1) % 360) + 1;
+function reciprocalHeading(headingDegTrue: number): number {
+  return ((headingDegTrue + 180 - 1) % 360) + 1;
 }
 
-function toApproachDirection(headingDegMag: number | null): CardinalDirection | null {
-  if (!headingDegMag || headingDegMag < 1 || headingDegMag > 360) {
+function toApproachDirection(headingDegTrue: number | null): CardinalDirection | null {
+  if (headingDegTrue === null || headingDegTrue < 0 || headingDegTrue > 360) {
     return null;
   }
 
-  const inboundHeading = reciprocalHeading(headingDegMag);
+  const inboundHeading = reciprocalHeading(headingDegTrue === 0 ? 360 : headingDegTrue);
 
   if (inboundHeading >= 315 || inboundHeading < 45) {
     return 'north';

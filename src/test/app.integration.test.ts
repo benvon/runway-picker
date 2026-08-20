@@ -32,8 +32,8 @@ function airportPayload(icao: string) {
     elevationFt: 100,
     coordinates: { latitudeDeg: 41.9, longitudeDeg: -87.9 },
     runwayEnds: [
-      { id: '04', headingDegMag: 40, isClosed: false, lengthFt: 8000 },
-      { id: '22', headingDegMag: 220, isClosed: false, lengthFt: 8000 }
+      { id: '04', headingDegTrue: 40, isClosed: false, lengthFt: 8000 },
+      { id: '22', headingDegTrue: 220, isClosed: false, lengthFt: 8000 }
     ],
     frequencies: [
       { type: 'APP', description: 'CITY APPROACH', frequencyMhz: '120.4' },
@@ -63,6 +63,7 @@ function metarPayload(
   wind: {
     directionType: 'fixed' | 'variable';
     directionDegTrue: number | null;
+    directionVariation?: { fromDegTrue: number; toDegTrue: number } | null;
     speedKt: number;
     gustKt: number | null;
     raw: string;
@@ -186,6 +187,60 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Version v9.9.9 (abcdef1)');
   });
 
+  it('renders wind-sector component ranges and withholds a changing best-runway recommendation', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === '/api/airport?icao=KVAR') {
+          return Promise.resolve(
+            Response.json({
+              ...airportPayload('KVAR'),
+              runwayEnds: [
+                { id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 8000 },
+                { id: '27', headingDegTrue: 270, isClosed: false, lengthFt: 8000 }
+              ]
+            })
+          );
+        }
+        if (url === '/api/metar?icao=KVAR') {
+          return Promise.resolve(
+            Response.json(
+              metarPayload('KVAR', {
+                raw: '22015G25KT',
+                directionType: 'fixed',
+                directionDegTrue: 220,
+                directionVariation: { fromDegTrue: 180, toDegTrue: 260 },
+                speedKt: 15,
+                gustKt: 25
+              })
+            )
+          );
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      })
+    );
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+    mountApp(root);
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    icaoInput.value = 'KVAR';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => root.textContent?.includes('Not determinable') ?? false);
+
+    expect(root.textContent).toContain('Sector range: headwind 3 to 15 kt; crosswind 0 to 15 kt');
+    expect(root.textContent).toContain('no deterministic recommendation is shown');
+  });
+
   it('shows variable wind speed in results when direction is VRB', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -244,8 +299,8 @@ describe('app integration', () => {
           Response.json({
             ...airportPayload('KLEN'),
             runwayEnds: [
-              { id: '18L', headingDegMag: 180, isClosed: false, lengthFt: 7000 },
-              { id: '18R', headingDegMag: 180, isClosed: false, lengthFt: 9000 }
+              { id: '18L', headingDegTrue: 180, isClosed: false, lengthFt: 7000 },
+              { id: '18R', headingDegTrue: 180, isClosed: false, lengthFt: 9000 }
             ]
           })
         );
@@ -299,8 +354,8 @@ describe('app integration', () => {
           Response.json({
             ...airportPayload('KAPP'),
             runwayEnds: [
-              { id: '18', headingDegMag: 180, isClosed: false, lengthFt: 8000 },
-              { id: '36', headingDegMag: 360, isClosed: false, lengthFt: 8000 }
+              { id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 8000 },
+              { id: '36', headingDegTrue: 360, isClosed: false, lengthFt: 8000 }
             ],
             frequencies: [
               { type: 'A/D', description: 'NORTH APPROACH', frequencyMhz: '120.1' },
@@ -738,8 +793,8 @@ describe('app integration', () => {
           Response.json({
             ...airportPayload('KCLS'),
             runwayEnds: [
-              { id: '09', headingDegMag: 90, isClosed: true, lengthFt: 9000 },
-              { id: '27', headingDegMag: 270, isClosed: false, lengthFt: 9000 }
+              { id: '09', headingDegTrue: 90, isClosed: true, lengthFt: 9000 },
+              { id: '27', headingDegTrue: 270, isClosed: false, lengthFt: 9000 }
             ]
           })
         );

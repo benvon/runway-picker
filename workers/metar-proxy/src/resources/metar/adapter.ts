@@ -23,8 +23,14 @@ export interface MetarResourceWind {
   raw: string;
   directionType: 'fixed' | 'variable' | 'calm';
   directionDegTrue: number | null;
+  directionVariation: MetarWindDirectionVariation | null;
   speedKt: number;
   gustKt: number | null;
+}
+
+export interface MetarWindDirectionVariation {
+  fromDegTrue: number;
+  toDegTrue: number;
 }
 
 export type MetarWorkerErrorCode =
@@ -114,6 +120,7 @@ type MetarWindCandidate = {
   directionType: 'fixed' | 'variable' | 'calm';
   speedKt: number;
   directionDegTrue?: number | null;
+  directionVariation?: MetarWindDirectionVariation | null;
   gustKt?: number | null;
 };
 
@@ -130,6 +137,29 @@ function hasMetarWindShape(windCandidate: unknown): windCandidate is MetarWindCa
   );
 }
 
+function toDirectionVariation(value: unknown): MetarWindDirectionVariation | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Partial<MetarWindDirectionVariation>;
+  if (
+    typeof candidate.fromDegTrue !== 'number' ||
+    typeof candidate.toDegTrue !== 'number' ||
+    !Number.isInteger(candidate.fromDegTrue) ||
+    !Number.isInteger(candidate.toDegTrue) ||
+    candidate.fromDegTrue < 0 ||
+    candidate.fromDegTrue > 360 ||
+    candidate.toDegTrue < 0 ||
+    candidate.toDegTrue > 360 ||
+    candidate.fromDegTrue % 360 === candidate.toDegTrue % 360
+  ) {
+    return null;
+  }
+
+  return { fromDegTrue: candidate.fromDegTrue, toDegTrue: candidate.toDegTrue };
+}
+
 function toMetarWind(wind: MetarWindCandidate): MetarResourceWind {
   const directionDegTrue =
     wind.directionType === 'fixed' && typeof wind.directionDegTrue === 'number'
@@ -137,11 +167,13 @@ function toMetarWind(wind: MetarWindCandidate): MetarResourceWind {
       : null;
 
   const gustKt = typeof wind.gustKt === 'number' ? wind.gustKt : null;
+  const directionVariation = wind.directionType === 'fixed' ? toDirectionVariation(wind.directionVariation) : null;
 
   return {
     raw: wind.raw,
     directionType: wind.directionType,
     directionDegTrue,
+    directionVariation,
     speedKt: wind.speedKt,
     gustKt
   };
@@ -298,6 +330,7 @@ function calmWindFromRawToken(rawMetar: string | null): MetarResourceWind | null
     raw: '00000KT',
     directionType: 'calm',
     directionDegTrue: null,
+    directionVariation: null,
     speedKt: 0,
     gustKt: null
   };
@@ -308,10 +341,30 @@ function resolveGust(speedKt: number, gustField: unknown): number | null {
   return gustKtCandidate !== null && gustKtCandidate >= speedKt ? gustKtCandidate : null;
 }
 
+function parseDirectionVariation(rawMetar: string | null): MetarWindDirectionVariation | null {
+  const windMatch = rawMetar?.match(/\b(?:\d{3}\d{2,3}(?:G\d{2,3})?KT|VRB\d{2,3}(?:G\d{2,3})?KT|0000{1,2}KT)\b/);
+  if (!rawMetar || !windMatch) {
+    return null;
+  }
+
+  const variationMatch = rawMetar
+    .slice((windMatch.index ?? 0) + windMatch[0].length)
+    .match(/^\s+(\d{3})V(\d{3})(?=\s|$)/);
+  if (!variationMatch) {
+    return null;
+  }
+
+  return toDirectionVariation({
+    fromDegTrue: Number.parseInt(variationMatch[1], 10),
+    toDegTrue: Number.parseInt(variationMatch[2], 10)
+  });
+}
+
 function fixedOrVariableWind(
   directionField: unknown,
   speedKt: number,
-  gustKt: number | null
+  gustKt: number | null,
+  directionVariation: MetarWindDirectionVariation | null
 ): MetarResourceWind {
   const directionText = toStringValue(directionField)?.toUpperCase() ?? null;
   if (directionText === 'VRB') {
@@ -319,6 +372,7 @@ function fixedOrVariableWind(
       raw: formatWindRaw('variable', speedKt, gustKt, null),
       directionType: 'variable',
       directionDegTrue: null,
+      directionVariation: null,
       speedKt,
       gustKt
     };
@@ -330,6 +384,7 @@ function fixedOrVariableWind(
       raw: formatWindRaw('variable', speedKt, gustKt, null),
       directionType: 'variable',
       directionDegTrue: null,
+      directionVariation: null,
       speedKt,
       gustKt
     };
@@ -339,6 +394,7 @@ function fixedOrVariableWind(
     raw: formatWindRaw('fixed', speedKt, gustKt, directionDeg),
     directionType: 'fixed',
     directionDegTrue: directionDeg,
+    directionVariation,
     speedKt,
     gustKt
   };
@@ -367,12 +423,13 @@ function parseWind(report: Record<string, unknown>): MetarResourceWind | null {
       raw: formatWindRaw('calm', speedKt, null, null),
       directionType: 'calm',
       directionDegTrue: null,
+      directionVariation: null,
       speedKt,
       gustKt: null
     };
   }
 
-  return fixedOrVariableWind(directionField, speedKt, gustKt);
+  return fixedOrVariableWind(directionField, speedKt, gustKt, parseDirectionVariation(rawMetar));
 }
 
 function extractWindToken(rawMetar: string): string | null {
@@ -571,6 +628,20 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
     staleOnErrorSeconds: 7200,
     negativeCacheTtlSeconds: 180,
     policyVersion: 'metar-v1'
+  },
+  negativeCache: {
+    toEntry: (error) =>
+      error instanceof MetarWorkerError && error.status === 404 && error.code === 'ICAO_NOT_FOUND'
+        ? { status: 404, code: 'ICAO_NOT_FOUND' }
+        : null,
+    toError: (entry, input) => {
+      if (entry.status !== 404 || entry.code !== 'ICAO_NOT_FOUND') {
+        return null;
+      }
+
+      const icao = normalizeIcao(input.icao);
+      return new MetarWorkerError(`ICAO code ${icao} was not found. Check the code and try again.`, 404, 'ICAO_NOT_FOUND');
+    }
   },
   observability: (input, key) => ({
     labels: {

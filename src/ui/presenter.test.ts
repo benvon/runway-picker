@@ -9,12 +9,12 @@ function buildResolution(overrides?: Partial<LookupResolution['recommendation']>
     airport: {
       requestedIcao: 'KJFK', icao: 'KJFK', name: 'Test Airport', municipality: '', countryCode: 'US', countryName: 'United States',
       elevationFt: null, coordinates: { latitudeDeg: 40.6, longitudeDeg: -73.8 },
-      runwayEnds: [{ id: '18', headingDegMag: 180, isClosed: false, lengthFt: 8000 }], frequencies: [], source: 'airportdb', fetchedAt: now,
+      runwayEnds: [{ id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 8000 }], frequencies: [], source: 'airportdb', fetchedAt: now,
       cache: { status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: now, servedAt: now, ttlSeconds: 86400, key: 'v1:airport:KJFK', resource: 'airport' }
     },
     metar: {
       icao: 'KJFK', metarRaw: 'METAR KJFK 010000Z 18010KT 10SM CLR 10/05 A3000',
-      wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, speedKt: 10, gustKt: null },
+      wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, directionVariation: null, speedKt: 10, gustKt: null },
       source: 'aviationweather', fetchedAt: now, observedAt: now,
       cache: { status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: now, servedAt: now, ttlSeconds: 1800, key: 'v1:metar:KJFK', resource: 'metar' }
     },

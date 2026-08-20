@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { summarizeAirportFrequencies } from './airportInfo';
 import type { AirportFrequency, RunwayEnd } from '../../domain/types';
 
-function runway(id: string, headingDegMag: number): RunwayEnd {
-  return { id, headingDegMag, isClosed: false, lengthFt: 8000 };
+function runway(id: string, headingDegTrue: number): RunwayEnd {
+  return { id, headingDegTrue, isClosed: false, lengthFt: 8000 };
 }
 
 function frequency(type: string, description: string, frequencyMhz: string): AirportFrequency {
@@ -46,6 +46,19 @@ describe('airportInfo', () => {
     );
 
     expect(summary.approach).toBe('119.4 MHz');
+  });
+
+  it('treats a zero-degree true heading as north when selecting approach frequencies', () => {
+    const summary = summarizeAirportFrequencies(
+      [runway('36', 0)],
+      [
+        frequency('APP', 'NORTH APPROACH', '119.4'),
+        frequency('APP', 'SOUTH APPROACH', '121.2')
+      ],
+      '36'
+    );
+
+    expect(summary.approach).toBe('121.2 MHz');
   });
 
   it('falls back to all approach frequencies when approach sectors are not direction-split', () => {

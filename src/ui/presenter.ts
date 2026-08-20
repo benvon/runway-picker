@@ -3,6 +3,7 @@ import type {
   EvaluationResult,
   ParsedWind,
   RunwayWindComponent,
+  RunwayWindComponentRange,
   RunwayWindComponentValue
 } from '../domain/types';
 import { summarizeAirportFrequencies } from '../application/lookup/airportInfo';
@@ -28,6 +29,10 @@ function formatCrosswindValue(component: RunwayWindComponentValue): string {
   }
 
   return `Crosswind ${component.crosswindKt} kt (${component.crosswindFrom})`;
+}
+
+function formatComponentRange(range: RunwayWindComponentRange): string {
+  return `Sector range: headwind ${range.minimumHeadwindKt} to ${range.maximumHeadwindKt} kt; crosswind ${range.minimumCrosswindKt} to ${range.maximumCrosswindKt} kt`;
 }
 
 function formatBestHeadwindSummary(
@@ -205,12 +210,16 @@ function formatRunwayCell(
   const sustained = runway.isClosed
     ? 'Closed runway'
     : runway.sustained
-      ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}`
+      ? `${formatHeadingValue(runway.sustained.headwindKt)} | ${formatCrosswindValue(runway.sustained)}${
+          runway.sustainedRange ? ` | ${formatComponentRange(runway.sustainedRange)}` : ''
+        }`
       : labels.sustained;
   const gust = runway.isClosed
     ? 'Closed runway'
     : runway.gust
-      ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}`
+      ? `${formatHeadingValue(runway.gust.headwindKt)} | ${formatCrosswindValue(runway.gust)}${
+          runway.gustRange ? ` | ${formatComponentRange(runway.gustRange)}` : ''
+        }`
       : labels.gust;
   const notes = runway.notes.length ? runway.notes.join(' ') : 'None';
   return { sustained, gust, notes };
@@ -260,6 +269,7 @@ function toParsedWindFromLookup(resolution: LookupResolution): ParsedWind {
     raw: resolution.metar.wind.raw,
     directionType: resolution.metar.wind.directionType,
     directionDegTrue: resolution.metar.wind.directionDegTrue,
+    directionVariation: resolution.metar.wind.directionVariation,
     speedKt: resolution.metar.wind.speedKt,
     gustKt: resolution.metar.wind.gustKt,
     source: 'metar_api'
