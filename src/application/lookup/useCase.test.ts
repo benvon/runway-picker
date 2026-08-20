@@ -36,6 +36,10 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
         resource: 'airport'
       }
     }),
+    fetchAirportCoordinatesByIcao: async (icao) => ({
+      icao,
+      coordinates: { latitudeDeg: 39.1, longitudeDeg: -94.6 }
+    }),
     fetchMetarByIcao: async (icao) => {
       const servedAt = new Date().toISOString();
       return {
@@ -249,6 +253,38 @@ describe('lookup use case', () => {
     expect(alternate.resolution.recommendation.allowed).toBe(true);
   });
 
+  it('uses a coordinate-only alternate lookup when the weather station has no runway data', async () => {
+    const primaryGateway = buildGateway({
+      fetchMetarByIcao: async () => {
+        throw new MetarLookupError('No METAR available.', 404, undefined, 'METAR_UNAVAILABLE');
+      }
+    });
+    const primary = await runPrimaryLookup('KJFK', primaryGateway);
+    if (primary.type !== 'prompt-alternate') {
+      throw new Error('Expected alternate prompt state.');
+    }
+
+    const alternate = await runAlternateLookup(primary.state, 'KLOC', buildGateway({
+      fetchAirportByIcao: async (icao) => {
+        if (icao === 'KLOC') {
+          throw new AirportLookupError('No runway data.', 404, 'RUNWAY_DATA_UNAVAILABLE');
+        }
+        return buildGateway().fetchAirportByIcao(icao);
+      },
+      fetchAirportCoordinatesByIcao: async () => ({
+        icao: 'KLOC',
+        coordinates: { latitudeDeg: 39.2, longitudeDeg: -94.7 }
+      }),
+      fetchMetarByIcao: async () => ({
+        ...(await buildGateway().fetchMetarByIcao('KLOC')),
+        icao: 'KLOC'
+      })
+    }));
+
+    expect(alternate.resolution.recommendation.allowed).toBe(true);
+    expect(alternate.resolution.recommendation.alternateDistanceNm).not.toBeNull();
+  });
+
   it('suppresses an alternate-station recommendation beyond the proximity limit', async () => {
     const primary = await runPrimaryLookup(
       'KJFK',
@@ -263,13 +299,10 @@ describe('lookup use case', () => {
     }
 
     const gateway = buildGateway({
-      fetchAirportByIcao: async (icao) => {
-        const airport = await buildGateway().fetchAirportByIcao(icao);
-        return {
-          ...airport,
-          coordinates: icao === 'PHNL' ? { latitudeDeg: 21.3, longitudeDeg: -157.9 } : { latitudeDeg: 40.6, longitudeDeg: -73.8 }
-        };
-      },
+      fetchAirportCoordinatesByIcao: async (icao) => ({
+        icao,
+        coordinates: icao === 'PHNL' ? { latitudeDeg: 21.3, longitudeDeg: -157.9 } : { latitudeDeg: 40.6, longitudeDeg: -73.8 }
+      }),
       fetchMetarByIcao: async () => ({
         icao: 'PHNL', metarRaw: 'METAR PHNL 010000Z 18010KT 10SM CLR 10/05 A3000',
         wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, directionVariation: null, speedKt: 10, gustKt: null },
@@ -294,7 +327,9 @@ describe('lookup use case', () => {
     }
 
     const alternate = await runAlternateLookup(primary.state, 'KLGA', buildGateway({
-      fetchAirportByIcao: async () => { throw new AirportLookupError('station unavailable', 502, 'PROVIDER_ERROR'); }
+      fetchAirportCoordinatesByIcao: async () => {
+        throw new AirportLookupError('station unavailable', 502, 'PROVIDER_ERROR');
+      }
     }));
     expect(alternate.resolution.recommendation.reasons).toContain('ALTERNATE_STATION_LOCATION_UNAVAILABLE');
   });

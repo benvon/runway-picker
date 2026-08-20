@@ -384,6 +384,27 @@ describe('resource adapters', () => {
     ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
   });
 
+  it('returns coordinates without runway data for a coordinate-only lookup', async () => {
+    const validated = await airportResourceAdapter.validate(
+      {
+        ident: 'KLOC',
+        latitude_deg: '41.8781',
+        longitude_deg: '-87.6298',
+        runways: []
+      },
+      { icao: 'KLOC', requireRunwayData: false },
+      {
+        request: new Request('https://example.com'),
+        env: { METAR_CACHE: { get: async () => null, put: async () => {} }, AIRPORTDB_API_TOKEN: 'token' }
+      }
+    );
+
+    expect(validated.coordinates).toEqual({ latitudeDeg: 41.8781, longitudeDeg: -87.6298 });
+    expect(validated.runwayEnds).toEqual([]);
+    expect(airportResourceAdapter.normalizeKey({ icao: 'kloc' })).toBe('KLOC');
+    expect(airportResourceAdapter.normalizeKey({ icao: 'kloc', requireRunwayData: false })).toBe('KLOC:location');
+  });
+
   it('rejects an incomplete reciprocal runway pair instead of evaluating only one end', async () => {
     expect(() =>
       airportResourceAdapter.validate(

@@ -46,6 +46,11 @@ export interface AirportCoordinates {
   longitudeDeg: number;
 }
 
+export interface AirportCoordinateLookupResponse {
+  icao: string;
+  coordinates: AirportCoordinates | null;
+}
+
 export type AirportLookupErrorCode =
   | 'INVALID_ICAO'
   | 'RATE_LIMITED'
@@ -282,5 +287,34 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
     source: payload.source,
     fetchedAt: payload.fetchedAt,
     cache: normalizeCacheMetadataValue(payload.cache, response.headers, payload.fetchedAt)
+  };
+}
+
+export async function fetchAirportCoordinatesByIcao(icaoInput: string): Promise<AirportCoordinateLookupResponse> {
+  const icao = normalizeIcaoInput(icaoInput);
+  if (!/^[A-Z0-9]{4}$/.test(icao)) {
+    throw new AirportLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400, 'INVALID_ICAO');
+  }
+
+  const response = await fetch(`/api/airport?icao=${encodeURIComponent(icao)}&view=coordinates`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    return throwAirportLookupError(response, icao);
+  }
+
+  const payload = (await response.json()) as { icao?: unknown; coordinates?: unknown };
+  if (typeof payload.icao !== 'string') {
+    throw new AirportLookupError('Airport location response is missing an ICAO code.', 502, 'UNEXPECTED');
+  }
+
+  return {
+    icao: payload.icao,
+    coordinates: normalizeCoordinates(payload.coordinates)
   };
 }

@@ -84,6 +84,23 @@ describe('pages airport proxy', () => {
     expect((proxiedRequest as Request).headers.get('X-Request-Id')).toEqual(expect.any(String));
   });
 
+  it('forwards the coordinate-only view to the Worker', async () => {
+    const fetch = vi.fn().mockResolvedValue(Response.json({ icao: 'KLOC', coordinates: { latitudeDeg: 41.8, longitudeDeg: -87.6 } }));
+
+    const response = await onRequestGet({
+      request: new Request('https://example.com/api/airport?icao=KLOC&view=coordinates'),
+      env: { METAR_API: { fetch } },
+      params: {},
+      data: {},
+      waitUntil: () => {},
+      next: async () => new Response('')
+    });
+
+    expect(response.status).toBe(200);
+    const proxiedRequest = fetch.mock.calls[0]?.[0] as Request;
+    expect(new URL(proxiedRequest.url).searchParams.get('view')).toBe('coordinates');
+  });
+
   it('returns INVALID_ICAO for malformed input before proxying', async () => {
     const fetch = vi.fn();
 
@@ -103,6 +120,23 @@ describe('pages airport proxy', () => {
       code: 'INVALID_ICAO',
       requestId: expect.any(String)
     });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported airport lookup view before proxying', async () => {
+    const fetch = vi.fn();
+
+    const response = await onRequestGet({
+      request: new Request('https://example.com/api/airport?icao=KMCI&view=runways'),
+      env: { METAR_API: { fetch } },
+      params: {},
+      data: {},
+      waitUntil: () => {},
+      next: async () => new Response('')
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ code: 'INVALID_REQUEST' });
     expect(fetch).not.toHaveBeenCalled();
   });
 });

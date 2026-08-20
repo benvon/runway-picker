@@ -1,4 +1,8 @@
-import { AirportLookupError, type AirportLookupResponse } from '../../services/airportApi';
+import {
+  AirportLookupError,
+  type AirportCoordinateLookupResponse,
+  type AirportLookupResponse
+} from '../../services/airportApi';
 import { MetarLookupError, type MetarLookupResponse } from '../../services/metarApi';
 
 export type LookupStage = 'primary' | 'alternate-metar';
@@ -36,6 +40,7 @@ export interface LookupState {
 
 export interface LookupGateway {
   fetchAirportByIcao(icao: string): Promise<AirportLookupResponse>;
+  fetchAirportCoordinatesByIcao(icao: string): Promise<AirportCoordinateLookupResponse>;
   fetchMetarByIcao(icao: string): Promise<MetarLookupResponse>;
 }
 
@@ -101,7 +106,7 @@ function observationAgeMilliseconds(observedAt: string | null, servedAt: string 
 
 function distanceNm(
   primary: AirportLookupResponse,
-  alternate: AirportLookupResponse | null
+  alternate: AirportCoordinateLookupResponse | null
 ): number | null {
   if (!primary.coordinates || !alternate?.coordinates) {
     return null;
@@ -123,7 +128,7 @@ function distanceNm(
 export function assessRecommendationEligibility(
   airport: AirportLookupResponse,
   metar: MetarLookupResponse,
-  weatherStation: AirportLookupResponse | null
+  weatherStation: AirportCoordinateLookupResponse | null
 ): RecommendationEligibility {
   const reasons: RecommendationBlockReason[] = [];
   const ageMs = observationAgeMilliseconds(metar.observedAt, metar.cache.servedAt);
@@ -156,7 +161,7 @@ export function assessRecommendationEligibility(
 function buildResolution(
   airport: AirportLookupResponse,
   metar: MetarLookupResponse,
-  weatherStation: AirportLookupResponse | null = airport
+  weatherStation: AirportCoordinateLookupResponse | null = airport
 ): LookupResolution {
   return {
     airport,
@@ -214,9 +219,9 @@ export async function runAlternateLookup(
   }
 
   const metar = await gateway.fetchMetarByIcao(alternateIcao);
-  let weatherStation: AirportLookupResponse | null = null;
+  let weatherStation: AirportCoordinateLookupResponse | null = null;
   try {
-    weatherStation = await gateway.fetchAirportByIcao(metar.icao);
+    weatherStation = await gateway.fetchAirportCoordinatesByIcao(metar.icao);
   } catch {
     // A missing station location must suppress the recommendation, not hide the METAR calculation.
   }

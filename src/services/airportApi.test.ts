@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchAirportByIcao } from './airportApi';
+import { fetchAirportByIcao, fetchAirportCoordinatesByIcao } from './airportApi';
 
 describe('airportApi service', () => {
   afterEach(() => {
@@ -190,6 +190,28 @@ describe('airportApi service', () => {
     await expect(fetchAirportByIcao('kmci')).rejects.toMatchObject({
       message: 'Airport response is missing runway data.',
       status: 502
+    });
+  });
+
+  it('loads coordinates without requiring runway data', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json({
+          icao: 'KLOC',
+          coordinates: { latitudeDeg: 41.8781, longitudeDeg: -87.6298 }
+        })
+      )
+    );
+
+    await expect(fetchAirportCoordinatesByIcao('kloc')).resolves.toEqual({
+      icao: 'KLOC',
+      coordinates: { latitudeDeg: 41.8781, longitudeDeg: -87.6298 }
+    });
+    expect(fetch).toHaveBeenCalledWith('/api/airport?icao=KLOC&view=coordinates', {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' }
     });
   });
 
