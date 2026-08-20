@@ -489,6 +489,47 @@ describe('cache engine', () => {
     ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
   });
 
+  it('preserves a KV stable miss when the edge-cache refill fails', async () => {
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn(),
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const fetchedAt = new Date().toISOString();
+    kv.seed('v1:demo:missing', {
+      schemaVersion: 2,
+      resource: 'demo',
+      key: 'v1:demo:missing',
+      negative: { status: 404, code: 'DEMO_NOT_FOUND' },
+      cacheMeta: {
+        fetchedAt,
+        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        policyVersion: 'demo-v1',
+        source: 'upstream'
+      }
+    });
+    const edge: EdgeCacheLike = {
+      match: async () => undefined,
+      put: async () => {
+        throw new Error('edge unavailable');
+      }
+    };
+
+    await expect(
+      getOrRefreshCached({
+        adapter,
+        input: { key: 'missing' },
+        request: new Request('https://example.com'),
+        env: { METAR_CACHE: kv },
+        edgeCache: edge
+      })
+    ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
+  });
+
   it('does not cache errors an adapter has not explicitly declared stable', async () => {
     const fetchUpstream = vi.fn().mockRejectedValue(new Error('provider unavailable'));
     const adapter = buildAdapter({

@@ -534,7 +534,9 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
 
   await throwIfFreshNegative(kvRecords.negative, now, async () => {
     if (kvRecords.negative) {
-      await writeEdgeEnvelope(edgeCache, cacheKey, kvRecords.negative.envelope, adapter.policy.negativeCacheTtlSeconds);
+      await Promise.allSettled([
+        writeEdgeEnvelope(edgeCache, cacheKey, kvRecords.negative.envelope, adapter.policy.negativeCacheTtlSeconds)
+      ]);
     }
   });
 
