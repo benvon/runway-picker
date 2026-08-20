@@ -30,6 +30,25 @@ export interface CacheEnvelope<TData> {
   cacheMeta: CacheEnvelopeMeta;
 }
 
+/** A stable adapter-approved 404 that may be retained briefly. */
+export interface StableNegativeCacheEntry {
+  status: 404;
+  code: string;
+}
+
+export interface NegativeCacheEnvelope {
+  schemaVersion: number;
+  resource: string;
+  key: string;
+  negative: StableNegativeCacheEntry;
+  cacheMeta: CacheEnvelopeMeta;
+}
+
+export interface NegativeCachePolicy<TInput> {
+  toEntry: (error: unknown) => StableNegativeCacheEntry | null;
+  toError: (entry: StableNegativeCacheEntry, input: TInput) => Error | null;
+}
+
 export interface CacheObservability {
   labels: Record<string, string>;
 }
@@ -48,6 +67,7 @@ export interface CacheResourceAdapter<TInput, TUpstream, TData> {
   serialize: (data: TData, key: string, resource: string, upstream?: TUpstream) => CacheEnvelope<TData>;
   deserialize: (cached: unknown) => TData | null;
   policy: CachePolicy;
+  negativeCache?: NegativeCachePolicy<TInput>;
   observability: (input: TInput, key: string) => CacheObservability;
 }
 

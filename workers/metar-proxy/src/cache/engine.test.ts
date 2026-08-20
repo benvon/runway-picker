@@ -6,7 +6,8 @@ import type {
   CacheResourceAdapter,
   DurableObjectNamespaceLike,
   EdgeCacheLike,
-  KvNamespaceLike
+  KvNamespaceLike,
+  NegativeCachePolicy
 } from './types';
 
 interface DemoInput {
@@ -18,19 +19,35 @@ interface DemoData {
   fetchedAt: string;
 }
 
+class DemoStableMissError extends Error {
+  status = 404 as const;
+  code = 'DEMO_NOT_FOUND';
+
+  constructor() {
+    super('Demo resource was not found.');
+    this.name = 'DemoStableMissError';
+  }
+}
+
 class MemoryKv implements KvNamespaceLike {
   private values = new Map<string, unknown>();
+  private writeOptions = new Map<string, { expirationTtl?: number } | undefined>();
 
   async get(key: string): Promise<unknown> {
     return this.values.get(key) ?? null;
   }
 
-  async put(key: string, value: string): Promise<void> {
+  async put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
     this.values.set(key, JSON.parse(value) as unknown);
+    this.writeOptions.set(key, options);
   }
 
   seed(key: string, value: unknown): void {
     this.values.set(key, value);
+  }
+
+  getWriteOptions(key: string): { expirationTtl?: number } | undefined {
+    return this.writeOptions.get(key);
   }
 }
 
@@ -110,6 +127,7 @@ function buildAdapter(overrides?: {
   ttlSeconds?: number;
   staleWhileRevalidateSeconds?: number;
   staleOnErrorSeconds?: number;
+  negativeCache?: NegativeCachePolicy<DemoInput>;
 }): CacheResourceAdapter<DemoInput, string, DemoData> {
   return {
     resource: 'demo',
@@ -169,6 +187,7 @@ function buildAdapter(overrides?: {
       negativeCacheTtlSeconds: 5,
       policyVersion: 'demo-v1'
     },
+    negativeCache: overrides?.negativeCache,
     observability: (input, key) => ({
       labels: {
         resource: 'demo',
@@ -364,6 +383,55 @@ describe('cache engine', () => {
     expect(first.payload.value).toBe('fresh-value');
     expect(second.payload.value).toBe('fresh-value');
     expect([first.cache.status, second.cache.status].sort()).toEqual(['kv_hit', 'upstream_refresh']);
+  });
+
+  it('caches adapter-declared stable misses and avoids repeated upstream requests', async () => {
+    const fetchUpstream = vi.fn().mockRejectedValue(new DemoStableMissError());
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+    const request = new Request('https://example.com');
+
+    await expect(
+      getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env: { METAR_CACHE: kv }, edgeCache: edge })
+    ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
+    await expect(
+      getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env: { METAR_CACHE: kv }, edgeCache: edge })
+    ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
+
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
+    expect(kv.getWriteOptions('v1:demo:alpha')).toEqual({ expirationTtl: 5 });
+  });
+
+  it('does not cache errors an adapter has not explicitly declared stable', async () => {
+    const fetchUpstream = vi.fn().mockRejectedValue(new Error('provider unavailable'));
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const request = new Request('https://example.com');
+
+    await expect(
+      getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env: { METAR_CACHE: kv } })
+    ).rejects.toThrow('provider unavailable');
+    await expect(
+      getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env: { METAR_CACHE: kv } })
+    ).rejects.toThrow('provider unavailable');
+
+    expect(fetchUpstream).toHaveBeenCalledTimes(2);
+    expect(kv.getWriteOptions('v1:demo:alpha')).toBeUndefined();
   });
 
   it('serves stale data on upstream error when stale-on-error window is valid', async () => {
