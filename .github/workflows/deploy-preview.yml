@@ -1,95 +1,59 @@
 name: Deploy Preview
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 permissions:
-  checks: read
+  actions: read
   contents: read
   pull-requests: write
 
 jobs:
-  wait-for-ci:
-    if: github.event.pull_request.head.repo.fork == false && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)
+  deploy-preview:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
+    # Configure this environment with required reviewers and a least-privilege
+    # preview-only Cloudflare credential before enabling this workflow.
+    environment: preview
     steps:
-      - name: Wait for CI validate check to pass
+      - name: Resolve trusted pull request metadata
+        id: pull-request
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         with:
           script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const ref = context.payload.pull_request.head.sha;
-            const targetCheckGroups = [
-              ['validate', 'CI / validate'],
-              ['security', 'CI / security'],
-              ['codeql', 'CI / codeql', 'codeql (javascript-typescript)', 'CI / codeql (javascript-typescript)']
-            ];
-            const maxAttempts = 40;
-            const delayMs = 15000;
-
-            function sleep(ms) {
-              return new Promise((resolve) => setTimeout(resolve, ms));
+            const pullRequests = context.payload.workflow_run.pull_requests;
+            if (pullRequests.length !== 1) {
+              core.setFailed('Expected the completed CI run to be associated with exactly one pull request.');
+              return;
             }
 
-            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-              const { data } = await github.rest.checks.listForRef({
-                owner,
-                repo,
-                ref,
-                per_page: 100,
-              });
+            const pullRequest = pullRequests[0];
+            const { data } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullRequest.number
+            });
 
-              let allChecksSuccessful = true;
-
-              for (const aliases of targetCheckGroups) {
-                const checkRun = data.check_runs.find((run) => aliases.includes(run.name));
-                if (!checkRun || checkRun.status !== 'completed') {
-                  allChecksSuccessful = false;
-                  break;
-                }
-
-                if (checkRun.conclusion !== 'success') {
-                  core.setFailed(
-                    `Required check '${checkRun.name}' completed with conclusion '${checkRun.conclusion}' for ${ref}.`
-                  );
-                  return;
-                }
-              }
-
-              if (allChecksSuccessful) {
-                core.info(`All required CI checks succeeded for ${ref}.`);
-                return;
-              }
-
-              core.info(
-                `Attempt ${attempt}/${maxAttempts}: required CI checks not completed yet for ${ref}.`
-              );
-              await sleep(delayMs);
+            if (
+              data.base.ref !== 'main' ||
+              data.head.repo?.fork ||
+              ['dependabot[bot]', 'renovate[bot]'].includes(data.user.login) ||
+              data.head.sha !== context.payload.workflow_run.head_sha
+            ) {
+              core.setFailed('The completed CI run is not an eligible same-repository pull request head.');
+              return;
             }
 
-            core.setFailed(
-              `Timed out waiting for required CI checks to complete for ${ref}.`
-            );
+            core.setOutput('number', String(data.number));
+            core.setOutput('headRef', data.head.ref);
+            core.setOutput('headSha', data.head.sha);
 
-  deploy-preview:
-    needs: wait-for-ci
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.head.repo.fork == false && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      AIRPORT_IO_TOKEN: ${{ secrets.AIRPORT_IO_TOKEN }}
-      CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
-      CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID: ${{ vars.CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID }}
-      CLOUDFLARE_METAR_WORKER_NAME: ${{ vars.CLOUDFLARE_METAR_WORKER_NAME }}
-    steps:
-      - name: Checkout
+      - name: Checkout trusted deployment tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -97,108 +61,59 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Validate Cloudflare configuration
+      - name: Install trusted deployment tooling
+        run: npm ci
+
+      - name: Download CI-built preview artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: preview-dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: dist
+
+      - name: Validate preview artifact
         shell: bash
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ] || [ -z "$CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID" ] || [ -z "$AIRPORT_IO_TOKEN" ]; then
-            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_PROJECT_NAME, CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID, and AIRPORT_IO_TOKEN."
+          if [ ! -f dist/index.html ]; then
+            echo 'Preview artifact is missing dist/index.html.'
             exit 1
           fi
 
-      - name: Install dependencies
-        run: npm ci
+          if find dist -type l -print -quit | grep -q .; then
+            echo 'Preview artifact must not contain symbolic links.'
+            exit 1
+          fi
 
-      - name: Test
-        run: npm run test
-
-      - name: Build
+      - name: Validate preview deployment configuration
+        shell: bash
         env:
-          VITE_APP_VERSION: pr-${{ github.event.pull_request.number }}
-          VITE_APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
-        run: npm run build
-
-      - name: Generate preview deployment Wrangler configs
-        id: preview-config
-        shell: bash
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
         run: |
-          worker_name="${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}"
-          preview_worker_config="workers/metar-proxy/wrangler.preview.generated.json"
-          preview_pages_config="wrangler.preview.generated.json"
-
-          PREVIEW_WORKER_CONFIG="$preview_worker_config" \
-          PREVIEW_PAGES_CONFIG="$preview_pages_config" \
-          METAR_WORKER_NAME="$worker_name" \
-          METAR_CACHE_PREVIEW_NAMESPACE_ID="$CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID" \
-          node <<'EOF'
-          const fs = require('node:fs');
-
-          const workerConfig = JSON.parse(
-            fs.readFileSync('workers/metar-proxy/wrangler.jsonc', 'utf8')
-          );
-          workerConfig.env = workerConfig.env ?? {};
-          workerConfig.env.preview = workerConfig.env.preview ?? {};
-          workerConfig.env.preview.kv_namespaces = [
-            {
-              binding: 'METAR_CACHE',
-              id: process.env.METAR_CACHE_PREVIEW_NAMESPACE_ID
-            }
-          ];
-          fs.writeFileSync(
-            process.env.PREVIEW_WORKER_CONFIG,
-            `${JSON.stringify(workerConfig, null, 2)}\n`
-          );
-
-          const pagesConfig = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
-          pagesConfig.env = pagesConfig.env ?? {};
-          pagesConfig.env.preview = pagesConfig.env.preview ?? {};
-          pagesConfig.env.preview.services = [
-            {
-              binding: 'METAR_API',
-              service: `${process.env.METAR_WORKER_NAME}-preview`
-            }
-          ];
-          fs.writeFileSync(
-            process.env.PREVIEW_PAGES_CONFIG,
-            `${JSON.stringify(pagesConfig, null, 2)}\n`
-          );
-          EOF
-
-          echo "preview_worker_config=$preview_worker_config" >> "$GITHUB_OUTPUT"
-          echo "preview_pages_config=$preview_pages_config" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy METAR Worker preview environment
-        shell: bash
-        run: |
-          printf '%s' "$AIRPORT_IO_TOKEN" | npx wrangler secret put AIRPORTDB_API_TOKEN --config "${{ steps.preview-config.outputs.preview_worker_config }}" --env preview
-
-          attempts=5
-          for attempt in $(seq 1 "$attempts"); do
-            if npx wrangler deploy --config "${{ steps.preview-config.outputs.preview_worker_config }}" --env preview; then
-              exit 0
-            fi
-
-            if [ "$attempt" -eq "$attempts" ]; then
-              echo "Worker preview deploy failed after $attempts attempts."
-              exit 1
-            fi
-
-            sleep_seconds=$((attempt * 10))
-            echo "Retrying worker preview deploy in ${sleep_seconds}s..."
-            sleep "$sleep_seconds"
-          done
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
+            echo 'Missing preview deployment configuration.'
+            exit 1
+          fi
 
       - name: Deploy preview to Cloudflare Pages
         id: deploy
         shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+          PR_HEAD_REF: ${{ steps.pull-request.outputs.headRef }}
+          PR_HEAD_SHA: ${{ steps.pull-request.outputs.headSha }}
         run: |
-          cp "${{ steps.preview-config.outputs.preview_pages_config }}" wrangler.jsonc
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
             set -o pipefail
             if npx wrangler pages deploy dist \
               --project-name "$CLOUDFLARE_PROJECT_NAME" \
-              --branch "${{ github.event.pull_request.head.ref }}" \
-              --commit-hash "${{ github.event.pull_request.head.sha }}" \
+              --branch "$PR_HEAD_REF" \
+              --commit-hash "$PR_HEAD_SHA" \
               | tee deploy-output.txt; then
               break
             fi
@@ -213,13 +128,10 @@ jobs:
             sleep "$sleep_seconds"
           done
 
-          # Wrangler prints the unique deployment URL first, then the branch alias.
-          # The branch alias can briefly return errors right after deploy; CI checks
-          # use the deployment URL so smoke/E2E hit the build we just uploaded.
           preview_deployment_url="$(grep -Eo 'https://[^ ]+\.pages\.dev[^ ]*' deploy-output.txt | head -n1)"
           preview_branch_url="$(grep -Eo 'https://[^ ]+\.pages\.dev[^ ]*' deploy-output.txt | tail -n1)"
           if [ -z "$preview_deployment_url" ]; then
-            echo "Could not extract preview URL from wrangler output."
+            echo 'Could not extract preview URL from wrangler output.'
             exit 1
           fi
 
@@ -230,8 +142,7 @@ jobs:
         shell: bash
         env:
           PREVIEW_URL: ${{ steps.deploy.outputs.preview_deployment_url }}
-        run: |
-          node scripts/verify-preview-cache.mjs "$PREVIEW_URL"
+        run: node scripts/verify-preview-cache.mjs "$PREVIEW_URL"
 
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
@@ -240,8 +151,7 @@ jobs:
         shell: bash
         env:
           PREVIEW_URL: ${{ steps.deploy.outputs.preview_deployment_url }}
-        run: |
-          npm run test:e2e
+        run: npm run test:e2e
 
       - name: Upload Playwright artifacts on failure
         if: failure()
@@ -257,14 +167,16 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           PREVIEW_URL: ${{ steps.deploy.outputs.preview_url }}
+          PULL_NUMBER: ${{ steps.pull-request.outputs.number }}
         with:
           script: |
             const marker = '<!-- runway-picker-preview -->';
             const body = `${marker}\nPreview deployment ready: ${process.env.PREVIEW_URL}`;
+            const issueNumber = Number.parseInt(process.env.PULL_NUMBER, 10);
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.issue.number,
+              issue_number: issueNumber,
             });
 
             const existing = comments.find((comment) =>
@@ -282,7 +194,7 @@ jobs:
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: context.issue.number,
+                issue_number: issueNumber,
                 body,
               });
             }

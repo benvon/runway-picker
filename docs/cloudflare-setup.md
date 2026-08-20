@@ -18,27 +18,20 @@ This guide matches the repository workflows and runtime shape.
 1. Create a KV namespace for shared METAR cache:
 ```bash
 npx wrangler kv namespace create METAR_CACHE
-npx wrangler kv namespace create METAR_CACHE --preview
 ```
 2. Copy the returned production ID into [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `kv_namespaces[].id`
-3. Keep `env.preview.kv_namespaces[]` binding-only in repo config (`{ "binding": "METAR_CACHE" }`).
-4. Ensure Durable Object bindings and migrations are present in [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
+3. Ensure Durable Object bindings and migrations are present in [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
    - `durable_objects.bindings[]` contains `CACHE_COORDINATOR -> CacheSingleFlightCoordinator`
    - `durable_objects.bindings[]` contains `API_RATE_LIMITER -> ApiRateLimiter`
    - `migrations[]` includes:
      - `new_sqlite_classes: ["CacheSingleFlightCoordinator"]`
      - `new_sqlite_classes: ["ApiRateLimiter"]`
-5. Save the preview KV namespace ID as GitHub variable `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (used by preview deploy workflow to generate runtime config).
-6. Deploy the worker:
+4. Deploy the worker:
 ```bash
 npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc
 ```
-7. Deploy the preview worker environment:
-```bash
-npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc --env preview
-```
-8. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
+5. Confirm the worker name is `runway-picker-metar-api` (matches Pages service binding in root `wrangler.jsonc`).
 
 Worker behavior:
 - Upstream source: `https://aviationweather.gov/api/data/metar`
@@ -53,7 +46,6 @@ Worker behavior:
 - Configure the AirportDB token in Worker secrets (never in client code):
 ```bash
 npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangler.jsonc
-npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangler.jsonc --env preview
 ```
 
 ## 4) Configure Wrangler
@@ -64,27 +56,24 @@ npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangle
   - strict static security headers via `public/_headers`
   - `services` binding:
     - `METAR_API` -> `runway-picker-metar-api`
-- Worker runtime env flags are configured in `workers/metar-proxy/wrangler.jsonc`:
-  - production: `APP_ENV=production`, `ENABLE_DEBUG_ERRORS=false`
-  - preview: `APP_ENV=preview`, `ENABLE_DEBUG_ERRORS=true`
-- Preview service binding is generated in CI as:
-  - `METAR_API` -> `${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}-preview`
+- Preview Pages deployments use the checked-in production service binding. Preview workflow artifacts contain only the static frontend; no pull-request Worker code or AirportDB token is deployed.
 
 ## 5) Create API token and account settings
 In Cloudflare:
 1. Create an API token with Pages edit/deploy permissions for the account/project.
 2. Copy account ID from Cloudflare dashboard.
 
-In GitHub repo settings:
-- Secrets:
+In GitHub environment settings:
+- Create a protected `preview` environment. Require reviewer approval and store a least-privilege `CLOUDFLARE_PREVIEW_API_TOKEN` scoped to Pages preview deployments, plus `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_PROJECT_NAME`.
+- Create a protected `production` environment. Require reviewer approval, restrict it to the protected `main` branch, and store the production deployment credentials.
+- Production environment secrets:
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
   - `AIRPORT_IO_TOKEN` (CI maps this into Worker secret key `AIRPORTDB_API_TOKEN`)
+- Repository secrets:
   - `RELEASE_AUTOMATION_TOKEN` (bot/App token with `contents:write` to publish GitHub Releases)
-- Variables:
+- Environment variables:
   - `CLOUDFLARE_PROJECT_NAME` (exact Pages project name)
-  - `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID` (preview KV namespace ID from `wrangler kv namespace create ... --preview`)
-  - Optional `CLOUDFLARE_METAR_WORKER_NAME` (defaults to `runway-picker-metar-api`)
 
 ## 6) Validate locally
 Run:
@@ -105,11 +94,11 @@ Open local URL and verify:
 - Open a PR to `main`.
 - `CI` workflow runs typecheck/lint/test/build.
 - `Deploy Preview` workflow:
-  - generates temporary preview wrangler configs from GitHub variables
-  - deploys Worker env `preview` with preview KV namespace ID from `CLOUDFLARE_METAR_CACHE_PREVIEW_NAMESPACE_ID`
-  - deploys Pages preview for the PR branch ref (`github.event.pull_request.head.ref`)
+  - is triggered only after the PR CI run succeeds and runs trusted workflow code from `main`
+  - downloads the CI-built `dist` artifact without checking out or executing PR code
+  - waits for protected `preview` environment approval before it receives the least-privilege Pages credential
+  - deploys Pages preview for the validated PR branch and commit
   - runs preview smoke tests against `/api/metar` to verify cache metadata contract and repeated-request cache reuse
-  - binds `METAR_API` to `${CLOUDFLARE_METAR_WORKER_NAME:-runway-picker-metar-api}-preview`
   - comments preview URL on the PR
 
 ## 8) Release flow
@@ -122,10 +111,8 @@ Open local URL and verify:
   - all other commit types => no release
   - publishes a GitHub Release using `RELEASE_AUTOMATION_TOKEN`
 - `.github/release.yml` defines the base structure for autogenerated GitHub release notes.
-- Published stable GitHub Releases trigger:
-  - `Deploy Production` (Pages app)
-  - `Deploy METAR Worker Production` (Worker API)
-- Release publication and production deployment are separate concerns: deployment failures are retried operationally without redefining the release artifact.
+- `Release Create` publishes the release, then invokes the Pages and Worker production deploy workflows with the release tag and exact CI-green `main` SHA. Both workflows validate that the tag resolves to that SHA and wait for protected `production` environment approval.
+- Release publication and production deployment remain separate concerns: a deployment failure is retried by re-running the protected release workflow jobs, without redefining the release artifact.
 
 ## 9) Branch protections (recommended)
 In GitHub branch protection for `main`:

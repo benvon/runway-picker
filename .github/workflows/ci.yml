@@ -43,6 +43,15 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Upload preview artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: preview-dist
+          if-no-files-found: error
+          path: dist/
+          retention-days: 1
+
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

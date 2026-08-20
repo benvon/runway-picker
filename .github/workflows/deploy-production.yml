@@ -1,45 +1,58 @@
 name: Deploy Production
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      release_sha:
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   deploy-production:
-    if: github.event.release.draft == false && github.event.release.prerelease == false
     runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+    # This environment must require approval and restrict deployments to main.
+    environment: production
     steps:
-      - name: Resolve release tag
-        id: release
+      - name: Validate trusted release inputs
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
-          tag="${{ github.event.release.tag_name }}"
-
-          if [ -z "$tag" ]; then
-            echo "Could not resolve release tag."
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vX.Y.Z. Got: $RELEASE_TAG"
             exit 1
           fi
 
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must match vX.Y.Z. Got: $tag"
+          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Release SHA must be a full lowercase Git commit SHA.'
             exit 1
           fi
 
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "tag_ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout released tag
+      - name: Checkout released main commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-          ref: ${{ steps.release.outputs.tag_ref }}
+          ref: ${{ inputs.release_sha }}
+
+      - name: Verify tag provenance
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then
+            echo 'Release tag does not resolve to the CI-gated main commit.'
+            exit 1
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -47,17 +60,15 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Capture release metadata
-        id: metadata
-        shell: bash
-        run: |
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Validate Cloudflare configuration
         shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
-            echo "Missing Cloudflare config. Set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_PROJECT_NAME."
+            echo 'Missing production deployment configuration.'
             exit 1
           fi
 
@@ -69,14 +80,17 @@ jobs:
 
       - name: Build
         env:
-          VITE_APP_VERSION: ${{ steps.release.outputs.tag }}
-          VITE_APP_COMMIT_SHA: ${{ steps.metadata.outputs.commit_sha }}
+          VITE_APP_VERSION: ${{ inputs.release_tag }}
+          VITE_APP_COMMIT_SHA: ${{ inputs.release_sha }}
         run: npm run build
 
       - name: Deploy production to Cloudflare Pages
         shell: bash
         env:
-          COMMIT_SHA: ${{ steps.metadata.outputs.commit_sha }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+          COMMIT_SHA: ${{ inputs.release_sha }}
         run: |
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
