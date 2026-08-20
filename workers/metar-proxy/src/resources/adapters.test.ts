@@ -370,6 +370,33 @@ describe('resource adapters', () => {
     ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
   });
 
+  it('rejects an incomplete reciprocal runway pair instead of evaluating only one end', async () => {
+    expect(() =>
+      airportResourceAdapter.validate(
+        {
+          ident: 'KINC',
+          runways: [
+            {
+              closed: '0',
+              le_ident: '09',
+              he_ident: '27',
+              le_heading_degT: 90,
+              length_ft: '5000'
+            }
+          ]
+        },
+        { icao: 'KINC' },
+        {
+          request: new Request('https://example.com'),
+          env: {
+            METAR_CACHE: { get: async () => null, put: async () => {} },
+            AIRPORTDB_API_TOKEN: 'token'
+          }
+        }
+      )
+    ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
+  });
+
   it('returns null for malformed cached airport and metar shapes', () => {
     expect(airportResourceAdapter.deserialize(null)).toBeNull();
     expect(airportResourceAdapter.deserialize({ data: { requestedIcao: 'KJFK' } })).toBeNull();

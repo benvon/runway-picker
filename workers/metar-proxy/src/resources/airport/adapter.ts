@@ -425,8 +425,14 @@ function collectRunwayEnds(payload: AirportDbPayload): AirportRunwayEnd[] {
     const runwayClosed = isRunwayClosed(runway.closed);
     const lengthFtCandidate = toIntegerValue(runway.length_ft);
     const lengthFt = lengthFtCandidate !== null && lengthFtCandidate > 0 ? lengthFtCandidate : null;
-    addRunwayCandidate(runwayMap, toRunwayEnd(runway.le_ident, runway.le_heading_degT, runwayClosed, lengthFt));
-    addRunwayCandidate(runwayMap, toRunwayEnd(runway.he_ident, runway.he_heading_degT, runwayClosed, lengthFt));
+    const lowEnd = toRunwayEnd(runway.le_ident, runway.le_heading_degT, runwayClosed, lengthFt);
+    const highEnd = toRunwayEnd(runway.he_ident, runway.he_heading_degT, runwayClosed, lengthFt);
+    if (!lowEnd || !highEnd) {
+      continue;
+    }
+
+    addRunwayCandidate(runwayMap, lowEnd);
+    addRunwayCandidate(runwayMap, highEnd);
   }
 
   return [...runwayMap.values()].sort((a, b) => a.id.localeCompare(b.id));
