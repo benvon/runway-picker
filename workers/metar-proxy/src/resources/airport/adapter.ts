@@ -3,7 +3,7 @@ import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
 const AIRPORT_DB_BASE_URL = 'https://airportdb.io/api/v1/airport';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const AIRPORT_SCHEMA_VERSION = 7;
+export const AIRPORT_SCHEMA_VERSION = 8;
 
 export interface AirportResourceInput {
   icao: string;
@@ -11,7 +11,8 @@ export interface AirportResourceInput {
 
 export interface AirportRunwayEnd {
   id: string;
-  headingDegMag: number;
+  /** Physical runway heading from AirportDB, referenced to true north. */
+  headingDegTrue: number;
   isClosed: boolean;
   lengthFt: number | null;
 }
@@ -72,6 +73,8 @@ interface AirportDbRunway {
   length_ft?: unknown;
   le_ident?: unknown;
   he_ident?: unknown;
+  le_heading_degT?: unknown;
+  he_heading_degT?: unknown;
   [key: string]: unknown;
 }
 
@@ -137,6 +140,24 @@ function toIntegerValue(value: unknown): number | null {
   return Number.parseInt(trimmed, 10);
 }
 
+function toFiniteNumberValue(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function isRunwayClosed(value: unknown): boolean {
   if (typeof value === 'number') {
     return value !== 0;
@@ -154,7 +175,12 @@ function isRunwayClosed(value: unknown): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
-function toRunwayEnd(identCandidate: unknown, isClosed: boolean, lengthFt: number | null): AirportRunwayEnd | null {
+function toRunwayEnd(
+  identCandidate: unknown,
+  headingDegTrueCandidate: unknown,
+  isClosed: boolean,
+  lengthFt: number | null
+): AirportRunwayEnd | null {
   const ident = toStringValue(identCandidate)?.toUpperCase() ?? null;
   if (!ident) {
     return null;
@@ -167,10 +193,14 @@ function toRunwayEnd(identCandidate: unknown, isClosed: boolean, lengthFt: numbe
 
   const runwayNumber = Number.parseInt(match[1], 10);
   const suffix = match[2] ?? '';
+  const headingDegTrue = toFiniteNumberValue(headingDegTrueCandidate);
+  if (headingDegTrue === null || headingDegTrue < 0 || headingDegTrue > 360) {
+    return null;
+  }
 
   return {
     id: `${String(runwayNumber).padStart(2, '0')}${suffix}`,
-    headingDegMag: runwayNumber === 36 ? 360 : runwayNumber * 10,
+    headingDegTrue,
     isClosed,
     lengthFt
   };
@@ -209,7 +239,7 @@ function isAirportRunwayEndCandidate(runway: unknown): runway is AirportRunwayEn
     Boolean(runway) &&
     typeof runway === 'object' &&
     typeof (runway as { id?: unknown }).id === 'string' &&
-    typeof (runway as { headingDegMag?: unknown }).headingDegMag === 'number' &&
+    typeof (runway as { headingDegTrue?: unknown }).headingDegTrue === 'number' &&
     typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' &&
     ((runway as { lengthFt?: unknown }).lengthFt === null ||
       typeof (runway as { lengthFt?: unknown }).lengthFt === 'number')
@@ -231,7 +261,7 @@ function normalizeCachedRunways(runways: AirportResourceData['runwayEnds']): Air
     .filter(isAirportRunwayEndCandidate)
     .map((runway) => ({
       id: runway.id,
-      headingDegMag: runway.headingDegMag,
+      headingDegTrue: runway.headingDegTrue,
       isClosed: runway.isClosed,
       lengthFt: runway.lengthFt
     }));
@@ -395,8 +425,14 @@ function collectRunwayEnds(payload: AirportDbPayload): AirportRunwayEnd[] {
     const runwayClosed = isRunwayClosed(runway.closed);
     const lengthFtCandidate = toIntegerValue(runway.length_ft);
     const lengthFt = lengthFtCandidate !== null && lengthFtCandidate > 0 ? lengthFtCandidate : null;
-    addRunwayCandidate(runwayMap, toRunwayEnd(runway.le_ident, runwayClosed, lengthFt));
-    addRunwayCandidate(runwayMap, toRunwayEnd(runway.he_ident, runwayClosed, lengthFt));
+    const lowEnd = toRunwayEnd(runway.le_ident, runway.le_heading_degT, runwayClosed, lengthFt);
+    const highEnd = toRunwayEnd(runway.he_ident, runway.he_heading_degT, runwayClosed, lengthFt);
+    if (!lowEnd || !highEnd) {
+      continue;
+    }
+
+    addRunwayCandidate(runwayMap, lowEnd);
+    addRunwayCandidate(runwayMap, highEnd);
   }
 
   return [...runwayMap.values()].sort((a, b) => a.id.localeCompare(b.id));

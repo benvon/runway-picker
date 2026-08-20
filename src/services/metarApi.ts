@@ -37,8 +37,14 @@ export interface MetarLookupWind {
   raw: string;
   directionType: 'fixed' | 'variable' | 'calm';
   directionDegTrue: number | null;
+  directionVariation: MetarLookupDirectionVariation | null;
   speedKt: number;
   gustKt: number | null;
+}
+
+export interface MetarLookupDirectionVariation {
+  fromDegTrue: number;
+  toDegTrue: number;
 }
 
 export type MetarLookupErrorCode =
@@ -186,9 +192,34 @@ function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
     raw: candidate.raw,
     directionType: candidate.directionType,
     directionDegTrue: typeof candidate.directionDegTrue === 'number' ? candidate.directionDegTrue : null,
+    directionVariation:
+      candidate.directionType === 'fixed' ? normalizeDirectionVariation(candidate.directionVariation) : null,
     speedKt: candidate.speedKt,
     gustKt: typeof candidate.gustKt === 'number' ? candidate.gustKt : null
   };
+}
+
+function normalizeDirectionVariation(value: unknown): MetarLookupDirectionVariation | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Partial<MetarLookupDirectionVariation>;
+  if (
+    typeof candidate.fromDegTrue !== 'number' ||
+    typeof candidate.toDegTrue !== 'number' ||
+    !Number.isInteger(candidate.fromDegTrue) ||
+    !Number.isInteger(candidate.toDegTrue) ||
+    candidate.fromDegTrue < 0 ||
+    candidate.fromDegTrue > 360 ||
+    candidate.toDegTrue < 0 ||
+    candidate.toDegTrue > 360 ||
+    candidate.fromDegTrue % 360 === candidate.toDegTrue % 360
+  ) {
+    return null;
+  }
+
+  return { fromDegTrue: candidate.fromDegTrue, toDegTrue: candidate.toDegTrue };
 }
 
 export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupResponse> {

@@ -27,8 +27,8 @@ describe('airportApi service', () => {
             countryName: 'United States',
             elevationFt: 13,
             runwayEnds: [
-              { id: '04L', headingDegMag: 40, lengthFt: 12079 },
-              { id: '22R', headingDegMag: 220, lengthFt: 12079 }
+              { id: '04L', headingDegTrue: 40, lengthFt: 12079 },
+              { id: '22R', headingDegTrue: 220, lengthFt: 12079 }
             ],
             frequencies: [
               { type: 'APP', description: 'NORTH APPROACH', frequencyMhz: '125.7' },
@@ -65,8 +65,8 @@ describe('airportApi service', () => {
     expect(payload.requestedIcao).toBe('KJFK');
     expect(payload.icao).toBe('KJFK');
     expect(payload.runwayEnds).toEqual([
-      { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 },
-      { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12079 }
+      { id: '04L', headingDegTrue: 40, isClosed: false, lengthFt: 12079 },
+      { id: '22R', headingDegTrue: 220, isClosed: false, lengthFt: 12079 }
     ]);
     expect(payload.frequencies).toEqual([
       { type: 'APP', description: 'NORTH APPROACH', frequencyMhz: '125.7' },
@@ -91,8 +91,8 @@ describe('airportApi service', () => {
             countryName: 'United States',
             elevationFt: 1026,
             runwayEnds: [
-              { id: '01L', headingDegMag: 10, isClosed: false, lengthFt: 8000 },
-              { id: '19R', headingDegMag: 190, isClosed: true, lengthFt: 8000 }
+              { id: '01L', headingDegTrue: 10, isClosed: false, lengthFt: 8000 },
+              { id: '19R', headingDegTrue: 190, isClosed: true, lengthFt: 8000 }
             ],
             frequencies: [{ type: 'TWR', description: 'TOWER', frequencyMhz: '123.9' }],
             source: 'airportdb',
@@ -129,7 +129,7 @@ describe('airportApi service', () => {
           countryCode: 'US',
           countryName: 'United States',
           elevationFt: 958,
-          runwayEnds: [{ id: '05', headingDegMag: 50, isClosed: false, lengthFt: 9000 }],
+          runwayEnds: [{ id: '05', headingDegTrue: 50, isClosed: false, lengthFt: 9000 }],
           frequencies: [
             { type: 'APP', description: 'DES MOINES APPROACH', frequencyMhz: '118.3' },
             { type: 'TWR', frequencyMhz: '126.8' },
@@ -155,7 +155,7 @@ describe('airportApi service', () => {
           countryCode: 'US',
           countryName: 'United States',
           elevationFt: 1574,
-          runwayEnds: [{ id: '11', headingDegMag: 110, isClosed: false, lengthFt: 5500 }],
+          runwayEnds: [{ id: '11', headingDegTrue: 110, isClosed: false, lengthFt: 5500 }],
           source: 'airportdb',
           fetchedAt: '2026-03-02T00:00:00.000Z'
         })

@@ -19,6 +19,7 @@ describe('resource adapters', () => {
           raw: '11010KT',
           directionType: 'fixed',
           directionDegTrue: 110,
+          directionVariation: null,
           speedKt: 10,
           gustKt: null
         },
@@ -29,7 +30,7 @@ describe('resource adapters', () => {
       'metar'
     );
 
-    expect(envelope.schemaVersion).toBe(3);
+    expect(envelope.schemaVersion).toBe(4);
     expect(envelope.resource).toBe('metar');
     expect(envelope.key).toBe('v1:metar:KJFK');
     expect(envelope.cacheMeta.policyVersion).toBe('metar-v1');
@@ -62,6 +63,40 @@ describe('resource adapters', () => {
     expect(validated.wind.directionType).toBe('variable');
     expect(validated.wind.speedKt).toBe(3);
     expect(validated.wind.raw).toBe('VRB03KT');
+  });
+
+  it('preserves directional-variation sectors from the raw METAR alongside structured wind fields', async () => {
+    const validated = await metarResourceAdapter.validate(
+      [
+        {
+          rawOb: 'METAR KARR 031652Z 22015G25KT 180V260 4SM HZ OVC013 05/00 A3011 RMK AO2',
+          wdir: { value: 220 },
+          wspd: { value: 15 },
+          wgst: { value: 25 }
+        }
+      ],
+      { icao: 'KARR' },
+      { request: new Request('https://example.com'), env: { METAR_CACHE: { get: async () => null, put: async () => {} } } }
+    );
+
+    expect(validated.wind.directionVariation).toEqual({ fromDegTrue: 180, toDegTrue: 260 });
+  });
+
+  it('does not attach a later forecast-sector token to the current provider wind', async () => {
+    const validated = await metarResourceAdapter.validate(
+      [
+        {
+          rawOb: 'METAR KARR 031652Z 22015G25KT 4SM TEMPO 180V260 2SM HZ',
+          wdir: { value: 220 },
+          wspd: { value: 15 },
+          wgst: { value: 25 }
+        }
+      ],
+      { icao: 'KARR' },
+      { request: new Request('https://example.com'), env: { METAR_CACHE: { get: async () => null, put: async () => {} } } }
+    );
+
+    expect(validated.wind.directionVariation).toBeNull();
   });
 
   it('handles calm winds when provider omits explicit wind fields', async () => {
@@ -163,19 +198,25 @@ describe('resource adapters', () => {
             closed: '0',
             length_ft: '12079',
             le_ident: '04L',
-            he_ident: '22R'
+            he_ident: '22R',
+            le_heading_degT: '47.4',
+            he_heading_degT: 227.6
           },
           {
             closed: '1',
             length_ft: '14511',
             le_ident: '13R',
-            he_ident: '31L'
+            he_ident: '31L',
+            le_heading_degT: 137,
+            he_heading_degT: 317
           },
           {
             closed: '0',
             length_ft: '12079',
             le_ident: '04L',
-            he_ident: '22R'
+            he_ident: '22R',
+            le_heading_degT: 47,
+            he_heading_degT: 227
           }
         ],
         freqs: [
@@ -204,10 +245,10 @@ describe('resource adapters', () => {
     expect(validated.countryName).toBe('United States');
     expect(validated.elevationFt).toBe(13);
     expect(validated.runwayEnds).toEqual([
-      { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 },
-      { id: '13R', headingDegMag: 130, isClosed: true, lengthFt: 14511 },
-      { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12079 },
-      { id: '31L', headingDegMag: 310, isClosed: true, lengthFt: 14511 }
+      { id: '04L', headingDegTrue: 47.4, isClosed: false, lengthFt: 12079 },
+      { id: '13R', headingDegTrue: 137, isClosed: true, lengthFt: 14511 },
+      { id: '22R', headingDegTrue: 227.6, isClosed: false, lengthFt: 12079 },
+      { id: '31L', headingDegTrue: 317, isClosed: true, lengthFt: 14511 }
     ]);
     expect(validated.frequencies).toEqual([
       { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
@@ -245,7 +286,7 @@ describe('resource adapters', () => {
     const withFrequencies = await airportResourceAdapter.validate(
       {
         ident: 'KLAS',
-        runways: [{ closed: '0', le_ident: '01L', he_ident: '19R', length_ft: '8988' }],
+        runways: [{ closed: '0', le_ident: '01L', he_ident: '19R', le_heading_degT: 12, he_heading_degT: 192, length_ft: '8988' }],
         frequencies: [
           { type: 'APP', description: 'LAS VEGAS APP', frequency_mhz: '125.9' },
           { type: 'TWR', description: 'LAS VEGAS TWR', frequency_mhz: '132.4' }
@@ -271,7 +312,7 @@ describe('resource adapters', () => {
     const validated = await airportResourceAdapter.validate(
       {
         ident: 'KMSN',
-        runways: [{ closed: '0', le_ident: '18', he_ident: '36', length_ft: '5000' }],
+        runways: [{ closed: '0', le_ident: '18', he_ident: '36', le_heading_degT: 180, he_heading_degT: 360, length_ft: '5000' }],
         frequencies: { type: 'APP', description: 'BROKEN', frequency_mhz: '118.5' },
         freqs: [null, { type: 'APP', description: 'BROKEN' }]
       },
@@ -292,7 +333,7 @@ describe('resource adapters', () => {
     const validated = await airportResourceAdapter.validate(
       {
         ident: 'KHEL',
-        runways: [{ closed: '1', le_ident: '13', he_ident: '31' }]
+        runways: [{ closed: '1', le_ident: '13', he_ident: '31', le_heading_degT: 130, he_heading_degT: 310 }]
       },
       { icao: 'KHEL' },
       {
@@ -305,9 +346,55 @@ describe('resource adapters', () => {
     );
 
     expect(validated.runwayEnds).toEqual([
-      { id: '13', headingDegMag: 130, isClosed: true, lengthFt: null },
-      { id: '31', headingDegMag: 310, isClosed: true, lengthFt: null }
+      { id: '13', headingDegTrue: 130, isClosed: true, lengthFt: null },
+      { id: '31', headingDegTrue: 310, isClosed: true, lengthFt: null }
     ]);
+  });
+
+  it('rejects runway data without true headings instead of deriving a magnetic designator heading', async () => {
+    expect(() =>
+      airportResourceAdapter.validate(
+        {
+          ident: 'KUNS',
+          runways: [{ closed: '0', le_ident: '09', he_ident: '27', length_ft: '5000' }]
+        },
+        { icao: 'KUNS' },
+        {
+          request: new Request('https://example.com'),
+          env: {
+            METAR_CACHE: { get: async () => null, put: async () => {} },
+            AIRPORTDB_API_TOKEN: 'token'
+          }
+        }
+      )
+    ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
+  });
+
+  it('rejects an incomplete reciprocal runway pair instead of evaluating only one end', async () => {
+    expect(() =>
+      airportResourceAdapter.validate(
+        {
+          ident: 'KINC',
+          runways: [
+            {
+              closed: '0',
+              le_ident: '09',
+              he_ident: '27',
+              le_heading_degT: 90,
+              length_ft: '5000'
+            }
+          ]
+        },
+        { icao: 'KINC' },
+        {
+          request: new Request('https://example.com'),
+          env: {
+            METAR_CACHE: { get: async () => null, put: async () => {} },
+            AIRPORTDB_API_TOKEN: 'token'
+          }
+        }
+      )
+    ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
   });
 
   it('returns null for malformed cached airport and metar shapes', () => {
@@ -327,7 +414,7 @@ describe('resource adapters', () => {
         countryName: 'United States',
         elevationFt: 13,
         runwayEnds: [
-          { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 }
+          { id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12079 }
         ],
         frequencies: [
           { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
@@ -357,7 +444,7 @@ describe('resource adapters', () => {
         countryCode: 'US',
         countryName: 'United States',
         elevationFt: 841,
-        runwayEnds: [{ id: '12L', headingDegMag: 120, isClosed: false, lengthFt: 10000 }],
+        runwayEnds: [{ id: '12L', headingDegTrue: 120, isClosed: false, lengthFt: 10000 }],
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
       }
@@ -372,7 +459,7 @@ describe('resource adapters', () => {
     const validated = await airportResourceAdapter.validate(
       {
         ident: 'KABC',
-        runways: [null, { closed: false, le_ident: '18', he_ident: '36', length_ft: '5000' }]
+        runways: [null, { closed: false, le_ident: '18', he_ident: '36', le_heading_degT: 180, he_heading_degT: 360, length_ft: '5000' }]
       },
       { icao: 'KABC' },
       {
@@ -385,8 +472,8 @@ describe('resource adapters', () => {
     );
 
     expect(validated.runwayEnds).toEqual([
-      { id: '18', headingDegMag: 180, isClosed: false, lengthFt: 5000 },
-      { id: '36', headingDegMag: 360, isClosed: false, lengthFt: 5000 }
+      { id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 5000 },
+      { id: '36', headingDegTrue: 360, isClosed: false, lengthFt: 5000 }
     ]);
     expect(validated.countryName).toBe('');
 
@@ -403,8 +490,8 @@ describe('resource adapters', () => {
       {
         ident: 'KDUP',
         runways: [
-          { closed: '1', le_ident: '09', he_ident: '27', length_ft: '4000' },
-          { closed: '0', le_ident: '09', he_ident: '27', length_ft: '5000' },
+          { closed: '1', le_ident: '09', he_ident: '27', le_heading_degT: 90, he_heading_degT: 270, length_ft: '4000' },
+          { closed: '0', le_ident: '09', he_ident: '27', le_heading_degT: 90, he_heading_degT: 270, length_ft: '5000' },
           { closed: '0', le_ident: 'XX', he_ident: null, length_ft: '3000' }
         ]
       },
@@ -419,8 +506,8 @@ describe('resource adapters', () => {
     );
 
     expect(validated.runwayEnds).toEqual([
-      { id: '09', headingDegMag: 90, isClosed: false, lengthFt: 5000 },
-      { id: '27', headingDegMag: 270, isClosed: false, lengthFt: 5000 }
+      { id: '09', headingDegTrue: 90, isClosed: false, lengthFt: 5000 },
+      { id: '27', headingDegTrue: 270, isClosed: false, lengthFt: 5000 }
     ]);
   });
 });

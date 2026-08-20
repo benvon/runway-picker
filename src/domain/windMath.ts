@@ -18,9 +18,9 @@ export function roundKnots(value: number): number {
 export function calculateWindComponent(
   speedKt: number,
   windDirectionDegTrue: number,
-  runwayHeadingDegMag: number
+  runwayHeadingDegTrue: number
 ): RawWindComponent {
-  const deltaDeg = normalizeDeltaDegrees(windDirectionDegTrue - runwayHeadingDegMag);
+  const deltaDeg = normalizeDeltaDegrees(windDirectionDegTrue - runwayHeadingDegTrue);
   const deltaRad = (deltaDeg * Math.PI) / 180;
 
   const rawHeadwindKt = speedKt * Math.cos(deltaRad);

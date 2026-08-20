@@ -28,8 +28,8 @@ export function airportPayload(icao: string): Record<string, unknown> {
     countryName: 'United States',
     elevationFt: 100,
     runwayEnds: [
-      { id: '04', headingDegMag: 40, isClosed: false, lengthFt: 8000 },
-      { id: '22', headingDegMag: 220, isClosed: false, lengthFt: 8000 }
+      { id: '04', headingDegTrue: 40, isClosed: false, lengthFt: 8000 },
+      { id: '22', headingDegTrue: 220, isClosed: false, lengthFt: 8000 }
     ],
     frequencies: [
       { type: 'APP', description: 'CITY APPROACH', frequencyMhz: '120.4' },

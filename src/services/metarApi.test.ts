@@ -25,6 +25,7 @@ describe('metarApi service', () => {
               raw: '12008KT',
               directionType: 'fixed',
               directionDegTrue: 120,
+              directionVariation: { fromDegTrue: 100, toDegTrue: 140 },
               speedKt: 8,
               gustKt: null
             },
@@ -58,6 +59,7 @@ describe('metarApi service', () => {
     });
     expect(payload.icao).toBe('KJFK');
     expect(payload.wind.directionType).toBe('fixed');
+    expect(payload.wind.directionVariation).toEqual({ fromDegTrue: 100, toDegTrue: 140 });
     expect(payload.wind.speedKt).toBe(8);
     expect(payload.cache.status).toBe('kv_hit');
     expect(payload.cache.source).toBe('kv');

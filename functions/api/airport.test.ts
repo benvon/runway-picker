@@ -32,8 +32,8 @@ describe('pages airport proxy', () => {
           countryName: 'United States',
           elevationFt: 1026,
           runwayEnds: [
-            { id: '01L', headingDegMag: 10 },
-            { id: '19R', headingDegMag: 190 }
+            { id: '01L', headingDegTrue: 10 },
+            { id: '19R', headingDegTrue: 190 }
           ],
           frequencies: [{ type: 'TWR', description: 'TOWER', frequencyMhz: '123.9' }],
           source: 'airportdb',

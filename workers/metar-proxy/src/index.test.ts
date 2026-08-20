@@ -127,13 +127,17 @@ function buildAirportReport(icao: string): Record<string, unknown> {
         closed: '0',
         length_ft: '12000',
         le_ident: '04L',
-        he_ident: '22R'
+        he_ident: '22R',
+        le_heading_degT: 47,
+        he_heading_degT: 227
       },
       {
         closed: '1',
         length_ft: '10000',
         le_ident: '13',
-        he_ident: '31'
+        he_ident: '31',
+        le_heading_degT: 137,
+        he_heading_degT: 317
       }
     ],
     freqs: [
@@ -289,7 +293,7 @@ describe('metar worker', () => {
     const kv = new MemoryKv();
     const fetchedAt = new Date(Date.now() - 30_000);
     kv.seed('v1:metar:KMCI', {
-      schemaVersion: 3,
+      schemaVersion: 4,
       resource: 'metar',
       key: 'v1:metar:KMCI',
       data: {
@@ -299,6 +303,7 @@ describe('metar worker', () => {
           raw: '11010KT',
           directionType: 'fixed',
           directionDegTrue: 110,
+          directionVariation: null,
           speedKt: 10,
           gustKt: null
         },
@@ -792,7 +797,7 @@ describe('airport worker', () => {
       requestedIcao: string;
       icao: string;
       source: string;
-      runwayEnds: Array<{ id: string; headingDegMag: number; isClosed: boolean; lengthFt: number | null }>;
+      runwayEnds: Array<{ id: string; headingDegTrue: number; isClosed: boolean; lengthFt: number | null }>;
       frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
       cache: { source: string; status: string };
     };
@@ -801,10 +806,10 @@ describe('airport worker', () => {
     expect(payload.icao).toBe('KJFK');
     expect(payload.source).toBe('airportdb');
     expect(payload.runwayEnds).toEqual([
-      { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12000 },
-      { id: '13', headingDegMag: 130, isClosed: true, lengthFt: 10000 },
-      { id: '22R', headingDegMag: 220, isClosed: false, lengthFt: 12000 },
-      { id: '31', headingDegMag: 310, isClosed: true, lengthFt: 10000 }
+      { id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12000 },
+      { id: '13', headingDegTrue: 137, isClosed: true, lengthFt: 10000 },
+      { id: '22R', headingDegTrue: 227, isClosed: false, lengthFt: 12000 },
+      { id: '31', headingDegTrue: 317, isClosed: true, lengthFt: 10000 }
     ]);
     expect(payload.frequencies).toEqual([
       { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
@@ -866,7 +871,7 @@ describe('airport worker', () => {
         countryCode: 'US',
         countryName: 'United States',
         elevationFt: 13,
-        runwayEnds: [{ id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 }],
+        runwayEnds: [{ id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12079 }],
         frequencies: [],
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
