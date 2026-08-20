@@ -566,6 +566,20 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
     negativeCacheTtlSeconds: 3600,
     policyVersion: 'airport-v5'
   },
+  negativeCache: {
+    toEntry: (error) =>
+      error instanceof AirportWorkerError && error.status === 404 && error.code === 'ICAO_NOT_FOUND'
+        ? { status: 404, code: 'ICAO_NOT_FOUND' }
+        : null,
+    toError: (entry, input) => {
+      if (entry.status !== 404 || entry.code !== 'ICAO_NOT_FOUND') {
+        return null;
+      }
+
+      const icao = normalizeAirportIcao(input.icao);
+      return new AirportWorkerError(`ICAO code ${icao} was not found in airport database.`, 404, 'ICAO_NOT_FOUND');
+    }
+  },
   observability: (input, key) => ({
     labels: {
       resource: 'airport',

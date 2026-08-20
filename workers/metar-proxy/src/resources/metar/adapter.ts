@@ -565,6 +565,20 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
     negativeCacheTtlSeconds: 180,
     policyVersion: 'metar-v1'
   },
+  negativeCache: {
+    toEntry: (error) =>
+      error instanceof MetarWorkerError && error.status === 404 && error.code === 'ICAO_NOT_FOUND'
+        ? { status: 404, code: 'ICAO_NOT_FOUND' }
+        : null,
+    toError: (entry, input) => {
+      if (entry.status !== 404 || entry.code !== 'ICAO_NOT_FOUND') {
+        return null;
+      }
+
+      const icao = normalizeIcao(input.icao);
+      return new MetarWorkerError(`ICAO code ${icao} was not found. Check the code and try again.`, 404, 'ICAO_NOT_FOUND');
+    }
+  },
   observability: (input, key) => ({
     labels: {
       resource: 'metar',
