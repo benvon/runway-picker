@@ -623,6 +623,26 @@ describe('metar worker', () => {
     });
   });
 
+  it('negative-caches stable METAR ICAO misses for the adapter-specific TTL', async () => {
+    const fetchUpstream = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json([]))
+      .mockResolvedValueOnce(Response.json([]));
+    vi.stubGlobal('fetch', fetchUpstream);
+    const kv = new MemoryKv();
+    const request = new Request('https://metar.internal/api/metar?icao=ZZZZ');
+
+    const first = await handleMetarRequest(request, { METAR_CACHE: kv });
+    const second = await handleMetarRequest(request, { METAR_CACHE: kv });
+
+    expect(first.status).toBe(404);
+    expect(second.status).toBe(404);
+    expect(fetchUpstream).toHaveBeenCalledTimes(2);
+    const cached = kv.read<{ negative: { code: string }; cacheMeta: { fetchedAt: string; expiresAt: string } }>('v1:metar:ZZZZ');
+    expect(cached?.negative).toEqual({ status: 404, code: 'ICAO_NOT_FOUND' });
+    expect(Date.parse(cached!.cacheMeta.expiresAt) - Date.parse(cached!.cacheMeta.fetchedAt)).toBe(180_000);
+  });
+
   it('returns METAR_UNAVAILABLE code when station exists but no METAR report is present', async () => {
     vi.stubGlobal(
       'fetch',
@@ -641,6 +661,24 @@ describe('metar worker', () => {
       error: 'No METAR is currently available for ICAO KDKB. Try again later.',
       code: 'METAR_UNAVAILABLE'
     });
+  });
+
+  it('does not negative-cache temporary METAR unavailability', async () => {
+    const fetchUpstream = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json([]))
+      .mockResolvedValueOnce(Response.json([{ icaoId: 'KDKB' }]))
+      .mockResolvedValueOnce(Response.json([]))
+      .mockResolvedValueOnce(Response.json([{ icaoId: 'KDKB' }]));
+    vi.stubGlobal('fetch', fetchUpstream);
+    const kv = new MemoryKv();
+    const request = new Request('https://metar.internal/api/metar?icao=KDKB');
+
+    expect((await handleMetarRequest(request, { METAR_CACHE: kv })).status).toBe(404);
+    expect((await handleMetarRequest(request, { METAR_CACHE: kv })).status).toBe(404);
+
+    expect(fetchUpstream).toHaveBeenCalledTimes(4);
+    expect(kv.read('v1:metar:KDKB')).toBeNull();
   });
 
   it('returns METAR_UNAVAILABLE code when provider responds with 204 and station exists', async () => {
@@ -777,6 +815,41 @@ describe('airport worker', () => {
     expect('upstreamPayload' in payload).toBe(false);
     expect(payload.cache.source).toBe('upstream');
     expect(payload.cache.status).toBe('upstream_refresh');
+  });
+
+  it('negative-caches stable airport ICAO misses for the adapter-specific TTL', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(new Response('not found', { status: 404 }));
+    vi.stubGlobal('fetch', fetchUpstream);
+    const kv = new MemoryKv();
+    const request = new Request('https://metar.internal/api/airport?icao=ZZZZ');
+    const env = { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' };
+
+    const first = await handleAirportRequest(request, env);
+    const second = await handleAirportRequest(request, env);
+
+    expect(first.status).toBe(404);
+    expect(second.status).toBe(404);
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
+    const cached = kv.read<{ negative: { code: string }; cacheMeta: { fetchedAt: string; expiresAt: string } }>('v1:airport:ZZZZ');
+    expect(cached?.negative).toEqual({ status: 404, code: 'ICAO_NOT_FOUND' });
+    expect(Date.parse(cached!.cacheMeta.expiresAt) - Date.parse(cached!.cacheMeta.fetchedAt)).toBe(3_600_000);
+  });
+
+  it('does not negative-cache airport authentication or configuration errors', async () => {
+    const authFailure = vi.fn().mockResolvedValue(new Response('unauthorized', { status: 401 }));
+    vi.stubGlobal('fetch', authFailure);
+    const authenticatedKv = new MemoryKv();
+    const request = new Request('https://metar.internal/api/airport?icao=KJFK');
+
+    expect((await handleAirportRequest(request, { METAR_CACHE: authenticatedKv, AIRPORTDB_API_TOKEN: 'token' })).status).toBe(502);
+    expect((await handleAirportRequest(request, { METAR_CACHE: authenticatedKv, AIRPORTDB_API_TOKEN: 'token' })).status).toBe(502);
+    expect(authFailure).toHaveBeenCalledTimes(2);
+    expect(authenticatedKv.read('v1:airport:KJFK')).toBeNull();
+
+    const unconfiguredKv = new MemoryKv();
+    expect((await handleAirportRequest(request, { METAR_CACHE: unconfiguredKv })).status).toBe(500);
+    expect((await handleAirportRequest(request, { METAR_CACHE: unconfiguredKv })).status).toBe(500);
+    expect(unconfiguredKv.read('v1:airport:KJFK')).toBeNull();
   });
 
   it('invalidates previously cached airport frequency payloads when the schema changes', async () => {
