@@ -68,19 +68,21 @@ function metarPayload(
     raw: string;
   }
 ) {
+  const servedAt = new Date().toISOString();
+
   return {
     icao,
     metarRaw: `METAR ${icao} 021953Z ${wind.raw} 10SM FEW020 08/03 A3012 RMK AO2`,
     wind,
     source: 'aviationweather',
-    fetchedAt: '2026-03-02T00:00:00.000Z',
-    observedAt: new Date().toISOString(),
+    fetchedAt: servedAt,
+    observedAt: servedAt,
     cache: {
       status: 'upstream_refresh',
       source: 'upstream',
       ageSeconds: 0,
-      fetchedAt: '2026-03-02T00:00:00.000Z',
-      servedAt: '2026-03-02T00:00:00.000Z',
+      fetchedAt: servedAt,
+      servedAt,
       ttlSeconds: 1800,
       key: `v1:metar:${icao}`,
       resource: 'metar'

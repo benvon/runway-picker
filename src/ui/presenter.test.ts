@@ -34,6 +34,8 @@ describe('lookup presentation safety', () => {
     expect(panels.bestRunway.textContent).toContain('Best runway: Not determinable');
     expect(panels.bestRunway.textContent).toContain('Runway recommendation suppressed');
     expect(panels.bestRunway.textContent).toContain('more than 60 minutes old');
+    expect(panels.bestRunway.textContent).toContain('↓ 10 kt');
+    expect(panels.bestRunway.textContent).not.toContain('Direction variable');
   });
 
   it('names the best runway only when eligibility is satisfied', () => {

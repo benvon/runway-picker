@@ -427,6 +427,27 @@ function extractMetarRawFromReport(report: Record<string, unknown>): string | nu
   return null;
 }
 
+function createValidUtcDate(year: number, month: number, day: number, hour: number, minute: number): Date | null {
+  const candidate = new Date(Date.UTC(year, month, day, hour, minute));
+  if (
+    candidate.getUTCFullYear() !== year ||
+    candidate.getUTCMonth() !== month ||
+    candidate.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return candidate;
+}
+
+function isValidMetarObservationTime(day: number, hour: number, minute: number): boolean {
+  return day >= 1 && day <= 31 && hour <= 23 && minute <= 59;
+}
+
+function isWithinObservationFutureTolerance(candidate: Date | null, now: Date): candidate is Date {
+  return candidate !== null && candidate.getTime() <= now.getTime() + 5 * 60 * 1000;
+}
+
 export function extractObservedAt(rawMetar: string, now = new Date()): string | null {
   const match = rawMetar.match(/\b(?:(?:METAR|SPECI)\s+)?[A-Z0-9]{4}\s+(\d{2})(\d{2})(\d{2})Z\b/);
   if (!match) {
@@ -436,20 +457,34 @@ export function extractObservedAt(rawMetar: string, now = new Date()): string | 
   const day = Number.parseInt(match[1] ?? '', 10);
   const hour = Number.parseInt(match[2] ?? '', 10);
   const minute = Number.parseInt(match[3] ?? '', 10);
-  if (day < 1 || day > 31 || hour > 23 || minute > 59) {
+  if (!isValidMetarObservationTime(day, hour, minute)) {
     return null;
   }
 
-  const observed = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), day, hour, minute));
-  if (observed.getUTCDate() !== day) {
-    return null;
+  const currentMonthCandidate = createValidUtcDate(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    day,
+    hour,
+    minute
+  );
+  if (isWithinObservationFutureTolerance(currentMonthCandidate, now)) {
+    return currentMonthCandidate.toISOString();
   }
 
-  if (observed.getTime() > now.getTime() + 5 * 60 * 1000) {
-    observed.setUTCMonth(observed.getUTCMonth() - 1);
+  const previousMonthAnchor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const previousMonthCandidate = createValidUtcDate(
+    previousMonthAnchor.getUTCFullYear(),
+    previousMonthAnchor.getUTCMonth(),
+    day,
+    hour,
+    minute
+  );
+  if (isWithinObservationFutureTolerance(previousMonthCandidate, now)) {
+    return previousMonthCandidate.toISOString();
   }
 
-  return observed.toISOString();
+  return null;
 }
 
 export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unknown, MetarResourceData> = {

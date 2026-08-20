@@ -50,6 +50,8 @@ describe('resource adapters', () => {
     const now = new Date('2026-03-01T00:03:00.000Z');
     expect(extractObservedAt('METAR KJFK 282351Z 18010KT 10SM CLR', now)).toBe('2026-02-28T23:51:00.000Z');
     expect(extractObservedAt('KJFK 282351Z 18010KT 10SM CLR', now)).toBe('2026-02-28T23:51:00.000Z');
+    expect(extractObservedAt('METAR KJFK 312351Z 18010KT 10SM CLR', new Date('2026-04-01T00:03:00.000Z'))).toBe('2026-03-31T23:51:00.000Z');
+    expect(extractObservedAt('METAR KJFK 312351Z 18010KT 10SM CLR', now)).toBeNull();
     expect(extractObservedAt('METAR KJFK 321200Z 18010KT 10SM CLR', now)).toBeNull();
     expect(extractObservedAt('METAR KJFK 011260Z 18010KT 10SM CLR', now)).toBeNull();
   });

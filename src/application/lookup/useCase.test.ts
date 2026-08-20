@@ -36,7 +36,9 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
         resource: 'airport'
       }
     }),
-    fetchMetarByIcao: async (icao) => ({
+    fetchMetarByIcao: async (icao) => {
+      const servedAt = new Date().toISOString();
+      return {
       icao,
       metarRaw: `METAR ${icao} 010000Z 18010KT 10SM CLR 10/05 A3000`,
       wind: {
@@ -48,18 +50,19 @@ function buildGateway(overrides?: Partial<LookupGateway>): LookupGateway {
       },
       source: 'aviationweather',
       fetchedAt: '2026-03-01T00:00:00.000Z',
-      observedAt: new Date().toISOString(),
+      observedAt: servedAt,
       cache: {
         status: 'upstream_refresh',
         source: 'upstream',
         ageSeconds: 0,
         fetchedAt: '2026-03-01T00:00:00.000Z',
-        servedAt: '2026-03-01T00:00:00.000Z',
+        servedAt,
         ttlSeconds: 1800,
         key: `v1:metar:${icao}`,
         resource: 'metar'
       }
-    }),
+      };
+    },
     ...overrides
   };
 }
@@ -107,13 +110,14 @@ describe('lookup use case', () => {
     });
   });
 
-  it('allows the 60-minute recency boundary but fails closed when observation time is unavailable', async () => {
+  it('allows the 60-minute recency boundary but rejects observations just beyond it', async () => {
+    const servedAt = new Date().toISOString();
     const gateway = buildGateway({
       fetchMetarByIcao: async (icao) => ({
         icao, metarRaw: `METAR ${icao} 010000Z 18010KT 10SM CLR 10/05 A3000`,
         wind: { raw: '18010KT', directionType: 'fixed', directionDegTrue: 180, speedKt: 10, gustKt: null },
-        source: 'aviationweather', fetchedAt: new Date().toISOString(), observedAt: new Date(Date.now() - 60 * 60_000 + 10).toISOString(),
-        cache: { status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: new Date().toISOString(), servedAt: new Date().toISOString(), ttlSeconds: 1800, key: `v1:metar:${icao}`, resource: 'metar' }
+        source: 'aviationweather', fetchedAt: servedAt, observedAt: new Date(Date.parse(servedAt) - 60 * 60_000).toISOString(),
+        cache: { status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: servedAt, servedAt, ttlSeconds: 1800, key: `v1:metar:${icao}`, resource: 'metar' }
       })
     });
     const atBoundary = await runPrimaryLookup('KJFK', gateway);
@@ -121,6 +125,17 @@ describe('lookup use case', () => {
       throw new Error('Expected a successful lookup.');
     }
     expect(atBoundary.resolution.recommendation.allowed).toBe(true);
+
+    const justOverBoundary = await runPrimaryLookup('KJFK', buildGateway({
+      fetchMetarByIcao: async (icao) => ({
+        ...(await gateway.fetchMetarByIcao(icao)),
+        observedAt: new Date(Date.parse(servedAt) - 60 * 60_000 - 1).toISOString()
+      })
+    }));
+    if (justOverBoundary.type !== 'success') {
+      throw new Error('Expected a successful lookup.');
+    }
+    expect(justOverBoundary.resolution.recommendation.reasons).toContain('METAR_OBSERVATION_TOO_OLD');
 
     const missingTime = await runPrimaryLookup('KJFK', buildGateway({
       fetchMetarByIcao: async (icao) => ({
@@ -131,6 +146,29 @@ describe('lookup use case', () => {
       throw new Error('Expected a successful lookup.');
     }
     expect(missingTime.resolution.recommendation.reasons).toContain('METAR_OBSERVATION_TIME_UNAVAILABLE');
+  });
+
+  it('uses the Worker-provided served timestamp instead of the device clock for observation age', async () => {
+    const servedAt = '2026-03-03T12:00:00.000Z';
+    const result = await runPrimaryLookup('KJFK', buildGateway({
+      fetchMetarByIcao: async (icao) => ({
+        ...(await buildGateway().fetchMetarByIcao(icao)),
+        observedAt: '2026-03-03T10:40:00.000Z',
+        cache: {
+          status: 'upstream_refresh', source: 'upstream', ageSeconds: 0, fetchedAt: servedAt,
+          servedAt, ttlSeconds: 1800, key: `v1:metar:${icao}`, resource: 'metar'
+        }
+      })
+    }));
+    if (result.type !== 'success') {
+      throw new Error('Expected a successful lookup.');
+    }
+
+    expect(result.resolution.recommendation).toMatchObject({
+      allowed: false,
+      observationAgeMinutes: 80,
+      reasons: ['METAR_OBSERVATION_TOO_OLD']
+    });
   });
 
   it('returns alternate prompt when METAR is unavailable', async () => {

@@ -85,17 +85,18 @@ function isStaleMetarCache(status: MetarLookupResponse['cache']['status']): bool
   return status === 'stale_on_error' || status === 'stale_while_refresh';
 }
 
-function observationAgeMinutes(observedAt: string | null, now: Date): number | null {
+function observationAgeMilliseconds(observedAt: string | null, servedAt: string): number | null {
   if (!observedAt) {
     return null;
   }
 
   const observedAtMs = Date.parse(observedAt);
-  if (Number.isNaN(observedAtMs) || observedAtMs > now.getTime()) {
+  const servedAtMs = Date.parse(servedAt);
+  if (Number.isNaN(observedAtMs) || Number.isNaN(servedAtMs) || observedAtMs > servedAtMs) {
     return null;
   }
 
-  return Math.floor((now.getTime() - observedAtMs) / 60_000);
+  return servedAtMs - observedAtMs;
 }
 
 function distanceNm(
@@ -122,11 +123,11 @@ function distanceNm(
 export function assessRecommendationEligibility(
   airport: AirportLookupResponse,
   metar: MetarLookupResponse,
-  weatherStation: AirportLookupResponse | null,
-  now = new Date()
+  weatherStation: AirportLookupResponse | null
 ): RecommendationEligibility {
   const reasons: RecommendationBlockReason[] = [];
-  const ageMinutes = observationAgeMinutes(metar.observedAt, now);
+  const ageMs = observationAgeMilliseconds(metar.observedAt, metar.cache.servedAt);
+  const ageMinutes = ageMs === null ? null : Math.floor(ageMs / 60_000);
   const usesAlternateStation = airport.icao !== metar.icao;
   const alternateDistanceNm = usesAlternateStation ? distanceNm(airport, weatherStation) : null;
 
@@ -135,7 +136,7 @@ export function assessRecommendationEligibility(
   }
   if (ageMinutes === null) {
     reasons.push('METAR_OBSERVATION_TIME_UNAVAILABLE');
-  } else if (ageMinutes > MAX_METAR_OBSERVATION_AGE_MINUTES) {
+  } else if (ageMs !== null && ageMs > MAX_METAR_OBSERVATION_AGE_MINUTES * 60_000) {
     reasons.push('METAR_OBSERVATION_TOO_OLD');
   }
   if (usesAlternateStation && alternateDistanceNm === null) {

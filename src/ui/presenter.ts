@@ -91,14 +91,17 @@ function renderAirportInfo(resolution: LookupResolution, bestRunwayId: string | 
   return section;
 }
 
-function renderBestRunwayRow(bestRunway: RunwayWindComponent | null): HTMLElement {
-  const runwayDisplay = bestRunway?.runwayId ?? 'Not determinable';
-  const headwindSummary = formatBestHeadwindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
-  const crosswindSummary = formatBestCrosswindSummary(bestRunway?.sustained ?? null, bestRunway?.gust ?? null);
+function renderBestRunwayRow(
+  runwayDisplay: string | null,
+  componentRunway: RunwayWindComponent | null
+): HTMLElement {
+  const displayedRunway = runwayDisplay ?? 'Not determinable';
+  const headwindSummary = formatBestHeadwindSummary(componentRunway?.sustained ?? null, componentRunway?.gust ?? null);
+  const crosswindSummary = formatBestCrosswindSummary(componentRunway?.sustained ?? null, componentRunway?.gust ?? null);
   const row = createElement('div', { className: 'best-runway-row' });
 
   const bestRunwayCell = createElement('p', { className: 'best-runway-cell' });
-  bestRunwayCell.append(strongLabel('Best runway:'), document.createTextNode(` ${runwayDisplay}`));
+  bestRunwayCell.append(strongLabel('Best runway:'), document.createTextNode(` ${displayedRunway}`));
 
   const headwindCell = createElement('p', { className: 'best-runway-cell', textContent: headwindSummary });
   const crosswindCell = createElement('p', { className: 'best-runway-cell', textContent: crosswindSummary });
@@ -123,7 +126,8 @@ function recommendationWarning(reason: RecommendationBlockReason): string {
 }
 
 function renderBestRunway(resolution: LookupResolution, result: EvaluationResult): HTMLElement {
-  const bestRunway = resolution.recommendation.allowed ? findBestRunway(result) : null;
+  const componentRunway = findBestRunway(result);
+  const recommendedRunway = resolution.recommendation.allowed ? componentRunway : null;
   const section = createElement('section', {
     className: 'panel panel-accent panel-spotlight',
     attributes: { 'aria-label': 'Best runway summary' }
@@ -144,10 +148,10 @@ function renderBestRunway(resolution: LookupResolution, result: EvaluationResult
         })
       : null;
   appendChildren(section, [
-    renderBestRunwayRow(bestRunway),
+    renderBestRunwayRow(recommendedRunway?.runwayId ?? null, componentRunway),
     ...(warning ? [warning] : []),
     ...(alternateSource ? [alternateSource] : []),
-    renderAirportInfo(resolution, bestRunway?.runwayId ?? null)
+    renderAirportInfo(resolution, recommendedRunway?.runwayId ?? null)
   ]);
   return section;
 }
