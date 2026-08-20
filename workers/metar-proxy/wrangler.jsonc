@@ -42,35 +42,5 @@
       "tag": "v2-api-rate-limiter",
       "new_sqlite_classes": ["ApiRateLimiter"]
     }
-  ],
-  "env": {
-    "preview": {
-      "vars": {
-        "APP_ENV": "preview",
-        "ENABLE_DEBUG_ERRORS": "true",
-        "CACHE_REFRESH_ENABLED": "true",
-        "CACHE_REFRESH_METAR_INTERVAL_SECONDS": "1800",
-        "CACHE_REFRESH_AIRPORT_INTERVAL_SECONDS": "86400",
-        "CACHE_REFRESH_INACTIVITY_TTL_SECONDS": "432000",
-        "CACHE_REFRESH_MAX_ITEMS_PER_RUN": "25"
-      },
-      "kv_namespaces": [
-        {
-          "binding": "METAR_CACHE"
-        }
-      ],
-      "durable_objects": {
-        "bindings": [
-          {
-            "name": "CACHE_COORDINATOR",
-            "class_name": "CacheSingleFlightCoordinator"
-          },
-          {
-            "name": "API_RATE_LIMITER",
-            "class_name": "ApiRateLimiter"
-          }
-        ]
-      }
-    }
-  }
+  ]
 }
