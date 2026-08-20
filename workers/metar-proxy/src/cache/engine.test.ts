@@ -410,6 +410,85 @@ describe('cache engine', () => {
     expect(kv.getWriteOptions('v1:demo:alpha')).toEqual({ expirationTtl: 5 });
   });
 
+  it('returns the leader-written stable miss to concurrent single-flight followers', async () => {
+    const fetchUpstream = vi.fn().mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      throw new DemoStableMissError();
+    });
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const env: CacheEngineEnv = {
+      METAR_CACHE: kv,
+      CACHE_COORDINATOR: createCoordinatorNamespace()
+    };
+
+    const results = await Promise.allSettled([
+      getOrRefreshCached({
+        adapter,
+        input: { key: 'missing' },
+        request: new Request('https://example.com/a'),
+        env,
+        edgeCache: new MemoryEdgeCache()
+      }),
+      getOrRefreshCached({
+        adapter,
+        input: { key: 'missing' },
+        request: new Request('https://example.com/b'),
+        env,
+        edgeCache: new MemoryEdgeCache()
+      })
+    ]);
+
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
+    expect(results).toHaveLength(2);
+    for (const result of results) {
+      expect(result).toMatchObject({
+        status: 'rejected',
+        reason: { status: 404, code: 'DEMO_NOT_FOUND' }
+      });
+    }
+  });
+
+  it('preserves an adapter-declared stable miss when negative-cache writes fail', async () => {
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn().mockRejectedValue(new DemoStableMissError()),
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv: KvNamespaceLike = {
+      get: async () => null,
+      put: async () => {
+        throw new Error('KV unavailable');
+      }
+    };
+    const edge: EdgeCacheLike = {
+      match: async () => undefined,
+      put: async () => {
+        throw new Error('edge unavailable');
+      }
+    };
+
+    await expect(
+      getOrRefreshCached({
+        adapter,
+        input: { key: 'missing' },
+        request: new Request('https://example.com'),
+        env: { METAR_CACHE: kv },
+        edgeCache: edge
+      })
+    ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
+  });
+
   it('does not cache errors an adapter has not explicitly declared stable', async () => {
     const fetchUpstream = vi.fn().mockRejectedValue(new Error('provider unavailable'));
     const adapter = buildAdapter({

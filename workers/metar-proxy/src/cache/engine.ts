@@ -259,16 +259,6 @@ async function writeEdgeEnvelope<TData>(
   await edgeCache.put(request, response);
 }
 
-async function readKvEnvelope<TInput, TUpstream, TData>(
-  adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
-  cacheKey: string,
-  now: Date,
-  readKv: (cacheKey: string) => Promise<unknown>
-): Promise<CachedRecord<TData> | null> {
-  const raw = await readKv(cacheKey);
-  return toCachedRecord(raw, adapter, cacheKey, now);
-}
-
 async function readEdgeCacheRecords<TInput, TUpstream, TData>(
   edgeCache: EdgeCacheLike | undefined,
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
@@ -395,20 +385,24 @@ function toStaleCandidate<TData>(
   return chooseFresher(staleKv, staleEdge);
 }
 
-async function waitForFreshKvRecord<TInput, TUpstream, TData>(
+async function waitForFreshKvRecords<TInput, TUpstream, TData>(
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
   cacheKey: string,
+  input: TInput,
   readKv: (cacheKey: string) => Promise<unknown>,
   timeoutMs: number
-): Promise<CachedRecord<TData> | null> {
+): Promise<CacheRecords<TData> | null> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     await sleep(WAIT_INTERVAL_MS);
     const now = new Date();
-    const candidate = await readKvEnvelope(adapter, cacheKey, now, readKv);
-    if (candidate && isFresh(candidate, now)) {
-      return candidate;
+    const records = await readKvCacheRecords(adapter, cacheKey, input, now, readKv);
+    if (
+      (records.data && isFresh(records.data, now)) ||
+      (records.negative && records.negative.expiresAt.getTime() > now.getTime())
+    ) {
+      return records;
     }
   }
 
@@ -418,6 +412,7 @@ async function waitForFreshKvRecord<TInput, TUpstream, TData>(
 async function waitForLeaderOrServeStale<TInput, TUpstream, TData>(
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
   cacheKey: string,
+  input: TInput,
   now: Date,
   staleCandidate: CachedRecord<TData> | null,
   readKv: (cacheKey: string) => Promise<unknown>
@@ -429,9 +424,12 @@ async function waitForLeaderOrServeStale<TInput, TUpstream, TData>(
     return cacheResultFromRecord(adapter, cacheKey, staleCandidate, now, 'stale_while_refresh', 'stale');
   }
 
-  const waitedRecord = await waitForFreshKvRecord(adapter, cacheKey, readKv, MAX_WAIT_FOR_REFRESH_MS);
-  if (waitedRecord) {
-    return cacheResultFromRecord(adapter, cacheKey, waitedRecord, new Date(), 'kv_hit', 'kv');
+  const waitedRecords = await waitForFreshKvRecords(adapter, cacheKey, input, readKv, MAX_WAIT_FOR_REFRESH_MS);
+  if (waitedRecords?.negative) {
+    await throwIfFreshNegative(waitedRecords.negative, new Date());
+  }
+  if (waitedRecords?.data) {
+    return cacheResultFromRecord(adapter, cacheKey, waitedRecords.data, new Date(), 'kv_hit', 'kv');
   }
 
   if (staleCandidate && isWithinStaleWindow(staleCandidate, now, adapter.policy.staleOnErrorSeconds)) {
@@ -487,10 +485,12 @@ async function refreshAsLeader<TInput, TUpstream, TData>(
   } catch (error) {
     const negativeEnvelope = toNegativeEnvelope(adapter, error, cacheKey, new Date());
     if (negativeEnvelope) {
-      await env.METAR_CACHE.put(cacheKey, JSON.stringify(negativeEnvelope), {
-        expirationTtl: adapter.policy.negativeCacheTtlSeconds
-      });
-      await writeEdgeEnvelope(edgeCache, cacheKey, negativeEnvelope, adapter.policy.negativeCacheTtlSeconds);
+      await Promise.allSettled([
+        env.METAR_CACHE.put(cacheKey, JSON.stringify(negativeEnvelope), {
+          expirationTtl: adapter.policy.negativeCacheTtlSeconds
+        }),
+        writeEdgeEnvelope(edgeCache, cacheKey, negativeEnvelope, adapter.policy.negativeCacheTtlSeconds)
+      ]);
       throw error;
     }
 
@@ -545,7 +545,7 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
   const refreshLeader = !hasCoordinator || Boolean(lease);
 
   if (!refreshLeader) {
-    return waitForLeaderOrServeStale(adapter, cacheKey, now, staleCandidate, readKv);
+    return waitForLeaderOrServeStale(adapter, cacheKey, input.input, now, staleCandidate, readKv);
   }
 
   try {
