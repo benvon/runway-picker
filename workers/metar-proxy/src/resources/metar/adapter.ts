@@ -4,7 +4,7 @@ const AVIATION_WEATHER_METAR_URL = 'https://aviationweather.gov/api/data/metar';
 const AVIATION_WEATHER_STATION_INFO_URL = 'https://aviationweather.gov/api/data/stationinfo';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const METAR_SCHEMA_VERSION = 3;
+export const METAR_SCHEMA_VERSION = 4;
 
 export interface MetarResourceInput {
   icao: string;
@@ -16,6 +16,7 @@ export interface MetarResourceData {
   wind: MetarResourceWind;
   source: 'aviationweather';
   fetchedAt: string;
+  observedAt: string | null;
 }
 
 export interface MetarResourceWind {
@@ -156,6 +157,7 @@ function toMetarData(candidate: unknown): MetarResourceData | null {
     typeof asData.icao !== 'string' ||
     typeof asData.metarRaw !== 'string' ||
     typeof asData.fetchedAt !== 'string' ||
+    (typeof asData.observedAt !== 'string' && asData.observedAt !== null) ||
     asData.source !== 'aviationweather' ||
     !hasMetarWindShape(asData.wind)
   ) {
@@ -167,6 +169,7 @@ function toMetarData(candidate: unknown): MetarResourceData | null {
     metarRaw: asData.metarRaw,
     wind: toMetarWind(asData.wind),
     fetchedAt: asData.fetchedAt,
+    observedAt: asData.observedAt,
     source: asData.source
   };
 }
@@ -424,6 +427,31 @@ function extractMetarRawFromReport(report: Record<string, unknown>): string | nu
   return null;
 }
 
+export function extractObservedAt(rawMetar: string, now = new Date()): string | null {
+  const match = rawMetar.match(/\b(?:(?:METAR|SPECI)\s+)?[A-Z0-9]{4}\s+(\d{2})(\d{2})(\d{2})Z\b/);
+  if (!match) {
+    return null;
+  }
+
+  const day = Number.parseInt(match[1] ?? '', 10);
+  const hour = Number.parseInt(match[2] ?? '', 10);
+  const minute = Number.parseInt(match[3] ?? '', 10);
+  if (day < 1 || day > 31 || hour > 23 || minute > 59) {
+    return null;
+  }
+
+  const observed = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), day, hour, minute));
+  if (observed.getUTCDate() !== day) {
+    return null;
+  }
+
+  if (observed.getTime() > now.getTime() + 5 * 60 * 1000) {
+    observed.setUTCMonth(observed.getUTCMonth() - 1);
+  }
+
+  return observed.toISOString();
+}
+
 export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unknown, MetarResourceData> = {
   resource: 'metar',
   schemaVersion: METAR_SCHEMA_VERSION,
@@ -496,7 +524,8 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
       metarRaw,
       wind,
       source: 'aviationweather',
-      fetchedAt: new Date().toISOString()
+      fetchedAt: new Date().toISOString(),
+      observedAt: extractObservedAt(metarRaw)
     };
   },
   serialize: serializeMetar,

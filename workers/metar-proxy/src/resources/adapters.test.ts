@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { airportResourceAdapter, type AirportCacheEnvelope } from './airport/adapter';
-import { metarResourceAdapter } from './metar/adapter';
+import { extractObservedAt, metarResourceAdapter } from './metar/adapter';
 
 describe('resource adapters', () => {
   afterEach(() => {
@@ -23,13 +23,14 @@ describe('resource adapters', () => {
           gustKt: null
         },
         source: 'aviationweather',
-        fetchedAt: '2026-03-03T12:00:00.000Z'
+        fetchedAt: '2026-03-03T12:00:00.000Z',
+        observedAt: '2026-03-02T19:53:00.000Z'
       },
       'v1:metar:KJFK',
       'metar'
     );
 
-    expect(envelope.schemaVersion).toBe(3);
+    expect(envelope.schemaVersion).toBe(4);
     expect(envelope.resource).toBe('metar');
     expect(envelope.key).toBe('v1:metar:KJFK');
     expect(envelope.cacheMeta.policyVersion).toBe('metar-v1');
@@ -43,6 +44,14 @@ describe('resource adapters', () => {
         fetchedAt: '2026-03-03T12:00:00.000Z'
       })
     ).toBeNull();
+  });
+
+  it('derives a UTC observation time from the METAR group and rejects malformed groups', () => {
+    const now = new Date('2026-03-01T00:03:00.000Z');
+    expect(extractObservedAt('METAR KJFK 282351Z 18010KT 10SM CLR', now)).toBe('2026-02-28T23:51:00.000Z');
+    expect(extractObservedAt('KJFK 282351Z 18010KT 10SM CLR', now)).toBe('2026-02-28T23:51:00.000Z');
+    expect(extractObservedAt('METAR KJFK 321200Z 18010KT 10SM CLR', now)).toBeNull();
+    expect(extractObservedAt('METAR KJFK 011260Z 18010KT 10SM CLR', now)).toBeNull();
   });
 
   it('parses provider JSON wind objects during validation', async () => {
@@ -157,6 +166,8 @@ describe('resource adapters', () => {
         iso_country: 'US',
         country: { name: 'United States' },
         elevation_ft: '13',
+        latitude_deg: '40.6413',
+        longitude_deg: '-73.7781',
         home_link: 'https://www.jfkairport.com',
         runways: [
           {
@@ -203,6 +214,7 @@ describe('resource adapters', () => {
     expect(validated.countryCode).toBe('US');
     expect(validated.countryName).toBe('United States');
     expect(validated.elevationFt).toBe(13);
+    expect(validated.coordinates).toEqual({ latitudeDeg: 40.6413, longitudeDeg: -73.7781 });
     expect(validated.runwayEnds).toEqual([
       { id: '04L', headingDegMag: 40, isClosed: false, lengthFt: 12079 },
       { id: '13R', headingDegMag: 130, isClosed: true, lengthFt: 14511 },

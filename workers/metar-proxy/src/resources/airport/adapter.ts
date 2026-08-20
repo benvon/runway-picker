@@ -3,7 +3,7 @@ import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
 const AIRPORT_DB_BASE_URL = 'https://airportdb.io/api/v1/airport';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const AIRPORT_SCHEMA_VERSION = 7;
+export const AIRPORT_SCHEMA_VERSION = 8;
 
 export interface AirportResourceInput {
   icao: string;
@@ -49,10 +49,16 @@ export interface AirportResourceData {
   countryCode: string;
   countryName: string;
   elevationFt: number | null;
+  coordinates: AirportCoordinates | null;
   runwayEnds: AirportRunwayEnd[];
   frequencies: AirportResourceFrequency[];
   source: 'airportdb';
   fetchedAt: string;
+}
+
+export interface AirportCoordinates {
+  latitudeDeg: number;
+  longitudeDeg: number;
 }
 
 export type AirportWorkerErrorCode =
@@ -135,6 +141,30 @@ function toIntegerValue(value: unknown): number | null {
   }
 
   return Number.parseInt(trimmed, 10);
+}
+
+function toCoordinateValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  const text = toStringValue(value);
+  if (!text) {
+    return null;
+  }
+
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveCoordinates(payload: AirportDbPayload): AirportCoordinates | null {
+  const latitudeDeg = toCoordinateValue(payload.latitude_deg);
+  const longitudeDeg = toCoordinateValue(payload.longitude_deg);
+  if (latitudeDeg === null || longitudeDeg === null || Math.abs(latitudeDeg) > 90 || Math.abs(longitudeDeg) > 180) {
+    return null;
+  }
+
+  return { latitudeDeg, longitudeDeg };
 }
 
 function isRunwayClosed(value: unknown): boolean {
@@ -273,6 +303,7 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
     countryCode: asData.countryCode,
     countryName: asData.countryName,
     elevationFt: typeof asData.elevationFt === 'number' ? asData.elevationFt : null,
+    coordinates: asData.coordinates ?? null,
     runwayEnds,
     frequencies: normalizeCachedFrequencies(Array.isArray(asData.frequencies) ? asData.frequencies : []),
     fetchedAt: asData.fetchedAt,
@@ -508,6 +539,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
       countryCode: toStringValue(payload.iso_country) ?? '',
       countryName: toCountryName(payload),
       elevationFt: toIntegerValue(payload.elevation_ft),
+      coordinates: resolveCoordinates(payload),
       runwayEnds,
       frequencies: collectFrequencies(payload),
       source: 'airportdb',

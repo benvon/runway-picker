@@ -30,6 +30,7 @@ export interface MetarLookupResponse {
   wind: MetarLookupWind;
   source: 'aviationweather';
   fetchedAt: string;
+  observedAt: string | null;
   cache: MetarCacheMetadata;
 }
 
@@ -191,6 +192,15 @@ function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
   };
 }
 
+function normalizeObservedAt(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
   if (!/^[A-Z0-9]{4}$/.test(icao)) {
@@ -219,6 +229,7 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
     wind: normalizeWindPayload((payload as { wind?: unknown }).wind),
     source: payload.source,
     fetchedAt: payload.fetchedAt,
+    observedAt: normalizeObservedAt((payload as { observedAt?: unknown }).observedAt),
     cache: normalizeCacheMetadataValue(payload.cache, response.headers, payload.fetchedAt)
   };
 }

@@ -7,7 +7,7 @@ import type {
 } from '../domain/types';
 import { summarizeAirportFrequencies } from '../application/lookup/airportInfo';
 import { MetarLookupError } from '../services/metarApi';
-import type { LookupResolution } from '../application/lookup/useCase';
+import type { LookupResolution, RecommendationBlockReason } from '../application/lookup/useCase';
 import { appendChildren, createElement, createTextParagraph, strongLabel } from './dom';
 
 function formatHeadingValue(headwindKt: number): string {
@@ -107,14 +107,48 @@ function renderBestRunwayRow(bestRunway: RunwayWindComponent | null): HTMLElemen
   return row;
 }
 
+function recommendationWarning(reason: RecommendationBlockReason): string {
+  switch (reason) {
+    case 'STALE_METAR_CACHE':
+      return 'The METAR was served from a stale cache entry.';
+    case 'METAR_OBSERVATION_TIME_UNAVAILABLE':
+      return 'The METAR observation time is unavailable or invalid.';
+    case 'METAR_OBSERVATION_TOO_OLD':
+      return 'The METAR observation is more than 60 minutes old.';
+    case 'ALTERNATE_STATION_LOCATION_UNAVAILABLE':
+      return 'The alternate METAR station location could not be verified.';
+    case 'ALTERNATE_STATION_TOO_FAR':
+      return 'The alternate METAR station is more than 50 NM from the runway airport.';
+  }
+}
+
 function renderBestRunway(resolution: LookupResolution, result: EvaluationResult): HTMLElement {
-  const bestRunway = findBestRunway(result);
+  const bestRunway = resolution.recommendation.allowed ? findBestRunway(result) : null;
   const section = createElement('section', {
     className: 'panel panel-accent panel-spotlight',
     attributes: { 'aria-label': 'Best runway summary' }
   });
 
-  appendChildren(section, [renderBestRunwayRow(bestRunway), renderAirportInfo(resolution, bestRunway?.runwayId ?? null)]);
+  const warning = resolution.recommendation.allowed
+    ? null
+    : createElement('p', {
+        className: 'form-error',
+        textContent: `Runway recommendation suppressed: ${resolution.recommendation.reasons.map(recommendationWarning).join(' ')}`
+      });
+  const alternateSource =
+    resolution.runwaySourceIcao !== resolution.weatherSourceIcao &&
+    resolution.recommendation.alternateDistanceNm !== null
+      ? createElement('p', {
+          className: 'info-box',
+          textContent: `Using METAR from ${resolution.weatherSourceIcao}, ${Math.round(resolution.recommendation.alternateDistanceNm)} NM from ${resolution.runwaySourceIcao}.`
+        })
+      : null;
+  appendChildren(section, [
+    renderBestRunwayRow(bestRunway),
+    ...(warning ? [warning] : []),
+    ...(alternateSource ? [alternateSource] : []),
+    renderAirportInfo(resolution, bestRunway?.runwayId ?? null)
+  ]);
   return section;
 }
 
@@ -133,6 +167,15 @@ function renderLookupSummary(resolution: LookupResolution): HTMLElement {
     createElement('h2', { textContent: 'Lookup Summary' }),
     createTextParagraph('Runway airport:', `${runwaySourceLabel} - ${resolution.airport.name}`),
     createTextParagraph('Weather airport:', resolution.weatherSourceIcao),
+    createTextParagraph(
+      'METAR observation age:',
+      resolution.recommendation.observationAgeMinutes === null
+        ? 'Unavailable'
+        : `${resolution.recommendation.observationAgeMinutes} minute(s)`
+    ),
+    ...(resolution.recommendation.alternateDistanceNm === null
+      ? []
+      : [createTextParagraph('Alternate METAR distance:', `${Math.round(resolution.recommendation.alternateDistanceNm)} NM`)]),
     createTextParagraph('Runway ends loaded:', `${resolution.airport.runwayEnds.length}`)
   ]);
 

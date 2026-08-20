@@ -30,6 +30,7 @@ function airportPayload(icao: string) {
     countryCode: 'US',
     countryName: 'United States',
     elevationFt: 100,
+    coordinates: { latitudeDeg: 41.9, longitudeDeg: -87.9 },
     runwayEnds: [
       { id: '04', headingDegMag: 40, isClosed: false, lengthFt: 8000 },
       { id: '22', headingDegMag: 220, isClosed: false, lengthFt: 8000 }
@@ -73,6 +74,7 @@ function metarPayload(
     wind,
     source: 'aviationweather',
     fetchedAt: '2026-03-02T00:00:00.000Z',
+    observedAt: new Date().toISOString(),
     cache: {
       status: 'upstream_refresh',
       source: 'upstream',
