@@ -11,27 +11,26 @@ permissions:
   pull-requests: write
 
 jobs:
-  deploy-preview:
+  resolve-preview:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
-    # Configure this environment with required reviewers and a least-privilege
-    # preview-only Cloudflare credential before enabling this workflow.
-    environment: preview
     outputs:
-      preview_url: ${{ steps.deploy.outputs.preview_deployment_url }}
+      eligible: ${{ steps.pull-request.outputs.eligible }}
       pull_number: ${{ steps.pull-request.outputs.number }}
+      head_ref: ${{ steps.pull-request.outputs.headRef }}
       head_sha: ${{ steps.pull-request.outputs.headSha }}
     steps:
-      - name: Resolve trusted pull request metadata
+      - name: Resolve eligible pull request metadata
         id: pull-request
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         with:
           script: |
             const pullRequests = context.payload.workflow_run.pull_requests;
             if (pullRequests.length !== 1) {
-              core.setFailed('Expected the completed CI run to be associated with exactly one pull request.');
+              core.notice('Skipping preview: CI run is not associated with exactly one pull request.');
+              core.setOutput('eligible', 'false');
               return;
             }
 
@@ -48,14 +47,28 @@ jobs:
               ['dependabot[bot]', 'renovate[bot]'].includes(data.user.login) ||
               data.head.sha !== context.payload.workflow_run.head_sha
             ) {
-              core.setFailed('The completed CI run is not an eligible same-repository pull request head.');
+              core.notice('Skipping preview: CI run is not an eligible same-repository pull request head.');
+              core.setOutput('eligible', 'false');
               return;
             }
 
+            core.setOutput('eligible', 'true');
             core.setOutput('number', String(data.number));
             core.setOutput('headRef', data.head.ref);
             core.setOutput('headSha', data.head.sha);
 
+  deploy-preview:
+    needs: resolve-preview
+    if: needs.resolve-preview.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    # Configure this environment with required reviewers and a least-privilege
+    # preview-only Cloudflare credential before enabling this workflow.
+    environment: preview
+    outputs:
+      preview_url: ${{ steps.deploy.outputs.preview_deployment_url }}
+      pull_number: ${{ needs.resolve-preview.outputs.pull_number }}
+      head_sha: ${{ needs.resolve-preview.outputs.head_sha }}
+    steps:
       - name: Checkout trusted deployment tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -89,6 +102,11 @@ jobs:
             exit 1
           fi
 
+          if [ -e dist/_worker.js ]; then
+            echo 'Preview artifact must not contain a Pages Worker script.'
+            exit 1
+          fi
+
       - name: Validate preview deployment configuration
         shell: bash
         env:
@@ -108,8 +126,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
-          PR_HEAD_REF: ${{ steps.pull-request.outputs.headRef }}
-          PR_HEAD_SHA: ${{ steps.pull-request.outputs.headSha }}
+          PR_HEAD_REF: ${{ needs.resolve-preview.outputs.head_ref }}
+          PR_HEAD_SHA: ${{ needs.resolve-preview.outputs.head_sha }}
         run: |
           attempts=5
           for attempt in $(seq 1 "$attempts"); do
@@ -152,7 +170,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           PREVIEW_URL: ${{ steps.deploy.outputs.preview_url }}
-          PULL_NUMBER: ${{ steps.pull-request.outputs.number }}
+          PULL_NUMBER: ${{ needs.resolve-preview.outputs.pull_number }}
         with:
           script: |
             const marker = '<!-- runway-picker-preview -->';

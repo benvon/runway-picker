@@ -47,6 +47,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
           head_sha="$(git rev-parse HEAD)"
           if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then

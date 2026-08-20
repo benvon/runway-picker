@@ -41,6 +41,9 @@ jobs:
         run: npm run test:coverage
 
       - name: Build
+        env:
+          VITE_APP_VERSION: pr-${{ github.event.pull_request.number || github.run_number }}
+          VITE_APP_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: npm run build
 
       - name: Upload preview artifact
@@ -50,7 +53,7 @@ jobs:
           name: preview-dist
           if-no-files-found: error
           path: dist/
-          retention-days: 1
+          retention-days: 14
 
       - name: Upload artifacts on failure
         if: failure()
