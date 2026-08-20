@@ -70,11 +70,11 @@ function reciprocalHeading(headingDegTrue: number): number {
 }
 
 function toApproachDirection(headingDegTrue: number | null): CardinalDirection | null {
-  if (!headingDegTrue || headingDegTrue < 1 || headingDegTrue > 360) {
+  if (headingDegTrue === null || headingDegTrue < 0 || headingDegTrue > 360) {
     return null;
   }
 
-  const inboundHeading = reciprocalHeading(headingDegTrue);
+  const inboundHeading = reciprocalHeading(headingDegTrue === 0 ? 360 : headingDegTrue);
 
   if (inboundHeading >= 315 || inboundHeading < 45) {
     return 'north';

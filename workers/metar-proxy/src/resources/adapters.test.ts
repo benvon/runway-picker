@@ -82,6 +82,23 @@ describe('resource adapters', () => {
     expect(validated.wind.directionVariation).toEqual({ fromDegTrue: 180, toDegTrue: 260 });
   });
 
+  it('does not attach a later forecast-sector token to the current provider wind', async () => {
+    const validated = await metarResourceAdapter.validate(
+      [
+        {
+          rawOb: 'METAR KARR 031652Z 22015G25KT 4SM TEMPO 180V260 2SM HZ',
+          wdir: { value: 220 },
+          wspd: { value: 15 },
+          wgst: { value: 25 }
+        }
+      ],
+      { icao: 'KARR' },
+      { request: new Request('https://example.com'), env: { METAR_CACHE: { get: async () => null, put: async () => {} } } }
+    );
+
+    expect(validated.wind.directionVariation).toBeNull();
+  });
+
   it('handles calm winds when provider omits explicit wind fields', async () => {
     const validated = await metarResourceAdapter.validate(
       [
@@ -182,8 +199,8 @@ describe('resource adapters', () => {
             length_ft: '12079',
             le_ident: '04L',
             he_ident: '22R',
-            le_heading_degT: 47,
-            he_heading_degT: 227
+            le_heading_degT: '47.4',
+            he_heading_degT: 227.6
           },
           {
             closed: '1',
@@ -228,9 +245,9 @@ describe('resource adapters', () => {
     expect(validated.countryName).toBe('United States');
     expect(validated.elevationFt).toBe(13);
     expect(validated.runwayEnds).toEqual([
-      { id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12079 },
+      { id: '04L', headingDegTrue: 47.4, isClosed: false, lengthFt: 12079 },
       { id: '13R', headingDegTrue: 137, isClosed: true, lengthFt: 14511 },
-      { id: '22R', headingDegTrue: 227, isClosed: false, lengthFt: 12079 },
+      { id: '22R', headingDegTrue: 227.6, isClosed: false, lengthFt: 12079 },
       { id: '31L', headingDegTrue: 317, isClosed: true, lengthFt: 14511 }
     ]);
     expect(validated.frequencies).toEqual([

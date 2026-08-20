@@ -48,6 +48,19 @@ describe('airportInfo', () => {
     expect(summary.approach).toBe('119.4 MHz');
   });
 
+  it('treats a zero-degree true heading as north when selecting approach frequencies', () => {
+    const summary = summarizeAirportFrequencies(
+      [runway('36', 0)],
+      [
+        frequency('APP', 'NORTH APPROACH', '119.4'),
+        frequency('APP', 'SOUTH APPROACH', '121.2')
+      ],
+      '36'
+    );
+
+    expect(summary.approach).toBe('121.2 MHz');
+  });
+
   it('falls back to all approach frequencies when approach sectors are not direction-split', () => {
     const summary = summarizeAirportFrequencies(
       [runway('27', 270)],

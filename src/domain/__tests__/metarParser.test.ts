@@ -19,6 +19,11 @@ describe('metarParser', () => {
     expect(parsed.wind.directionVariation).toEqual({ fromDegTrue: 180, toDegTrue: 260 });
   });
 
+  it('does not attach a later forecast-sector token to the current wind group', () => {
+    const parsed = parseWindInput('KJFK 021651Z 22012G20KT 10SM TEMPO 180V260 4SM');
+    expect(parsed.wind.directionVariation).toBeNull();
+  });
+
   it('parses a standalone wind group', () => {
     const parsed = parseWindInput('18008KT');
     expect(parsed.wind).toMatchObject({

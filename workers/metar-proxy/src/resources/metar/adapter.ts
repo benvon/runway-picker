@@ -339,14 +339,21 @@ function resolveGust(speedKt: number, gustField: unknown): number | null {
 }
 
 function parseDirectionVariation(rawMetar: string | null): MetarWindDirectionVariation | null {
-  const match = rawMetar?.match(/\b(\d{3})V(\d{3})\b/);
-  if (!match) {
+  const windMatch = rawMetar?.match(/\b(?:\d{3}\d{2,3}(?:G\d{2,3})?KT|VRB\d{2,3}(?:G\d{2,3})?KT|0000{1,2}KT)\b/);
+  if (!rawMetar || !windMatch) {
+    return null;
+  }
+
+  const variationMatch = rawMetar
+    .slice((windMatch.index ?? 0) + windMatch[0].length)
+    .match(/^\s+(\d{3})V(\d{3})(?=\s|$)/);
+  if (!variationMatch) {
     return null;
   }
 
   return toDirectionVariation({
-    fromDegTrue: Number.parseInt(match[1], 10),
-    toDegTrue: Number.parseInt(match[2], 10)
+    fromDegTrue: Number.parseInt(variationMatch[1], 10),
+    toDegTrue: Number.parseInt(variationMatch[2], 10)
   });
 }
 

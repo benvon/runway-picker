@@ -140,6 +140,24 @@ function toIntegerValue(value: unknown): number | null {
   return Number.parseInt(trimmed, 10);
 }
 
+function toFiniteNumberValue(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function isRunwayClosed(value: unknown): boolean {
   if (typeof value === 'number') {
     return value !== 0;
@@ -175,7 +193,7 @@ function toRunwayEnd(
 
   const runwayNumber = Number.parseInt(match[1], 10);
   const suffix = match[2] ?? '';
-  const headingDegTrue = toIntegerValue(headingDegTrueCandidate);
+  const headingDegTrue = toFiniteNumberValue(headingDegTrueCandidate);
   if (headingDegTrue === null || headingDegTrue < 0 || headingDegTrue > 360) {
     return null;
   }
