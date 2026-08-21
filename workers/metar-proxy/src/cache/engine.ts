@@ -1,4 +1,5 @@
 import { acquireSingleFlightLease, releaseSingleFlightLease } from './singleFlight';
+import { buildCacheKey } from './keys';
 import type {
   CacheAdapterContext,
   CacheDataSource,
@@ -30,7 +31,6 @@ interface CacheRecords<TData> {
   negative: CachedNegativeRecord | null;
 }
 
-const KEY_VERSION = 'v1';
 const MAX_WAIT_FOR_REFRESH_MS = 2500;
 const WAIT_INTERVAL_MS = 150;
 
@@ -47,10 +47,6 @@ export class CacheEngineError extends Error {
 function getRuntimeEdgeCache(): EdgeCacheLike | undefined {
   const runtime = globalThis as unknown as { caches?: { default?: EdgeCacheLike } };
   return runtime.caches?.default;
-}
-
-function buildVersionedKey(resource: string, normalizedKey: string): string {
-  return `${KEY_VERSION}:${resource}:${normalizedKey}`;
 }
 
 function buildEdgeRequest(cacheKey: string): Request {
@@ -512,7 +508,7 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
   const { adapter, request, env } = input;
   const now = input.now ?? new Date();
   const normalizedKey = adapter.normalizeKey(input.input);
-  const cacheKey = buildVersionedKey(adapter.resource, normalizedKey);
+  const cacheKey = buildCacheKey(adapter.resource, normalizedKey);
   const edgeCache = input.edgeCache ?? getRuntimeEdgeCache();
   const readKv = async (key: string): Promise<unknown> => env.METAR_CACHE.get(key, 'json');
   const adapterContext: CacheAdapterContext = { request, env };

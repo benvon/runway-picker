@@ -6,6 +6,7 @@ Runway Picker is a high-contrast, mobile-first web app for pilots to compare run
 
 - ICAO-first input flow (primary airport + optional alternate for missing runway/weather data)
 - Airport lookup via local API proxy (`/api/airport`) backed by the dedicated Cloudflare Worker
+- Airport-location lookup via local API proxy (`/api/airport-location`) for alternate-METAR distance safety checks
 - METAR lookup via local API proxy (`/api/metar`) backed by a dedicated Cloudflare Worker
 - Shared adapter-driven caching (edge cache + KV + Durable Object single-flight)
 - Structured cache provenance metadata returned from `/api/metar` and `/api/airport` (`cache` object + `X-Runway-Cache-Status`)
@@ -55,6 +56,7 @@ make ci-e2e
 - API endpoints:
   - `/api/health`
   - `/api/airport?icao=KJFK`
+  - `/api/airport-location?icao=KJFK`
   - `/api/metar?icao=KJFK`
 - Dedicated Worker API backend:
   - `workers/metar-proxy/` (service name: `runway-picker-metar-api`)

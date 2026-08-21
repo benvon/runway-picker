@@ -110,6 +110,13 @@ for (const file of files) {
     }
   }
 
+  if (file === 'ci.yml') {
+    const pullRequestBlock = content.match(/^\s{2}pull_request:\s*\n((?:\s{4}.*\n)*)/m)?.[1] ?? '';
+    if (/^\s{4}branches:/m.test(pullRequestBlock)) {
+      errors.push(`${filePath}: CI must run for pull requests targeting every base branch`);
+    }
+  }
+
   if (file === 'deploy-production.yml' || file === 'deploy-worker-production.yml') {
     if (!/\n\s*workflow_call:\s*$/m.test(content)) {
       errors.push(`${filePath}: production deployment must be callable only from the release workflow`);

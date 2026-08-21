@@ -113,6 +113,7 @@ describe('lookup use case', () => {
       observationAgeMinutes: 61,
       reasons: expect.arrayContaining(['STALE_METAR_CACHE', 'METAR_OBSERVATION_TOO_OLD'])
     });
+    expect(result.resolution.recommendation.reasons).not.toContain('METAR_CACHE_PROVENANCE_UNAVAILABLE');
   });
 
   it('allows the 60-minute recency boundary but rejects observations just beyond it', async () => {
@@ -184,6 +185,8 @@ describe('lookup use case', () => {
         ...metar,
         cache: {
           ...metar.cache,
+          status: 'unknown',
+          source: 'unknown',
           servedAt: null
         }
       })
@@ -195,7 +198,10 @@ describe('lookup use case', () => {
     expect(result.resolution.recommendation).toMatchObject({
       allowed: false,
       observationAgeMinutes: null,
-      reasons: ['METAR_OBSERVATION_TIME_UNAVAILABLE']
+      reasons: expect.arrayContaining([
+        'METAR_CACHE_PROVENANCE_UNAVAILABLE',
+        'METAR_OBSERVATION_TIME_UNAVAILABLE'
+      ])
     });
   });
 

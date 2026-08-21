@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { airportResourceAdapter, type AirportCacheEnvelope } from './airport/adapter';
+import { airportLocationResourceAdapter } from './airport/locationAdapter';
 import { extractObservedAt, metarResourceAdapter } from './metar/adapter';
 
 describe('resource adapters', () => {
@@ -193,6 +194,22 @@ describe('resource adapters', () => {
     }
   });
 
+  it('rejects an airport provider record whose identity does not match the request', () => {
+    expect(() =>
+      airportResourceAdapter.validate(
+        {
+          ident: 'KORD',
+          runways: [{ closed: false, le_ident: '09', he_ident: '27', le_heading_degT: 90, he_heading_degT: 270 }]
+        },
+        { icao: 'KJFK' },
+        {
+          request: new Request('https://example.com'),
+          env: { METAR_CACHE: { get: async () => null, put: async () => {} }, AIRPORTDB_API_TOKEN: 'token' }
+        }
+      )
+    ).toThrow(expect.objectContaining({ status: 502, code: 'PROVIDER_PAYLOAD_INVALID' }));
+  });
+
   it('parses runway ends and preserves closed-runway status', async () => {
     const validated = await airportResourceAdapter.validate(
       {
@@ -384,15 +401,28 @@ describe('resource adapters', () => {
     ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
   });
 
-  it('returns coordinates without runway data for a coordinate-only lookup', async () => {
-    const validated = await airportResourceAdapter.validate(
-      {
-        ident: 'KLOC',
-        latitude_deg: '41.8781',
-        longitude_deg: '-87.6298',
-        runways: []
-      },
-      { icao: 'KLOC', requireRunwayData: false },
+  it('keeps runway profiles strict while the location resource accepts an airport without runways', async () => {
+    const upstream = {
+      ident: 'KLOC',
+      latitude_deg: '41.8781',
+      longitude_deg: '-87.6298',
+      runways: []
+    };
+
+    expect(() =>
+      airportResourceAdapter.validate(
+        upstream,
+        { icao: 'KLOC' },
+        {
+          request: new Request('https://example.com'),
+          env: { METAR_CACHE: { get: async () => null, put: async () => {} }, AIRPORTDB_API_TOKEN: 'token' }
+        }
+      )
+    ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
+
+    const validated = await airportLocationResourceAdapter.validate(
+      upstream,
+      { icao: 'KLOC' },
       {
         request: new Request('https://example.com'),
         env: { METAR_CACHE: { get: async () => null, put: async () => {} }, AIRPORTDB_API_TOKEN: 'token' }
@@ -400,9 +430,9 @@ describe('resource adapters', () => {
     );
 
     expect(validated.coordinates).toEqual({ latitudeDeg: 41.8781, longitudeDeg: -87.6298 });
-    expect(validated.runwayEnds).toEqual([]);
     expect(airportResourceAdapter.normalizeKey({ icao: 'kloc' })).toBe('KLOC');
-    expect(airportResourceAdapter.normalizeKey({ icao: 'kloc', requireRunwayData: false })).toBe('KLOC:location');
+    expect(airportLocationResourceAdapter.normalizeKey({ icao: 'kloc' })).toBe('KLOC');
+    expect(airportLocationResourceAdapter.resource).toBe('airport-location');
   });
 
   it('rejects an incomplete reciprocal runway pair instead of evaluating only one end', async () => {
@@ -488,6 +518,35 @@ describe('resource adapters', () => {
     const parsed = airportResourceAdapter.deserialize(cached);
     expect(parsed?.icao).toBe('KMSP');
     expect(parsed?.frequencies).toEqual([]);
+  });
+
+  it('rejects cached airport records whose identity differs from the requested ICAO', () => {
+    const mismatchedProfile = {
+      data: {
+        requestedIcao: 'KJFK',
+        icao: 'KLGA',
+        name: 'LaGuardia Airport',
+        municipality: 'New York',
+        countryCode: 'US',
+        countryName: 'United States',
+        elevationFt: 21,
+        runwayEnds: [{ id: '04', headingDegTrue: 44, isClosed: false, lengthFt: 7000 }],
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      }
+    };
+    const mismatchedLocation = {
+      data: {
+        requestedIcao: 'KJFK',
+        icao: 'KLGA',
+        coordinates: { latitudeDeg: 40.7769, longitudeDeg: -73.874 },
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      }
+    };
+
+    expect(airportResourceAdapter.deserialize(mismatchedProfile)).toBeNull();
+    expect(airportLocationResourceAdapter.deserialize(mismatchedLocation)).toBeNull();
   });
 
   it('ignores invalid runway entries and exposes observability labels', async () => {

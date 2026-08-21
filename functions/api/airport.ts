@@ -23,11 +23,14 @@ export const onRequestGet: PagesFunction<AirportProxyEnv> = async ({ request, en
       return buildApiError('Invalid airport lookup view.', 400, 'INVALID_REQUEST', requestId);
     }
 
-    const workerUrl = new URL('https://metar.internal/api/airport');
+    // Compatibility for the bottom stack PR: its client still uses the former
+    // view query while the Worker now owns separate cache resources.
+    const workerUrl = new URL(
+      view === 'coordinates'
+        ? 'https://metar.internal/api/airport-location'
+        : 'https://metar.internal/api/airport'
+    );
     workerUrl.searchParams.set('icao', icaoValidation.icao);
-    if (view === 'coordinates') {
-      workerUrl.searchParams.set('view', view);
-    }
 
     const headers = new Headers({
       Accept: 'application/json',

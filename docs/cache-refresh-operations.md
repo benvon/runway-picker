@@ -6,8 +6,10 @@ This runbook covers day-2 operations for the scheduled hot-cache refresher in `w
 
 - Worker cron trigger runs every `15` minutes (`*/15 * * * *`).
 - Every successful `/api/metar` and `/api/airport` response updates a hot-entry key:
-  - `v1:hot:metar:{ICAO}`
-  - `v1:hot:airport:{ICAO}`
+  - `v2:hot:metar:{ICAO}`
+  - `v2:hot:airport:{ICAO}`
+- Queue metadata contains only the resource and normalized ICAO. The worker derives the payload cache key, so queue metadata cannot redirect a refresh to another resource or payload variant. Legacy `v1:hot:*` entries are not scanned and expire using their already-written inactivity TTL; no manual migration or cleanup is required.
+- `/api/airport-location` is deliberately not hot-refreshed. It is long-lived reference data and has its own normal cache policy, so it cannot be accidentally refreshed as a runway profile.
 - Scheduled runs:
   1. Load hot entries.
   2. Evict entries inactive longer than inactivity TTL (also purges cache payload key).
@@ -54,14 +56,14 @@ List hot queue entries:
 ```bash
 npx wrangler kv key list \
   --binding METAR_CACHE \
-  --prefix "v1:hot:" \
+  --prefix "v2:hot:" \
   --config workers/metar-proxy/wrangler.jsonc
 ```
 
 Inspect one hot-entry payload:
 
 ```bash
-npx wrangler kv key get "v1:hot:metar:KJFK" \
+npx wrangler kv key get "v2:hot:metar:KJFK" \
   --binding METAR_CACHE \
   --config workers/metar-proxy/wrangler.jsonc
 ```
@@ -77,7 +79,7 @@ npx wrangler kv key get "v1:metar:KJFK" \
 Remove a stuck hot-entry key (surgical cleanup):
 
 ```bash
-npx wrangler kv key delete "v1:hot:metar:KJFK" \
+npx wrangler kv key delete "v2:hot:metar:KJFK" \
   --binding METAR_CACHE \
   --config workers/metar-proxy/wrangler.jsonc
 ```
@@ -99,7 +101,7 @@ npx wrangler kv key delete "v1:hot:metar:KJFK" \
 ### Queue growth without cleanup
 
 - Verify `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` is set and positive.
-- Sample `v1:hot:*` keys and validate `lastAccessedAt`/`lastRefreshedAt` fields.
+- Sample `v2:hot:*` keys and validate `lastAccessedAt`/`lastRefreshedAt` fields.
 - Ensure deployment includes recent scheduler code and env vars.
 
 ## Cost guardrails
