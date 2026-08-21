@@ -164,15 +164,196 @@ jobs:
   deploy-pages:
     needs: create-release
     if: needs.create-release.outputs.should_release == 'true'
-    uses: ./.github/workflows/deploy-production.yml
-    with:
-      release_tag: ${{ needs.create-release.outputs.release_tag }}
-      release_sha: ${{ needs.create-release.outputs.release_sha }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate trusted release inputs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vX.Y.Z. Got: $RELEASE_TAG"
+            exit 1
+          fi
+
+          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Release SHA must be a full lowercase Git commit SHA.'
+            exit 1
+          fi
+
+      - name: Checkout released main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.create-release.outputs.release_sha }}
+
+      - name: Verify tag provenance
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        run: |
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then
+            echo 'Release tag does not resolve to the CI-gated main commit.'
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate Cloudflare configuration
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
+            echo 'Missing production deployment configuration.'
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        env:
+          VITE_APP_VERSION: ${{ needs.create-release.outputs.release_tag }}
+          VITE_APP_COMMIT_SHA: ${{ needs.create-release.outputs.release_sha }}
+        run: npm run build
+
+      - name: Deploy production to Cloudflare Pages
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+          COMMIT_SHA: ${{ needs.create-release.outputs.release_sha }}
+        run: |
+          attempts=5
+          for attempt in $(seq 1 "$attempts"); do
+            if npx wrangler pages deploy dist \
+              --project-name "$CLOUDFLARE_PROJECT_NAME" \
+              --branch main \
+              --commit-hash "$COMMIT_SHA"; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "Pages production deploy failed after $attempts attempts."
+              exit 1
+            fi
+
+            sleep_seconds=$((attempt * 10))
+            echo "Retrying Pages production deploy in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
 
   deploy-worker:
     needs: create-release
     if: needs.create-release.outputs.should_release == 'true'
-    uses: ./.github/workflows/deploy-worker-production.yml
-    with:
-      release_tag: ${{ needs.create-release.outputs.release_tag }}
-      release_sha: ${{ needs.create-release.outputs.release_sha }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate trusted release inputs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vX.Y.Z. Got: $RELEASE_TAG"
+            exit 1
+          fi
+
+          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Release SHA must be a full lowercase Git commit SHA.'
+            exit 1
+          fi
+
+      - name: Checkout released main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.create-release.outputs.release_sha }}
+
+      - name: Verify tag provenance
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        run: |
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then
+            echo 'Release tag does not resolve to the CI-gated main commit.'
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate Cloudflare configuration
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AIRPORT_IO_TOKEN: ${{ secrets.AIRPORT_IO_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$AIRPORT_IO_TOKEN" ]; then
+            echo 'Missing worker production deployment configuration.'
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set AirportDB token secret
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AIRPORT_IO_TOKEN: ${{ secrets.AIRPORT_IO_TOKEN }}
+        run: |
+          printf '%s' "$AIRPORT_IO_TOKEN" | npx wrangler secret put AIRPORTDB_API_TOKEN --config workers/metar-proxy/wrangler.jsonc
+
+      - name: Deploy METAR Worker
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          attempts=5
+          for attempt in $(seq 1 "$attempts"); do
+            if npx wrangler deploy --config workers/metar-proxy/wrangler.jsonc; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "Worker production deploy failed after $attempts attempts."
+              exit 1
+            fi
+
+            sleep_seconds=$((attempt * 10))
+            echo "Retrying worker production deploy in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
