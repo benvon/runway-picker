@@ -7,6 +7,7 @@ export const AIRPORT_SCHEMA_VERSION = 8;
 
 export interface AirportResourceInput {
   icao: string;
+  requireRunwayData?: boolean;
 }
 
 export interface AirportRunwayEnd {
@@ -50,14 +51,21 @@ export interface AirportResourceData {
   countryCode: string;
   countryName: string;
   elevationFt: number | null;
+  coordinates: AirportCoordinates | null;
   runwayEnds: AirportRunwayEnd[];
   frequencies: AirportResourceFrequency[];
   source: 'airportdb';
   fetchedAt: string;
 }
 
+export interface AirportCoordinates {
+  latitudeDeg: number;
+  longitudeDeg: number;
+}
+
 export type AirportWorkerErrorCode =
   | 'INVALID_ICAO'
+  | 'INVALID_REQUEST'
   | 'SERVICE_NOT_CONFIGURED'
   | 'AUTH_ERROR'
   | 'ICAO_NOT_FOUND'
@@ -138,6 +146,30 @@ function toIntegerValue(value: unknown): number | null {
   }
 
   return Number.parseInt(trimmed, 10);
+}
+
+function toCoordinateValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  const text = toStringValue(value);
+  if (!text) {
+    return null;
+  }
+
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveCoordinates(payload: AirportDbPayload): AirportCoordinates | null {
+  const latitudeDeg = toCoordinateValue(payload.latitude_deg);
+  const longitudeDeg = toCoordinateValue(payload.longitude_deg);
+  if (latitudeDeg === null || longitudeDeg === null || Math.abs(latitudeDeg) > 90 || Math.abs(longitudeDeg) > 180) {
+    return null;
+  }
+
+  return { latitudeDeg, longitudeDeg };
 }
 
 function toFiniteNumberValue(value: unknown): number | null {
@@ -291,10 +323,6 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
 
   const runwayEnds = normalizeCachedRunways(asData.runwayEnds);
 
-  if (runwayEnds.length === 0) {
-    return null;
-  }
-
   return {
     requestedIcao: asData.requestedIcao,
     icao: asData.icao,
@@ -303,6 +331,7 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
     countryCode: asData.countryCode,
     countryName: asData.countryName,
     elevationFt: typeof asData.elevationFt === 'number' ? asData.elevationFt : null,
+    coordinates: asData.coordinates ?? null,
     runwayEnds,
     frequencies: normalizeCachedFrequencies(Array.isArray(asData.frequencies) ? asData.frequencies : []),
     fetchedAt: asData.fetchedAt,
@@ -494,7 +523,8 @@ function resolvePayloadIcao(payload: AirportDbPayload, requestedIcao: string): s
 export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, unknown, AirportResourceData> = {
   resource: 'airport',
   schemaVersion: AIRPORT_SCHEMA_VERSION,
-  normalizeKey: (input) => normalizeAirportIcao(input.icao),
+  normalizeKey: (input) =>
+    `${normalizeAirportIcao(input.icao)}${input.requireRunwayData === false ? ':location' : ''}`,
   fetchUpstream: async (input, ctx) => {
     const icao = normalizeAirportIcao(input.icao);
     const token = ctx.env.AIRPORTDB_API_TOKEN?.trim();
@@ -528,7 +558,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
     const requestedIcao = normalizeAirportIcao(input.icao);
     const payload = toAirportDbPayload(upstream);
     const runwayEnds = collectRunwayEnds(payload);
-    if (runwayEnds.length === 0) {
+    if (input.requireRunwayData !== false && runwayEnds.length === 0) {
       throw new AirportWorkerError(
         `No runway data is available for ICAO ${requestedIcao}.`,
         404,
@@ -544,6 +574,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
       countryCode: toStringValue(payload.iso_country) ?? '',
       countryName: toCountryName(payload),
       elevationFt: toIntegerValue(payload.elevation_ft),
+      coordinates: resolveCoordinates(payload),
       runwayEnds,
       frequencies: collectFrequencies(payload),
       source: 'airportdb',

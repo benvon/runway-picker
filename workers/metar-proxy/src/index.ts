@@ -172,8 +172,14 @@ function toMetarInput(request: Request): MetarResourceInput {
 
 function toAirportInput(request: Request): AirportResourceInput {
   const url = new URL(request.url);
+  const view = url.searchParams.get('view');
+  if (view !== null && view !== 'coordinates') {
+    throw new AirportWorkerError('Invalid airport lookup view.', 400, 'INVALID_REQUEST');
+  }
+
   return {
-    icao: url.searchParams.get('icao') ?? ''
+    icao: url.searchParams.get('icao') ?? '',
+    requireRunwayData: view !== 'coordinates'
   };
 }
 

@@ -18,7 +18,11 @@ export interface MetarCacheMetadata {
   source: MetarCacheSource;
   ageSeconds: number;
   fetchedAt: string;
-  servedAt: string;
+  /**
+   * Timestamp supplied by the METAR API. A missing or invalid value is not
+   * replaced with browser time because it is used for safety gating.
+   */
+  servedAt: string | null;
   ttlSeconds: number;
   key: string;
   resource: string;
@@ -30,6 +34,7 @@ export interface MetarLookupResponse {
   wind: MetarLookupWind;
   source: 'aviationweather';
   fetchedAt: string;
+  observedAt: string | null;
   cache: MetarCacheMetadata;
 }
 
@@ -128,7 +133,7 @@ function normalizeCacheMetadataValue(
   headers: Headers,
   fallbackFetchedAt: string
 ): MetarCacheMetadata {
-  return normalizeSharedCacheMetadata({
+  const normalized = normalizeSharedCacheMetadata({
     cacheCandidate,
     headers,
     fallbackFetchedAt,
@@ -138,6 +143,25 @@ function normalizeCacheMetadataValue(
     isStatus: isCacheStatus,
     isSource: isCacheSource
   }) as NormalizedCacheMetadata<MetarCacheStatus, MetarCacheSource>;
+
+  return {
+    ...normalized,
+    servedAt: normalizeServerTimestamp(cacheCandidate)
+  };
+}
+
+function normalizeServerTimestamp(cacheCandidate: unknown): string | null {
+  if (!cacheCandidate || typeof cacheCandidate !== 'object') {
+    return null;
+  }
+
+  const servedAt = (cacheCandidate as { servedAt?: unknown }).servedAt;
+  if (typeof servedAt !== 'string') {
+    return null;
+  }
+
+  const parsed = new Date(servedAt);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
 function readMetarErrorPayload(
@@ -199,6 +223,15 @@ function normalizeWindPayload(windCandidate: unknown): MetarLookupWind {
   };
 }
 
+function normalizeObservedAt(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 function normalizeDirectionVariation(value: unknown): MetarLookupDirectionVariation | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -250,6 +283,7 @@ export async function fetchMetarByIcao(icaoInput: string): Promise<MetarLookupRe
     wind: normalizeWindPayload((payload as { wind?: unknown }).wind),
     source: payload.source,
     fetchedAt: payload.fetchedAt,
+    observedAt: normalizeObservedAt((payload as { observedAt?: unknown }).observedAt),
     cache: normalizeCacheMetadataValue(payload.cache, response.headers, payload.fetchedAt)
   };
 }

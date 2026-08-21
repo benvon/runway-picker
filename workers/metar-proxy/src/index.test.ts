@@ -121,6 +121,8 @@ function buildAirportReport(icao: string): Record<string, unknown> {
     iso_country: 'US',
     country: { name: 'United States' },
     elevation_ft: '100',
+    latitude_deg: '39.0997',
+    longitude_deg: '-94.5786',
     home_link: `https://${icao.toLowerCase()}.example.com`,
     runways: [
       {
@@ -308,7 +310,8 @@ describe('metar worker', () => {
           gustKt: null
         },
         source: 'aviationweather',
-        fetchedAt: fetchedAt.toISOString()
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
       },
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
@@ -328,11 +331,13 @@ describe('metar worker', () => {
     const payload = (await response.json()) as {
       icao: string;
       wind: { directionType: string; speedKt: number };
+      observedAt: string | null;
       cache: { source: string; status: string };
     };
 
     expect(payload.icao).toBe('KMCI');
     expect(payload.wind.directionType).toBe('fixed');
+    expect(typeof payload.observedAt).toBe('string');
     expect(payload.wind.speedKt).toBe(10);
     expect(payload.cache.source).toBe('kv');
     expect(payload.cache.status).toBe('kv_hit');
@@ -797,6 +802,7 @@ describe('airport worker', () => {
       requestedIcao: string;
       icao: string;
       source: string;
+      coordinates: { latitudeDeg: number; longitudeDeg: number } | null;
       runwayEnds: Array<{ id: string; headingDegTrue: number; isClosed: boolean; lengthFt: number | null }>;
       frequencies: Array<{ type: string; description: string; frequencyMhz: string }>;
       cache: { source: string; status: string };
@@ -805,6 +811,7 @@ describe('airport worker', () => {
     expect(payload.requestedIcao).toBe('KJFK');
     expect(payload.icao).toBe('KJFK');
     expect(payload.source).toBe('airportdb');
+    expect(payload.coordinates).toEqual({ latitudeDeg: 39.0997, longitudeDeg: -94.5786 });
     expect(payload.runwayEnds).toEqual([
       { id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12000 },
       { id: '13', headingDegTrue: 137, isClosed: true, lengthFt: 10000 },

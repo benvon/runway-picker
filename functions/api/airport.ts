@@ -18,9 +18,16 @@ export const onRequestGet: PagesFunction<AirportProxyEnv> = async ({ request, en
     if (!icaoValidation.ok) {
       return buildApiError(icaoValidation.error, 400, icaoValidation.code, requestId);
     }
+    const view = requestUrl.searchParams.get('view');
+    if (view !== null && view !== 'coordinates') {
+      return buildApiError('Invalid airport lookup view.', 400, 'INVALID_REQUEST', requestId);
+    }
 
     const workerUrl = new URL('https://metar.internal/api/airport');
     workerUrl.searchParams.set('icao', icaoValidation.icao);
+    if (view === 'coordinates') {
+      workerUrl.searchParams.set('view', view);
+    }
 
     const headers = new Headers({
       Accept: 'application/json',

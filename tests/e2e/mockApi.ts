@@ -27,6 +27,7 @@ export function airportPayload(icao: string): Record<string, unknown> {
     countryCode: 'US',
     countryName: 'United States',
     elevationFt: 100,
+    coordinates: { latitudeDeg: 41.9, longitudeDeg: -87.9 },
     runwayEnds: [
       { id: '04', headingDegTrue: 40, isClosed: false, lengthFt: 8000 },
       { id: '22', headingDegTrue: 220, isClosed: false, lengthFt: 8000 }
@@ -53,18 +54,21 @@ export function airportPayload(icao: string): Record<string, unknown> {
 }
 
 export function metarPayload(icao: string, wind: WindPayload): Record<string, unknown> {
+  const responseTimestamp = new Date().toISOString();
+
   return {
     icao,
     metarRaw: `METAR ${icao} 021953Z ${wind.raw} 10SM FEW020 08/03 A3012 RMK AO2`,
     wind,
     source: 'aviationweather',
-    fetchedAt: '2026-03-02T00:00:00.000Z',
+    fetchedAt: responseTimestamp,
+    observedAt: responseTimestamp,
     cache: {
       status: 'upstream_refresh',
       source: 'upstream',
       ageSeconds: 0,
-      fetchedAt: '2026-03-02T00:00:00.000Z',
-      servedAt: '2026-03-02T00:00:00.000Z',
+      fetchedAt: responseTimestamp,
+      servedAt: responseTimestamp,
       ttlSeconds: 1800,
       key: `v1:metar:${icao}`,
       resource: 'metar'

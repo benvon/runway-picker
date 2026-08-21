@@ -98,6 +98,36 @@ describe('metarApi service', () => {
     expect(payload.wind.speedKt).toBe(3);
     expect(payload.cache.status).toBe('upstream_refresh');
     expect(payload.cache.source).toBe('upstream');
+    expect(payload.cache.servedAt).toBeNull();
+  });
+
+  it('does not trust a malformed server cache timestamp', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json({
+          icao: 'KMCI',
+          metarRaw: 'METAR KMCI 022051Z 12008KT 10SM FEW040 05/M02 A3016',
+          wind: {
+            raw: '12008KT',
+            directionType: 'fixed',
+            directionDegTrue: 120,
+            speedKt: 8,
+            gustKt: null
+          },
+          source: 'aviationweather',
+          fetchedAt: '2026-03-02T00:00:00.000Z',
+          cache: {
+            status: 'upstream_refresh',
+            source: 'upstream',
+            servedAt: 'not-a-timestamp'
+          }
+        })
+      )
+    );
+
+    const payload = await fetchMetarByIcao('kmci');
+    expect(payload.cache.servedAt).toBeNull();
   });
 
   it('throws when response lacks structured wind fields', async () => {

@@ -30,6 +30,7 @@ function airportPayload(icao: string) {
     countryCode: 'US',
     countryName: 'United States',
     elevationFt: 100,
+    coordinates: { latitudeDeg: 41.9, longitudeDeg: -87.9 },
     runwayEnds: [
       { id: '04', headingDegTrue: 40, isClosed: false, lengthFt: 8000 },
       { id: '22', headingDegTrue: 220, isClosed: false, lengthFt: 8000 }
@@ -68,18 +69,21 @@ function metarPayload(
     raw: string;
   }
 ) {
+  const servedAt = new Date().toISOString();
+
   return {
     icao,
     metarRaw: `METAR ${icao} 021953Z ${wind.raw} 10SM FEW020 08/03 A3012 RMK AO2`,
     wind,
     source: 'aviationweather',
-    fetchedAt: '2026-03-02T00:00:00.000Z',
+    fetchedAt: servedAt,
+    observedAt: servedAt,
     cache: {
       status: 'upstream_refresh',
       source: 'upstream',
       ageSeconds: 0,
-      fetchedAt: '2026-03-02T00:00:00.000Z',
-      servedAt: '2026-03-02T00:00:00.000Z',
+      fetchedAt: servedAt,
+      servedAt,
       ttlSeconds: 1800,
       key: `v1:metar:${icao}`,
       resource: 'metar'

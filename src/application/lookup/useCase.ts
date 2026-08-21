@@ -1,4 +1,8 @@
-import { AirportLookupError, type AirportLookupResponse } from '../../services/airportApi';
+import {
+  AirportLookupError,
+  type AirportCoordinateLookupResponse,
+  type AirportLookupResponse
+} from '../../services/airportApi';
 import { MetarLookupError, type MetarLookupResponse } from '../../services/metarApi';
 
 export type LookupStage = 'primary' | 'alternate-metar';
@@ -8,6 +12,24 @@ export interface LookupResolution {
   metar: MetarLookupResponse;
   runwaySourceIcao: string;
   weatherSourceIcao: string;
+  recommendation: RecommendationEligibility;
+}
+
+export const MAX_METAR_OBSERVATION_AGE_MINUTES = 60;
+export const MAX_ALTERNATE_METAR_DISTANCE_NM = 50;
+
+export type RecommendationBlockReason =
+  | 'STALE_METAR_CACHE'
+  | 'METAR_OBSERVATION_TIME_UNAVAILABLE'
+  | 'METAR_OBSERVATION_TOO_OLD'
+  | 'ALTERNATE_STATION_LOCATION_UNAVAILABLE'
+  | 'ALTERNATE_STATION_TOO_FAR';
+
+export interface RecommendationEligibility {
+  allowed: boolean;
+  reasons: RecommendationBlockReason[];
+  observationAgeMinutes: number | null;
+  alternateDistanceNm: number | null;
 }
 
 export interface LookupState {
@@ -18,6 +40,7 @@ export interface LookupState {
 
 export interface LookupGateway {
   fetchAirportByIcao(icao: string): Promise<AirportLookupResponse>;
+  fetchAirportCoordinatesByIcao(icao: string): Promise<AirportCoordinateLookupResponse>;
   fetchMetarByIcao(icao: string): Promise<MetarLookupResponse>;
 }
 
@@ -63,6 +86,92 @@ function shouldShowAirportNotFoundMessage(error: unknown): boolean {
   return error instanceof AirportLookupError && error.code === 'ICAO_NOT_FOUND';
 }
 
+function isStaleMetarCache(status: MetarLookupResponse['cache']['status']): boolean {
+  return status === 'stale_on_error' || status === 'stale_while_refresh';
+}
+
+function observationAgeMilliseconds(observedAt: string | null, servedAt: string | null): number | null {
+  if (!observedAt || !servedAt) {
+    return null;
+  }
+
+  const observedAtMs = Date.parse(observedAt);
+  const servedAtMs = Date.parse(servedAt);
+  if (Number.isNaN(observedAtMs) || Number.isNaN(servedAtMs) || observedAtMs > servedAtMs) {
+    return null;
+  }
+
+  return servedAtMs - observedAtMs;
+}
+
+function distanceNm(
+  primary: AirportLookupResponse,
+  alternate: AirportCoordinateLookupResponse | null
+): number | null {
+  if (!primary.coordinates || !alternate?.coordinates) {
+    return null;
+  }
+
+  const toRadians = (value: number) => (value * Math.PI) / 180;
+  const latitudeDelta = toRadians(alternate.coordinates.latitudeDeg - primary.coordinates.latitudeDeg);
+  const longitudeDelta = toRadians(alternate.coordinates.longitudeDeg - primary.coordinates.longitudeDeg);
+  const sinLatitude = Math.sin(latitudeDelta / 2);
+  const sinLongitude = Math.sin(longitudeDelta / 2);
+  const haversine =
+    sinLatitude * sinLatitude +
+    Math.cos(toRadians(primary.coordinates.latitudeDeg)) *
+      Math.cos(toRadians(alternate.coordinates.latitudeDeg)) *
+      sinLongitude * sinLongitude;
+  return 3440.065 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+export function assessRecommendationEligibility(
+  airport: AirportLookupResponse,
+  metar: MetarLookupResponse,
+  weatherStation: AirportCoordinateLookupResponse | null
+): RecommendationEligibility {
+  const reasons: RecommendationBlockReason[] = [];
+  const ageMs = observationAgeMilliseconds(metar.observedAt, metar.cache.servedAt);
+  const ageMinutes = ageMs === null ? null : Math.floor(ageMs / 60_000);
+  const usesAlternateStation = airport.icao !== metar.icao;
+  const alternateDistanceNm = usesAlternateStation ? distanceNm(airport, weatherStation) : null;
+
+  if (isStaleMetarCache(metar.cache.status)) {
+    reasons.push('STALE_METAR_CACHE');
+  }
+  if (ageMinutes === null) {
+    reasons.push('METAR_OBSERVATION_TIME_UNAVAILABLE');
+  } else if (ageMs !== null && ageMs > MAX_METAR_OBSERVATION_AGE_MINUTES * 60_000) {
+    reasons.push('METAR_OBSERVATION_TOO_OLD');
+  }
+  if (usesAlternateStation && alternateDistanceNm === null) {
+    reasons.push('ALTERNATE_STATION_LOCATION_UNAVAILABLE');
+  } else if (alternateDistanceNm !== null && alternateDistanceNm > MAX_ALTERNATE_METAR_DISTANCE_NM) {
+    reasons.push('ALTERNATE_STATION_TOO_FAR');
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    reasons,
+    observationAgeMinutes: ageMinutes,
+    alternateDistanceNm
+  };
+}
+
+function buildResolution(
+  airport: AirportLookupResponse,
+  metar: MetarLookupResponse,
+  weatherStation: AirportCoordinateLookupResponse | null = airport
+): LookupResolution {
+  return {
+    airport,
+    metar,
+    runwaySourceIcao: airport.requestedIcao,
+    weatherSourceIcao: metar.icao,
+    recommendation: assessRecommendationEligibility(airport, metar, weatherStation)
+  };
+}
+
 export async function runPrimaryLookup(
   primaryIcao: string,
   gateway: LookupGateway
@@ -85,12 +194,7 @@ export async function runPrimaryLookup(
     return {
       type: 'success',
       state: createPrimaryState(),
-      resolution: {
-        airport,
-        metar,
-        runwaySourceIcao: primaryIcao,
-        weatherSourceIcao: primaryIcao
-      }
+      resolution: buildResolution(airport, metar)
     };
   } catch (error) {
     if (!shouldPromptAlternateMetar(error)) {
@@ -115,14 +219,16 @@ export async function runAlternateLookup(
   }
 
   const metar = await gateway.fetchMetarByIcao(alternateIcao);
+  let weatherStation: AirportCoordinateLookupResponse | null = null;
+  try {
+    weatherStation = await gateway.fetchAirportCoordinatesByIcao(metar.icao);
+  } catch {
+    // A missing station location must suppress the recommendation, not hide the METAR calculation.
+  }
+
   return {
     type: 'success',
     state: createPrimaryState(),
-    resolution: {
-      airport: state.primaryAirport,
-      metar,
-      runwaySourceIcao: state.primaryIcao,
-      weatherSourceIcao: metar.icao
-    }
+    resolution: buildResolution(state.primaryAirport, metar, weatherStation)
   };
 }

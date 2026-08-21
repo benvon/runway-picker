@@ -33,11 +33,22 @@ export interface AirportLookupResponse {
   countryCode: string;
   countryName: string;
   elevationFt: number | null;
+  coordinates: AirportCoordinates | null;
   runwayEnds: RunwayEnd[];
   frequencies: AirportFrequency[];
   source: 'airportdb';
   fetchedAt: string;
   cache: AirportCacheMetadata;
+}
+
+export interface AirportCoordinates {
+  latitudeDeg: number;
+  longitudeDeg: number;
+}
+
+export interface AirportCoordinateLookupResponse {
+  icao: string;
+  coordinates: AirportCoordinates | null;
 }
 
 export type AirportLookupErrorCode =
@@ -217,6 +228,26 @@ function normalizeFrequencies(frequencyCandidate: unknown): AirportFrequency[] {
     }));
 }
 
+function normalizeCoordinates(value: unknown): AirportCoordinates | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Partial<AirportCoordinates>;
+  if (
+    typeof candidate.latitudeDeg !== 'number' ||
+    typeof candidate.longitudeDeg !== 'number' ||
+    !Number.isFinite(candidate.latitudeDeg) ||
+    !Number.isFinite(candidate.longitudeDeg) ||
+    Math.abs(candidate.latitudeDeg) > 90 ||
+    Math.abs(candidate.longitudeDeg) > 180
+  ) {
+    return null;
+  }
+
+  return { latitudeDeg: candidate.latitudeDeg, longitudeDeg: candidate.longitudeDeg };
+}
+
 export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
   if (!/^[A-Z0-9]{4}$/.test(icao)) {
@@ -250,10 +281,40 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
     countryCode: typeof payload.countryCode === 'string' ? payload.countryCode : '',
     countryName: typeof payload.countryName === 'string' ? payload.countryName : '',
     elevationFt: typeof payload.elevationFt === 'number' ? payload.elevationFt : null,
+    coordinates: normalizeCoordinates((payload as { coordinates?: unknown }).coordinates),
     runwayEnds: normalizeRunwayEnds(payload.runwayEnds),
     frequencies: normalizeFrequencies(payload.frequencies),
     source: payload.source,
     fetchedAt: payload.fetchedAt,
     cache: normalizeCacheMetadataValue(payload.cache, response.headers, payload.fetchedAt)
+  };
+}
+
+export async function fetchAirportCoordinatesByIcao(icaoInput: string): Promise<AirportCoordinateLookupResponse> {
+  const icao = normalizeIcaoInput(icaoInput);
+  if (!/^[A-Z0-9]{4}$/.test(icao)) {
+    throw new AirportLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400, 'INVALID_ICAO');
+  }
+
+  const response = await fetch(`/api/airport?icao=${encodeURIComponent(icao)}&view=coordinates`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    return throwAirportLookupError(response, icao);
+  }
+
+  const payload = (await response.json()) as { icao?: unknown; coordinates?: unknown };
+  if (typeof payload.icao !== 'string') {
+    throw new AirportLookupError('Airport location response is missing an ICAO code.', 502, 'UNEXPECTED');
+  }
+
+  return {
+    icao: payload.icao,
+    coordinates: normalizeCoordinates(payload.coordinates)
   };
 }

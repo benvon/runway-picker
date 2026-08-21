@@ -84,7 +84,7 @@ test.describe('Runway Picker desktop layout', () => {
     await page.locator('#icao').fill('KRFD');
     await page.getByRole('button', { name: 'Lookup Airport and METAR' }).click();
 
-    await expect(page.getByText('Best runway:')).toBeVisible();
+    await expect(page.getByText('Best runway: 22')).toBeVisible();
     await expect(page.locator('#best-runway-spotlight > .panel')).toBeVisible();
     await expect(page.locator('#results > .details-toggle')).toBeVisible();
 
