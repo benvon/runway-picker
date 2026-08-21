@@ -117,13 +117,31 @@ for (const file of files) {
     }
   }
 
-  if (file === 'deploy-production.yml' || file === 'deploy-worker-production.yml') {
-    if (!/\n\s*workflow_call:\s*$/m.test(content)) {
-      errors.push(`${filePath}: production deployment must be callable only from the release workflow`);
+  if (file === 'release-create.yml') {
+    if (/uses:\s*\.\/\.github\/workflows\/deploy-(?:worker-)?production\.yml/.test(content)) {
+      errors.push(`${filePath}: production deployments must be direct jobs, not reusable workflow calls`);
     }
 
+    for (const jobId of ['deploy-pages', 'deploy-worker']) {
+      const jobBlock = content.match(new RegExp(`\\n  ${jobId}:\\n([\\s\\S]*?)(?=\\n  [a-z][a-z-]*:|$)`))?.[1] ?? '';
+      if (!/\n\s{4}runs-on:\s{1,}ubuntu-latest\s{0,}$/m.test(jobBlock)) {
+        errors.push(`${filePath}: ${jobId} must be a direct runner job`);
+      }
+      if (!/\n\s{4}environment:\s{0,}production\s{0,}$/m.test(jobBlock)) {
+        errors.push(`${filePath}: ${jobId} must require the production environment`);
+      }
+    }
+  }
+
+  if (file === 'production-deployment-preflight.yml') {
+    if (!/\n\s*workflow_dispatch:\s*$/m.test(content)) {
+      errors.push(`${filePath}: preflight must be manually dispatched`);
+    }
     if (!/\n\s*environment:\s*production\s*$/m.test(content)) {
-      errors.push(`${filePath}: production deployment must require the production environment`);
+      errors.push(`${filePath}: preflight must use the production environment`);
+    }
+    if (/wrangler|pages deploy|secret put/i.test(content)) {
+      errors.push(`${filePath}: preflight must not change deployment state`);
     }
   }
 }
