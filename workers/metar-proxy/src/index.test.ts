@@ -4,6 +4,7 @@ import {
   default as workerEntrypoint,
   extractMetarRaw,
   handleAirportRequest,
+  handleAirportLocationRequest,
   handleMetarRequest,
   MetarWorkerError,
   normalizeAirportIcao,
@@ -941,6 +942,30 @@ describe('airport worker', () => {
     });
     expect(typeof queueEntry?.lastAccessedAt).toBe('string');
     expect(typeof queueEntry?.lastRefreshedAt).toBe('string');
+  });
+
+  it('uses an independent long-lived location cache without enrolling it in the hot queue', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json({
+      ident: 'KLOC',
+      latitude_deg: '41.8781',
+      longitude_deg: '-87.6298',
+      runways: []
+    })));
+
+    const kv = new MemoryKv();
+    const response = await handleAirportLocationRequest(
+      new Request('https://metar.internal/api/airport-location?icao=KLOC'),
+      { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' }
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      icao: 'KLOC',
+      coordinates: { latitudeDeg: 41.8781, longitudeDeg: -87.6298 },
+      cache: { resource: 'airport-location', ttlSeconds: 2_592_000 }
+    });
+    expect(kv.has('v1:airport-location:KLOC')).toBe(true);
+    expect(kv.has('v1:hot:airport-location:KLOC')).toBe(false);
   });
 
   it('does not return the raw airport provider snapshot to clients', async () => {

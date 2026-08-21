@@ -20,6 +20,7 @@ export const MAX_ALTERNATE_METAR_DISTANCE_NM = 50;
 
 export type RecommendationBlockReason =
   | 'STALE_METAR_CACHE'
+  | 'METAR_CACHE_PROVENANCE_UNAVAILABLE'
   | 'METAR_OBSERVATION_TIME_UNAVAILABLE'
   | 'METAR_OBSERVATION_TOO_OLD'
   | 'ALTERNATE_STATION_LOCATION_UNAVAILABLE'
@@ -90,6 +91,10 @@ function isStaleMetarCache(status: MetarLookupResponse['cache']['status']): bool
   return status === 'stale_on_error' || status === 'stale_while_refresh';
 }
 
+function hasTrustedMetarCacheProvenance(status: MetarLookupResponse['cache']['status']): boolean {
+  return status === 'edge_hit' || status === 'kv_hit' || status === 'upstream_refresh';
+}
+
 function observationAgeMilliseconds(observedAt: string | null, servedAt: string | null): number | null {
   if (!observedAt || !servedAt) {
     return null;
@@ -138,6 +143,9 @@ export function assessRecommendationEligibility(
 
   if (isStaleMetarCache(metar.cache.status)) {
     reasons.push('STALE_METAR_CACHE');
+  }
+  if (!hasTrustedMetarCacheProvenance(metar.cache.status)) {
+    reasons.push('METAR_CACHE_PROVENANCE_UNAVAILABLE');
   }
   if (ageMinutes === null) {
     reasons.push('METAR_OBSERVATION_TIME_UNAVAILABLE');

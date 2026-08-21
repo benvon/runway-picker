@@ -7,7 +7,6 @@ export const AIRPORT_SCHEMA_VERSION = 8;
 
 export interface AirportResourceInput {
   icao: string;
-  requireRunwayData?: boolean;
 }
 
 export interface AirportRunwayEnd {
@@ -61,6 +60,19 @@ export interface AirportResourceData {
 export interface AirportCoordinates {
   latitudeDeg: number;
   longitudeDeg: number;
+}
+
+/**
+ * Slow-changing airport reference data used to validate an alternate METAR
+ * station. This is deliberately a separate cache resource from the runway
+ * profile so it never enters the hot-refresh queue for operational data.
+ */
+export interface AirportLocationResourceData {
+  requestedIcao: string;
+  icao: string;
+  coordinates: AirportCoordinates | null;
+  source: 'airportdb';
+  fetchedAt: string;
 }
 
 export type AirportWorkerErrorCode =
@@ -162,7 +174,7 @@ function toCoordinateValue(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function resolveCoordinates(payload: AirportDbPayload): AirportCoordinates | null {
+export function resolveAirportCoordinates(payload: AirportDbPayload): AirportCoordinates | null {
   const latitudeDeg = toCoordinateValue(payload.latitude_deg);
   const longitudeDeg = toCoordinateValue(payload.longitude_deg);
   if (latitudeDeg === null || longitudeDeg === null || Math.abs(latitudeDeg) > 90 || Math.abs(longitudeDeg) > 180) {
@@ -322,6 +334,9 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
   }
 
   const runwayEnds = normalizeCachedRunways(asData.runwayEnds);
+  if (runwayEnds.length === 0) {
+    return null;
+  }
 
   return {
     requestedIcao: asData.requestedIcao,
@@ -380,7 +395,7 @@ function buildAirportDbUrl(icao: string, token: string): string {
   return url.toString();
 }
 
-function toAirportDbPayload(candidate: unknown): AirportDbPayload {
+export function toAirportDbPayload(candidate: unknown): AirportDbPayload {
   if (!candidate || typeof candidate !== 'object') {
     throw new AirportWorkerError('Airport provider returned an invalid payload.', 502, 'PROVIDER_PAYLOAD_INVALID');
   }
@@ -512,53 +527,74 @@ function collectFrequencies(payload: AirportDbPayload): AirportResourceFrequency
   });
 }
 
-function resolvePayloadIcao(payload: AirportDbPayload, requestedIcao: string): string {
-  return (
+export function resolveAirportPayloadIcao(payload: AirportDbPayload, requestedIcao: string): string {
+  const returnedIcao =
     toStringValue(payload.icao_code)?.toUpperCase() ??
-    toStringValue(payload.ident)?.toUpperCase() ??
-    requestedIcao
-  );
+    toStringValue(payload.ident)?.toUpperCase();
+  if (!returnedIcao || !/^[A-Z0-9]{4}$/.test(returnedIcao) || returnedIcao !== requestedIcao) {
+    throw new AirportWorkerError(
+      'Airport provider returned a record that does not match the requested ICAO code.',
+      502,
+      'PROVIDER_PAYLOAD_INVALID'
+    );
+  }
+
+  return returnedIcao;
+}
+
+export function toAirportLocationData(upstream: unknown, input: AirportResourceInput): AirportLocationResourceData {
+  const requestedIcao = normalizeAirportIcao(input.icao);
+  const payload = toAirportDbPayload(upstream);
+
+  return {
+    requestedIcao,
+    icao: resolveAirportPayloadIcao(payload, requestedIcao),
+    coordinates: resolveAirportCoordinates(payload),
+    source: 'airportdb',
+    fetchedAt: new Date().toISOString()
+  };
+}
+
+export async function fetchAirportUpstream(input: AirportResourceInput, ctx: Parameters<CacheResourceAdapter<AirportResourceInput, unknown, AirportResourceData>['fetchUpstream']>[1]): Promise<unknown> {
+  const icao = normalizeAirportIcao(input.icao);
+  const token = ctx.env.AIRPORTDB_API_TOKEN?.trim();
+
+  if (!token) {
+    throw new AirportWorkerError('Airport lookup service is not configured.', 500, 'SERVICE_NOT_CONFIGURED');
+  }
+
+  const response = await fetch(buildAirportDbUrl(icao, token), {
+    headers: {
+      'User-Agent': USER_AGENT,
+      Accept: 'application/json'
+    }
+  });
+
+  if (response.status === 401 || response.status === 403) {
+    throw new AirportWorkerError('Airport lookup service token is invalid or missing privileges.', 502, 'AUTH_ERROR');
+  }
+
+  if (response.status === 404) {
+    throw new AirportWorkerError(`ICAO code ${icao} was not found in airport database.`, 404, 'ICAO_NOT_FOUND');
+  }
+
+  if (!response.ok) {
+    throw new AirportWorkerError(`Airport provider returned status ${response.status}.`, 502, 'PROVIDER_ERROR');
+  }
+
+  return response.json();
 }
 
 export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, unknown, AirportResourceData> = {
   resource: 'airport',
   schemaVersion: AIRPORT_SCHEMA_VERSION,
-  normalizeKey: (input) =>
-    `${normalizeAirportIcao(input.icao)}${input.requireRunwayData === false ? ':location' : ''}`,
-  fetchUpstream: async (input, ctx) => {
-    const icao = normalizeAirportIcao(input.icao);
-    const token = ctx.env.AIRPORTDB_API_TOKEN?.trim();
-
-    if (!token) {
-      throw new AirportWorkerError('Airport lookup service is not configured.', 500, 'SERVICE_NOT_CONFIGURED');
-    }
-
-    const response = await fetch(buildAirportDbUrl(icao, token), {
-      headers: {
-        'User-Agent': USER_AGENT,
-        Accept: 'application/json'
-      }
-    });
-
-    if (response.status === 401 || response.status === 403) {
-      throw new AirportWorkerError('Airport lookup service token is invalid or missing privileges.', 502, 'AUTH_ERROR');
-    }
-
-    if (response.status === 404) {
-      throw new AirportWorkerError(`ICAO code ${icao} was not found in airport database.`, 404, 'ICAO_NOT_FOUND');
-    }
-
-    if (!response.ok) {
-      throw new AirportWorkerError(`Airport provider returned status ${response.status}.`, 502, 'PROVIDER_ERROR');
-    }
-
-    return response.json();
-  },
+  normalizeKey: (input) => normalizeAirportIcao(input.icao),
+  fetchUpstream: fetchAirportUpstream,
   validate: (upstream, input) => {
     const requestedIcao = normalizeAirportIcao(input.icao);
     const payload = toAirportDbPayload(upstream);
     const runwayEnds = collectRunwayEnds(payload);
-    if (input.requireRunwayData !== false && runwayEnds.length === 0) {
+    if (runwayEnds.length === 0) {
       throw new AirportWorkerError(
         `No runway data is available for ICAO ${requestedIcao}.`,
         404,
@@ -568,13 +604,13 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
 
     return {
       requestedIcao,
-      icao: resolvePayloadIcao(payload, requestedIcao),
+      icao: resolveAirportPayloadIcao(payload, requestedIcao),
       name: toStringValue(payload.name) ?? requestedIcao,
       municipality: toStringValue(payload.municipality) ?? '',
       countryCode: toStringValue(payload.iso_country) ?? '',
       countryName: toCountryName(payload),
       elevationFt: toIntegerValue(payload.elevation_ft),
-      coordinates: resolveCoordinates(payload),
+      coordinates: resolveAirportCoordinates(payload),
       runwayEnds,
       frequencies: collectFrequencies(payload),
       source: 'airportdb',

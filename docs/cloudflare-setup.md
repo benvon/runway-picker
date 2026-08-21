@@ -13,6 +13,7 @@ This guide matches the repository workflows and runtime shape.
 - `functions/api/health.ts` provides a starter API endpoint at `/api/health`.
 - `functions/api/metar.ts` is a proxy endpoint to the dedicated Worker API at `/api/metar?icao=KJFK`.
 - `functions/api/airport.ts` is a proxy endpoint to the dedicated Worker API at `/api/airport?icao=KJFK`.
+- `functions/api/airport-location.ts` is a proxy endpoint to the dedicated Worker API at `/api/airport-location?icao=KJFK`.
 
 ## 3) Provision and deploy the METAR Worker
 1. Create a KV namespace for shared METAR cache:
@@ -42,6 +43,7 @@ Worker behavior:
 - Public abuse protection: Durable Object rate limiter (`API_RATE_LIMITER`)
 - Cache TTL: 30 minutes (with stale windows configured in adapter policy)
 - Airport cache TTL: 24 hours (with stale windows configured in adapter policy)
+- Airport-location cache TTL: 30 days; it is reference data and is not part of the hot-cache scheduler
 - Direct `workers.dev` access is disabled (`workers_dev: false`) to reduce public exposure; use Pages service binding.
 - Configure the AirportDB token in Worker secrets (never in client code):
 ```bash
@@ -88,6 +90,7 @@ Open local URL and verify:
 - calculator works
 - `/api/health` returns JSON
 - `/api/airport?icao=KJFK` returns airport JSON with runway ends + `cache` metadata and `X-Runway-Cache-Status`
+- `/api/airport-location?icao=KJFK` returns alternate-station coordinates + `cache` metadata
 - `/api/metar?icao=KJFK` returns METAR JSON with `cache` metadata and `X-Runway-Cache-Status`
 
 ## 7) CI and preview deployment

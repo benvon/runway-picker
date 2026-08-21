@@ -17,10 +17,14 @@ import { createResourceRegistry } from './resources';
 import {
   airportResourceAdapter,
   AirportWorkerError,
+  type AirportLocationResourceData,
   normalizeAirportIcao,
   type AirportResourceData,
   type AirportResourceInput
 } from './resources/airport/adapter';
+import {
+  airportLocationResourceAdapter
+} from './resources/airport/locationAdapter';
 import {
   extractMetarRaw,
   MetarWorkerError,
@@ -34,6 +38,7 @@ import { ApiRateLimiter, enforceRateLimit, noteInvalidIcao, type RateLimitHeader
 const RESOURCE_REGISTRY = createResourceRegistry();
 const METAR_ADAPTER = getAdapterOrThrow(RESOURCE_REGISTRY, 'metar') as typeof metarResourceAdapter;
 const AIRPORT_ADAPTER = getAdapterOrThrow(RESOURCE_REGISTRY, 'airport') as typeof airportResourceAdapter;
+const AIRPORT_LOCATION_ADAPTER = getAdapterOrThrow(RESOURCE_REGISTRY, 'airport-location') as typeof airportLocationResourceAdapter;
 
 const API_SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
@@ -48,6 +53,10 @@ interface MetarApiSuccessPayload extends MetarResourceData {
 }
 
 interface AirportApiSuccessPayload extends AirportResourceData {
+  cache: CacheProvenance;
+}
+
+interface AirportLocationApiSuccessPayload extends AirportLocationResourceData {
   cache: CacheProvenance;
 }
 
@@ -172,14 +181,8 @@ function toMetarInput(request: Request): MetarResourceInput {
 
 function toAirportInput(request: Request): AirportResourceInput {
   const url = new URL(request.url);
-  const view = url.searchParams.get('view');
-  if (view !== null && view !== 'coordinates') {
-    throw new AirportWorkerError('Invalid airport lookup view.', 400, 'INVALID_REQUEST');
-  }
-
   return {
-    icao: url.searchParams.get('icao') ?? '',
-    requireRunwayData: view !== 'coordinates'
+    icao: url.searchParams.get('icao') ?? ''
   };
 }
 
@@ -517,6 +520,67 @@ export async function handleAirportRequest(request: Request, env: CacheEngineEnv
   }
 }
 
+export async function handleAirportLocationRequest(request: Request, env: CacheEngineEnv): Promise<Response> {
+  const requestId = createRequestId(request.headers.get('X-Request-Id'));
+
+  if (request.method !== 'GET') {
+    return buildErrorResponse('Method not allowed.', 405, 'METHOD_NOT_ALLOWED', { requestId });
+  }
+
+  if (new URL(request.url).pathname !== '/api/airport-location') {
+    return buildErrorResponse('Not found.', 404, 'NOT_FOUND', { requestId });
+  }
+
+  const rateResult = await applyRateLimit(request, env, 'airport', requestId);
+  if (!rateResult.allowed) {
+    return rateResult.response;
+  }
+
+  try {
+    const input = toAirportInput(request);
+    const result = await getOrRefreshCached({
+      adapter: AIRPORT_LOCATION_ADAPTER,
+      input,
+      request,
+      env
+    });
+    const payload: AirportLocationApiSuccessPayload = {
+      ...result.payload,
+      cache: result.cache
+    };
+
+    return buildJsonResponse(payload, 200, {
+      requestId,
+      cache: result.cache,
+      ttlSeconds: airportLocationResourceAdapter.policy.ttlSeconds,
+      rateLimit: rateResult.headers
+    });
+  } catch (error) {
+    if (error instanceof AirportWorkerError) {
+      if (error.code === 'INVALID_ICAO') {
+        await noteInvalidIcaoAttempt(request, env, 'airport');
+      }
+
+      return buildErrorResponse(error.message, error.status, error.code, {
+        requestId,
+        rateLimit: rateResult.headers
+      });
+    }
+
+    if (error instanceof CacheEngineError) {
+      return buildErrorResponse(error.message, error.status, 'CACHE_ERROR', {
+        requestId,
+        rateLimit: rateResult.headers
+      });
+    }
+
+    return buildErrorResponse('Unexpected error while loading airport location.', 500, 'UNEXPECTED', {
+      requestId,
+      rateLimit: rateResult.headers
+    });
+  }
+}
+
 export {
   ApiRateLimiter,
   CacheSingleFlightCoordinator,
@@ -532,6 +596,10 @@ export default {
 
     if (pathname === '/api/airport') {
       return handleAirportRequest(request, env, ctx);
+    }
+
+    if (pathname === '/api/airport-location') {
+      return handleAirportLocationRequest(request, env);
     }
 
     return handleMetarRequest(request, env, ctx);

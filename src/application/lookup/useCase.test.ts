@@ -184,6 +184,8 @@ describe('lookup use case', () => {
         ...metar,
         cache: {
           ...metar.cache,
+          status: 'unknown',
+          source: 'unknown',
           servedAt: null
         }
       })
@@ -195,7 +197,10 @@ describe('lookup use case', () => {
     expect(result.resolution.recommendation).toMatchObject({
       allowed: false,
       observationAgeMinutes: null,
-      reasons: ['METAR_OBSERVATION_TIME_UNAVAILABLE']
+      reasons: expect.arrayContaining([
+        'METAR_CACHE_PROVENANCE_UNAVAILABLE',
+        'METAR_OBSERVATION_TIME_UNAVAILABLE'
+      ])
     });
   });
 

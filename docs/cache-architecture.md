@@ -60,6 +60,9 @@ Current adapters:
 
 - `metar`
 - `airport` (AirportDB-backed; daily-refresh policy)
+- `airport-location` (AirportDB-backed reference coordinates; long-lived and intentionally excluded from the hot-refresh queue)
+
+The hot-refresh queue is only for resources whose complete refresh input can be reconstructed from a normalized ICAO key. Resource variants with different payload contracts must be modeled as distinct resources, not query-mode flags on a shared cache key.
 
 ## Adding a new resource
 

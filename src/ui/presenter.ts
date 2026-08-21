@@ -119,6 +119,8 @@ function recommendationWarning(reason: RecommendationBlockReason): string {
   switch (reason) {
     case 'STALE_METAR_CACHE':
       return 'The METAR was served from a stale cache entry.';
+    case 'METAR_CACHE_PROVENANCE_UNAVAILABLE':
+      return 'The METAR cache freshness could not be verified.';
     case 'METAR_OBSERVATION_TIME_UNAVAILABLE':
       return 'The METAR observation time is unavailable or invalid.';
     case 'METAR_OBSERVATION_TOO_OLD':

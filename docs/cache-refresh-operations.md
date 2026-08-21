@@ -8,6 +8,7 @@ This runbook covers day-2 operations for the scheduled hot-cache refresher in `w
 - Every successful `/api/metar` and `/api/airport` response updates a hot-entry key:
   - `v1:hot:metar:{ICAO}`
   - `v1:hot:airport:{ICAO}`
+- `/api/airport-location` is deliberately not hot-refreshed. It is long-lived reference data and has its own normal cache policy, so it cannot be accidentally refreshed as a runway profile.
 - Scheduled runs:
   1. Load hot entries.
   2. Evict entries inactive longer than inactivity TTL (also purges cache payload key).

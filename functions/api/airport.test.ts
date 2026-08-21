@@ -84,7 +84,7 @@ describe('pages airport proxy', () => {
     expect((proxiedRequest as Request).headers.get('X-Request-Id')).toEqual(expect.any(String));
   });
 
-  it('forwards the coordinate-only view to the Worker', async () => {
+  it('maps the compatibility coordinate view to the dedicated Worker resource', async () => {
     const fetch = vi.fn().mockResolvedValue(Response.json({ icao: 'KLOC', coordinates: { latitudeDeg: 41.8, longitudeDeg: -87.6 } }));
 
     const response = await onRequestGet({
@@ -98,7 +98,8 @@ describe('pages airport proxy', () => {
 
     expect(response.status).toBe(200);
     const proxiedRequest = fetch.mock.calls[0]?.[0] as Request;
-    expect(new URL(proxiedRequest.url).searchParams.get('view')).toBe('coordinates');
+    expect(new URL(proxiedRequest.url).pathname).toBe('/api/airport-location');
+    expect(new URL(proxiedRequest.url).searchParams.get('view')).toBeNull();
   });
 
   it('returns INVALID_ICAO for malformed input before proxying', async () => {
