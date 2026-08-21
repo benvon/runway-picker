@@ -296,7 +296,7 @@ export async function fetchAirportCoordinatesByIcao(icaoInput: string): Promise<
     throw new AirportLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400, 'INVALID_ICAO');
   }
 
-  const response = await fetch(`/api/airport?icao=${encodeURIComponent(icao)}&view=coordinates`, {
+  const response = await fetch(`/api/airport-location?icao=${encodeURIComponent(icao)}`, {
     method: 'GET',
     cache: 'no-store',
     headers: {

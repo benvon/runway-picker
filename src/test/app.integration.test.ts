@@ -504,6 +504,15 @@ describe('app integration', () => {
         );
       }
 
+      if (url === '/api/airport-location?icao=KLGA') {
+        return Promise.resolve(
+          Response.json({
+            icao: 'KLGA',
+            coordinates: { latitudeDeg: 40.7772, longitudeDeg: -73.8726 }
+          })
+        );
+      }
+
       throw new Error(`Unexpected fetch URL: ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -546,6 +555,11 @@ describe('app integration', () => {
     expect(alternateGroup.hidden).toBe(true);
     expect(icaoInput.readOnly).toBe(false);
     expect(fetchMock).toHaveBeenCalledWith('/api/metar?icao=KLGA', {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' }
+    });
+    expect(fetchMock).toHaveBeenCalledWith('/api/airport-location?icao=KLGA', {
       method: 'GET',
       cache: 'no-store',
       headers: { Accept: 'application/json' }
