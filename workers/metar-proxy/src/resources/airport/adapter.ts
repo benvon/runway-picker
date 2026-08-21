@@ -3,7 +3,7 @@ import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
 const AIRPORT_DB_BASE_URL = 'https://airportdb.io/api/v1/airport';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const AIRPORT_SCHEMA_VERSION = 8;
+export const AIRPORT_SCHEMA_VERSION = 9;
 
 export interface AirportResourceInput {
   icao: string;
@@ -108,6 +108,20 @@ interface AirportDbFrequency {
 type AirportResourceShapeCandidate = Omit<AirportResourceData, 'frequencies'> & {
   frequencies?: AirportResourceData['frequencies'];
 };
+
+/**
+ * Cached airport data is only valid for the request it was created to serve.
+ * This is deliberately non-throwing because cache deserialization must fail
+ * closed and let the cache engine refresh malformed or mismatched records.
+ */
+export function hasCanonicalAirportIdentity(requestedIcao: unknown, icao: unknown): boolean {
+  return (
+    typeof requestedIcao === 'string' &&
+    typeof icao === 'string' &&
+    /^[A-Z0-9]{4}$/.test(requestedIcao) &&
+    requestedIcao === icao
+  );
+}
 
 export interface AirportCacheEnvelope extends CacheEnvelope<AirportResourceData> {
   upstreamSnapshot?: AirportUpstreamSnapshot;
@@ -330,6 +344,10 @@ function toAirportData(candidate: unknown): AirportResourceData | null {
 
   const asData = candidate as Partial<AirportResourceShapeCandidate>;
   if (!isAirportResourceShape(asData)) {
+    return null;
+  }
+
+  if (!hasCanonicalAirportIdentity(asData.requestedIcao, asData.icao)) {
     return null;
   }
 
@@ -631,7 +649,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
     staleWhileRevalidateSeconds: 43200,
     staleOnErrorSeconds: 259200,
     negativeCacheTtlSeconds: 3600,
-    policyVersion: 'airport-v5'
+    policyVersion: 'airport-v6'
   },
   negativeCache: {
     toEntry: (error) =>

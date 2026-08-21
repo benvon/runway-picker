@@ -520,6 +520,35 @@ describe('resource adapters', () => {
     expect(parsed?.frequencies).toEqual([]);
   });
 
+  it('rejects cached airport records whose identity differs from the requested ICAO', () => {
+    const mismatchedProfile = {
+      data: {
+        requestedIcao: 'KJFK',
+        icao: 'KLGA',
+        name: 'LaGuardia Airport',
+        municipality: 'New York',
+        countryCode: 'US',
+        countryName: 'United States',
+        elevationFt: 21,
+        runwayEnds: [{ id: '04', headingDegTrue: 44, isClosed: false, lengthFt: 7000 }],
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      }
+    };
+    const mismatchedLocation = {
+      data: {
+        requestedIcao: 'KJFK',
+        icao: 'KLGA',
+        coordinates: { latitudeDeg: 40.7769, longitudeDeg: -73.874 },
+        source: 'airportdb',
+        fetchedAt: '2026-03-03T12:00:00.000Z'
+      }
+    };
+
+    expect(airportResourceAdapter.deserialize(mismatchedProfile)).toBeNull();
+    expect(airportLocationResourceAdapter.deserialize(mismatchedLocation)).toBeNull();
+  });
+
   it('ignores invalid runway entries and exposes observability labels', async () => {
     const validated = await airportResourceAdapter.validate(
       {

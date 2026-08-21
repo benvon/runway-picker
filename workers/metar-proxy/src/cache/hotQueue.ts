@@ -1,4 +1,5 @@
 import type { CacheEngineEnv, CacheProvenance } from './types';
+import { buildCacheKey } from './keys';
 
 export type HotCacheResource = 'metar' | 'airport';
 
@@ -6,13 +7,14 @@ export interface HotCacheEntry {
   schemaVersion: number;
   resource: HotCacheResource;
   normalizedKey: string;
-  cacheKey: string;
   lastAccessedAt: string;
   lastRefreshedAt: string;
 }
 
 export interface HotCacheQueueEntry extends HotCacheEntry {
   metadataKey: string;
+  /** Derived from canonical resource identity; never persisted in queue metadata. */
+  cacheKey: string;
 }
 
 export interface CacheRefresherConfig {
@@ -23,8 +25,8 @@ export interface CacheRefresherConfig {
   maxItemsPerRun: number;
 }
 
-const HOT_QUEUE_SCHEMA_VERSION = 1;
-const HOT_QUEUE_KEY_PREFIX = 'v1:hot:';
+const HOT_QUEUE_SCHEMA_VERSION = 2;
+const HOT_QUEUE_KEY_PREFIX = 'v2:hot:';
 const KV_LIST_PAGE_LIMIT = 1000;
 
 const DEFAULT_CONFIG: CacheRefresherConfig = {
@@ -89,12 +91,13 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
 
   const entry = candidate as Partial<HotCacheEntry>;
   if (
-    typeof entry.schemaVersion !== 'number' ||
+    entry.schemaVersion !== HOT_QUEUE_SCHEMA_VERSION ||
     !isHotResource(entry.resource) ||
     typeof entry.normalizedKey !== 'string' ||
-    typeof entry.cacheKey !== 'string' ||
+    entry.normalizedKey.length === 0 ||
     !parseDate(entry.lastAccessedAt) ||
-    !parseDate(entry.lastRefreshedAt)
+    !parseDate(entry.lastRefreshedAt) ||
+    metadataKey !== hotQueueKey(entry.resource, entry.normalizedKey)
   ) {
     return null;
   }
@@ -109,7 +112,7 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
     schemaVersion: entry.schemaVersion,
     resource: entry.resource,
     normalizedKey: entry.normalizedKey,
-    cacheKey: entry.cacheKey,
+    cacheKey: buildCacheKey(entry.resource, entry.normalizedKey),
     lastAccessedAt,
     lastRefreshedAt,
     metadataKey
@@ -216,7 +219,6 @@ export async function touchHotCacheEntry(params: {
     schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
     resource: params.resource,
     normalizedKey: params.normalizedKey,
-    cacheKey: params.cache.key,
     lastAccessedAt: params.lastAccessedAt,
     lastRefreshedAt: params.cache.fetchedAt
   };
@@ -250,10 +252,9 @@ export async function updateHotCacheEntryAfterRefresh(
   }
 
   const next: HotCacheEntry = {
-    schemaVersion: entry.schemaVersion,
+    schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
     resource: entry.resource,
     normalizedKey: entry.normalizedKey,
-    cacheKey: cache.key,
     lastAccessedAt,
     lastRefreshedAt: cache.fetchedAt
   };

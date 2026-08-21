@@ -2,6 +2,7 @@ import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
 import {
   AirportWorkerError,
   fetchAirportUpstream,
+  hasCanonicalAirportIdentity,
   normalizeAirportIcao,
   toAirportLocationData,
   type AirportLocationResourceData,
@@ -69,7 +70,11 @@ function deserializeAirportLocation(cached: unknown): AirportLocationResourceDat
   }
 
   const data = candidate as Partial<AirportLocationResourceData>;
-  if (!hasRequiredLocationFields(data) || !hasValidLocationCoordinates(data)) {
+  if (
+    !hasRequiredLocationFields(data) ||
+    !hasValidLocationCoordinates(data) ||
+    !hasCanonicalAirportIdentity(data.requestedIcao, data.icao)
+  ) {
     return null;
   }
 

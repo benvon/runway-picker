@@ -113,6 +113,7 @@ describe('lookup use case', () => {
       observationAgeMinutes: 61,
       reasons: expect.arrayContaining(['STALE_METAR_CACHE', 'METAR_OBSERVATION_TOO_OLD'])
     });
+    expect(result.resolution.recommendation.reasons).not.toContain('METAR_CACHE_PROVENANCE_UNAVAILABLE');
   });
 
   it('allows the 60-minute recency boundary but rejects observations just beyond it', async () => {

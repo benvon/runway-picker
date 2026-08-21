@@ -91,7 +91,7 @@ function buildValidEntry(
   metadataKey: string
 ): HotCacheQueueEntry {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     resource,
     normalizedKey,
     cacheKey: `v1:${resource}:${normalizedKey}`,
@@ -104,7 +104,7 @@ function buildValidEntry(
 describe('readHotCacheQueueEntry', () => {
   it('returns null when the key is absent from KV', async () => {
     const env = createEnv();
-    const result = await readHotCacheQueueEntry(env, 'v1:hot:metar:KJFK');
+    const result = await readHotCacheQueueEntry(env, 'v2:hot:metar:KJFK');
     expect(result).toBeNull();
   });
 
@@ -129,11 +129,13 @@ describe('readHotCacheQueueEntry', () => {
       lastAccessedAt: '2026-03-06T11:30:00.000Z'
     });
 
-    const result = await readHotCacheQueueEntry(env, 'v1:hot:metar:KJFK');
+    const result = await readHotCacheQueueEntry(env, 'v2:hot:metar:KJFK');
     expect(result).not.toBeNull();
     expect(result?.resource).toBe('metar');
     expect(result?.normalizedKey).toBe('KJFK');
-    expect(result?.metadataKey).toBe('v1:hot:metar:KJFK');
+    expect(result?.metadataKey).toBe('v2:hot:metar:KJFK');
+    expect(result?.cacheKey).toBe('v1:metar:KJFK');
+    expect(store.get('v2:hot:metar:KJFK')).not.toHaveProperty('cacheKey');
   });
 
   it('returns null when stored data is malformed', async () => {
@@ -145,7 +147,7 @@ describe('readHotCacheQueueEntry', () => {
         delete: async () => {}
       }
     });
-    const result = await readHotCacheQueueEntry(env, 'v1:hot:metar:KJFK');
+    const result = await readHotCacheQueueEntry(env, 'v2:hot:metar:KJFK');
     expect(result).toBeNull();
   });
 });
@@ -175,6 +177,7 @@ describe('touchHotCacheEntry', () => {
 
     expect(puts).toHaveLength(1);
     expect(puts[0]?.[2]).toEqual({ expirationTtl: 432000 });
+    expect(JSON.parse(puts[0]?.[1] ?? '{}')).not.toHaveProperty('cacheKey');
   });
 
   it('omits the options argument when expirationTtl is not provided', async () => {
@@ -207,9 +210,9 @@ describe('updateHotCacheEntryAfterRefresh', () => {
     const concurrentAccessAt = '2026-03-06T11:59:00.000Z';
     const store = new Map<string, unknown>([
       [
-        'v1:hot:metar:KJFK',
+        'v2:hot:metar:KJFK',
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           resource: 'metar',
           normalizedKey: 'KJFK',
           cacheKey: 'v1:metar:KJFK',
@@ -230,7 +233,7 @@ describe('updateHotCacheEntryAfterRefresh', () => {
     });
 
     // Snapshot has an older lastAccessedAt than what is currently in KV.
-    const snapshot = buildValidEntry('metar', 'KJFK', 'v1:hot:metar:KJFK');
+    const snapshot = buildValidEntry('metar', 'KJFK', 'v2:hot:metar:KJFK');
     snapshot.lastAccessedAt = '2026-03-06T11:50:00.000Z';
 
     await updateHotCacheEntryAfterRefresh(
@@ -239,7 +242,7 @@ describe('updateHotCacheEntryAfterRefresh', () => {
       fakeProvenance('v1:metar:KJFK', '2026-03-06T12:00:00.000Z')
     );
 
-    const written = store.get('v1:hot:metar:KJFK') as { lastAccessedAt: string };
+    const written = store.get('v2:hot:metar:KJFK') as { lastAccessedAt: string };
     expect(written.lastAccessedAt).toBe(concurrentAccessAt);
   });
 
@@ -247,9 +250,9 @@ describe('updateHotCacheEntryAfterRefresh', () => {
     const snapshotAccessAt = '2026-03-06T11:50:00.000Z';
     const store = new Map<string, unknown>([
       [
-        'v1:hot:metar:KJFK',
+        'v2:hot:metar:KJFK',
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           resource: 'metar',
           normalizedKey: 'KJFK',
           cacheKey: 'v1:metar:KJFK',
@@ -269,7 +272,7 @@ describe('updateHotCacheEntryAfterRefresh', () => {
       }
     });
 
-    const snapshot = buildValidEntry('metar', 'KJFK', 'v1:hot:metar:KJFK');
+    const snapshot = buildValidEntry('metar', 'KJFK', 'v2:hot:metar:KJFK');
     snapshot.lastAccessedAt = snapshotAccessAt;
 
     await updateHotCacheEntryAfterRefresh(
@@ -278,7 +281,7 @@ describe('updateHotCacheEntryAfterRefresh', () => {
       fakeProvenance('v1:metar:KJFK', '2026-03-06T12:00:00.000Z')
     );
 
-    const written = store.get('v1:hot:metar:KJFK') as { lastAccessedAt: string };
+    const written = store.get('v2:hot:metar:KJFK') as { lastAccessedAt: string };
     expect(written.lastAccessedAt).toBe(snapshotAccessAt);
   });
 
@@ -295,7 +298,7 @@ describe('updateHotCacheEntryAfterRefresh', () => {
       }
     });
 
-    const snapshot = buildValidEntry('metar', 'KJFK', 'v1:hot:metar:KJFK');
+    const snapshot = buildValidEntry('metar', 'KJFK', 'v2:hot:metar:KJFK');
 
     await updateHotCacheEntryAfterRefresh(
       env,
@@ -320,7 +323,7 @@ describe('updateHotCacheEntryAfterRefresh', () => {
       }
     });
 
-    const snapshot = buildValidEntry('metar', 'KJFK', 'v1:hot:metar:KJFK');
+    const snapshot = buildValidEntry('metar', 'KJFK', 'v2:hot:metar:KJFK');
 
     await updateHotCacheEntryAfterRefresh(
       env,
@@ -345,13 +348,55 @@ describe('listHotCacheQueueEntries', () => {
     expect(result).toHaveLength(0);
   });
 
+  it('uses the v2 metadata namespace so legacy entries cannot consume a refresh scan', async () => {
+    const prefixes: string[] = [];
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async () => null,
+        put: async () => {},
+        list: async (options) => {
+          prefixes.push(options?.prefix ?? '');
+          return { keys: [], list_complete: true };
+        },
+        delete: async () => {}
+      }
+    });
+
+    await listHotCacheQueueEntries(env, 1);
+
+    expect(prefixes).toEqual(['v2:hot:']);
+  });
+
+  it('derives the payload key instead of trusting a persisted queue cacheKey', async () => {
+    const metadataKey = 'v2:hot:airport:KJFK';
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async () => ({
+          schemaVersion: 2,
+          resource: 'airport',
+          normalizedKey: 'KJFK',
+          cacheKey: 'v1:airport:KJFK:location',
+          lastAccessedAt: '2026-03-06T11:00:00.000Z',
+          lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+        }),
+        put: async () => {},
+        list: async () => ({ keys: [{ name: metadataKey }], list_complete: true }),
+        delete: async () => {}
+      }
+    });
+
+    const [entry] = await listHotCacheQueueEntries(env);
+
+    expect(entry?.cacheKey).toBe('v1:airport:KJFK');
+  });
+
   it('returns all entries across multiple KV pages', async () => {
-    const allKeys = ['v1:hot:metar:KAAA', 'v1:hot:metar:KBBB', 'v1:hot:airport:KJFK'];
+    const allKeys = ['v2:hot:metar:KAAA', 'v2:hot:metar:KBBB', 'v2:hot:airport:KJFK'];
     const store = new Map<string, unknown>(
       allKeys.map((key) => [
         key,
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           resource: key.includes(':airport:') ? 'airport' : 'metar',
           normalizedKey: key.split(':').pop(),
           cacheKey: key.replace('hot:', ''),
@@ -387,9 +432,9 @@ describe('listHotCacheQueueEntries', () => {
   it('skips malformed entries without failing', async () => {
     const store = new Map<string, unknown>([
       [
-        'v1:hot:metar:KJFK',
+        'v2:hot:metar:KJFK',
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           resource: 'metar',
           normalizedKey: 'KJFK',
           cacheKey: 'v1:metar:KJFK',
@@ -397,7 +442,7 @@ describe('listHotCacheQueueEntries', () => {
           lastRefreshedAt: '2026-03-06T10:00:00.000Z'
         }
       ],
-      ['v1:hot:metar:BAD', { invalid: true }]
+      ['v2:hot:metar:BAD', { invalid: true }]
     ]);
     const env = createEnv({
       METAR_CACHE: {
@@ -417,12 +462,12 @@ describe('listHotCacheQueueEntries', () => {
   });
 
   it('stops scanning once maxScanEntries is reached', async () => {
-    const allKeys = Array.from({ length: 10 }, (_, i) => `v1:hot:metar:K${String(i).padStart(3, '0')}`);
+    const allKeys = Array.from({ length: 10 }, (_, i) => `v2:hot:metar:K${String(i).padStart(3, '0')}`);
     const store = new Map<string, unknown>(
       allKeys.map((key) => [
         key,
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           resource: 'metar',
           normalizedKey: key.split(':').pop(),
           cacheKey: key.replace('hot:', ''),

@@ -52,6 +52,11 @@ Each resource adapter implements:
 - `policy` (`ttlSeconds`, `staleWhileRevalidateSeconds`, `staleOnErrorSeconds`, `negativeCacheTtlSeconds`, `policyVersion`)
 - `observability(input, key)`
 
+`deserialize(cached)` is a cache trust boundary. It must validate every
+semantic invariant required for a response to be safely reused (including that
+the cached identity exactly matches the normalized request key). Tightening an
+invariant requires a schema-version bump so incompatible records are refreshed.
+
 Registered adapters live in:
 
 - `workers/metar-proxy/src/resources/index.ts`
@@ -63,6 +68,12 @@ Current adapters:
 - `airport-location` (AirportDB-backed reference coordinates; long-lived and intentionally excluded from the hot-refresh queue)
 
 The hot-refresh queue is only for resources whose complete refresh input can be reconstructed from a normalized ICAO key. Resource variants with different payload contracts must be modeled as distinct resources, not query-mode flags on a shared cache key.
+
+Hot metadata uses a versioned namespace (`v2:hot:*`) and stores only resource
+plus normalized key. The scheduler derives the payload key from that canonical
+identity, rather than trusting a separately persisted cache key. Older queue
+namespaces are deliberately not scanned and expire through their existing KV
+inactivity TTL.
 
 ## Adding a new resource
 

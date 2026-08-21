@@ -91,8 +91,14 @@ function isStaleMetarCache(status: MetarLookupResponse['cache']['status']): bool
   return status === 'stale_on_error' || status === 'stale_while_refresh';
 }
 
-function hasTrustedMetarCacheProvenance(status: MetarLookupResponse['cache']['status']): boolean {
-  return status === 'edge_hit' || status === 'kv_hit' || status === 'upstream_refresh';
+function hasKnownMetarCacheProvenance(status: MetarLookupResponse['cache']['status']): boolean {
+  return (
+    status === 'edge_hit' ||
+    status === 'kv_hit' ||
+    status === 'upstream_refresh' ||
+    status === 'stale_while_refresh' ||
+    status === 'stale_on_error'
+  );
 }
 
 function observationAgeMilliseconds(observedAt: string | null, servedAt: string | null): number | null {
@@ -144,7 +150,7 @@ export function assessRecommendationEligibility(
   if (isStaleMetarCache(metar.cache.status)) {
     reasons.push('STALE_METAR_CACHE');
   }
-  if (!hasTrustedMetarCacheProvenance(metar.cache.status)) {
+  if (!hasKnownMetarCacheProvenance(metar.cache.status)) {
     reasons.push('METAR_CACHE_PROVENANCE_UNAVAILABLE');
   }
   if (ageMinutes === null) {
