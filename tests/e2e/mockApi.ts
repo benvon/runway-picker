@@ -7,6 +7,7 @@ export interface MockResponse {
 
 export interface MockApiConfig {
   airport: Record<string, MockResponse>;
+  airportLocation?: Record<string, MockResponse>;
   metar: Record<string, MockResponse>;
 }
 
@@ -53,6 +54,13 @@ export function airportPayload(icao: string): Record<string, unknown> {
   };
 }
 
+export function airportLocationPayload(icao: string): Record<string, unknown> {
+  return {
+    icao,
+    coordinates: { latitudeDeg: 41.9, longitudeDeg: -87.9 }
+  };
+}
+
 export function metarPayload(icao: string, wind: WindPayload): Record<string, unknown> {
   const responseTimestamp = new Date().toISOString();
 
@@ -77,6 +85,27 @@ export function metarPayload(icao: string, wind: WindPayload): Record<string, un
 }
 
 export async function mockApi(page: Page, config: MockApiConfig): Promise<void> {
+  await page.route('**/api/airport-location?icao=*', async (route) => {
+    const url = new URL(route.request().url());
+    const icao = (url.searchParams.get('icao') ?? '').toUpperCase();
+    const match = config.airportLocation?.[icao];
+
+    if (!match) {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: `Missing airport-location mock for ${icao}` })
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: match.status,
+      contentType: 'application/json',
+      body: JSON.stringify(match.body)
+    });
+  });
+
   await page.route('**/api/airport?icao=*', async (route) => {
     const url = new URL(route.request().url());
     const icao = (url.searchParams.get('icao') ?? '').toUpperCase();

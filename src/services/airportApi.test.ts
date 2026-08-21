@@ -208,7 +208,7 @@ describe('airportApi service', () => {
       icao: 'KLOC',
       coordinates: { latitudeDeg: 41.8781, longitudeDeg: -87.6298 }
     });
-    expect(fetch).toHaveBeenCalledWith('/api/airport?icao=KLOC&view=coordinates', {
+    expect(fetch).toHaveBeenCalledWith('/api/airport-location?icao=KLOC', {
       method: 'GET',
       cache: 'no-store',
       headers: { Accept: 'application/json' }

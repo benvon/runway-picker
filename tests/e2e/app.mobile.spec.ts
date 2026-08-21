@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { airportPayload, metarPayload, mockApi } from './mockApi';
+import { airportLocationPayload, airportPayload, metarPayload, mockApi } from './mockApi';
 
 test.describe('Runway Picker mobile preview UI', () => {
   test.skip(!process.env.PREVIEW_URL, 'Set PREVIEW_URL to run preview UI tests.');
@@ -38,6 +38,9 @@ test.describe('Runway Picker mobile preview UI', () => {
     await mockApi(page, {
       airport: {
         KJFK: { status: 200, body: airportPayload('KJFK') }
+      },
+      airportLocation: {
+        KLGA: { status: 200, body: airportLocationPayload('KLGA') }
       },
       metar: {
         KJFK: {
