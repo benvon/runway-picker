@@ -124,6 +124,9 @@ for (const file of files) {
 
     for (const jobId of ['deploy-pages', 'deploy-worker']) {
       const jobBlock = content.match(new RegExp(`\\n  ${jobId}:\\n([\\s\\S]*?)(?=\\n  [a-z][a-z-]*:|$)`))?.[1] ?? '';
+      if (!/\n\s{4}permissions:\n\s{6}contents: read\s{0,}$/m.test(jobBlock)) {
+        errors.push(`${filePath}: ${jobId} must restrict its token to contents: read`);
+      }
       if (!/\n\s{4}runs-on:\s{1,}ubuntu-latest\s{0,}$/m.test(jobBlock)) {
         errors.push(`${filePath}: ${jobId} must be a direct runner job`);
       }

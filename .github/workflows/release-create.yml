@@ -164,6 +164,8 @@ jobs:
   deploy-pages:
     needs: create-release
     if: needs.create-release.outputs.should_release == 'true'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -263,6 +265,8 @@ jobs:
   deploy-worker:
     needs: create-release
     if: needs.create-release.outputs.should_release == 'true'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     environment: production
     steps:
