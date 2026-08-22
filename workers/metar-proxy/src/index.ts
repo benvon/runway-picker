@@ -236,12 +236,17 @@ async function applyRateLimit(
   };
 }
 
-async function noteInvalidIcaoAttempt(request: Request, env: CacheEngineEnv, endpoint: Endpoint): Promise<void> {
+async function noteInvalidIcaoAttempt(
+  request: Request,
+  env: CacheEngineEnv,
+  endpoint: Endpoint,
+  requestId: string
+): Promise<void> {
   const result = await noteInvalidIcao(env.API_RATE_LIMITER, getClientIdentifier(request), endpoint);
   if (!result.delivered) {
     console.error('Rate limiter invalid ICAO signal failed.', {
       endpoint,
-      requestId: createRequestId(request.headers.get('X-Request-Id')),
+      requestId,
       failureCategory: result.failureCategory
     });
   }
@@ -458,7 +463,7 @@ export async function handleMetarRequest(request: Request, env: CacheEngineEnv, 
   } catch (error) {
     if (error instanceof MetarWorkerError) {
       if (error.code === 'INVALID_ICAO') {
-        await noteInvalidIcaoAttempt(request, env, 'metar');
+        await noteInvalidIcaoAttempt(request, env, 'metar', requestId);
       }
 
       return buildErrorResponse(error.message, error.status, error.code, {
@@ -531,7 +536,7 @@ export async function handleAirportRequest(request: Request, env: CacheEngineEnv
   } catch (error) {
     if (error instanceof AirportWorkerError) {
       if (error.code === 'INVALID_ICAO') {
-        await noteInvalidIcaoAttempt(request, env, 'airport');
+        await noteInvalidIcaoAttempt(request, env, 'airport', requestId);
       }
 
       return buildErrorResponse(error.message, error.status, error.code, {
@@ -592,7 +597,7 @@ export async function handleAirportLocationRequest(request: Request, env: CacheE
   } catch (error) {
     if (error instanceof AirportWorkerError) {
       if (error.code === 'INVALID_ICAO') {
-        await noteInvalidIcaoAttempt(request, env, 'airport');
+        await noteInvalidIcaoAttempt(request, env, 'airport', requestId);
       }
 
       return buildErrorResponse(error.message, error.status, error.code, {

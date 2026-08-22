@@ -5,13 +5,23 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const createdDirectories: string[] = [];
 
-function writeConfig(transform: (config: Record<string, unknown>) => void): string {
+function createConfigPath(): string {
   const directory = mkdtempSync(join(tmpdir(), 'runway-picker-worker-config-'));
   createdDirectories.push(directory);
-  const configPath = join(directory, 'wrangler.jsonc');
+  return join(directory, 'wrangler.jsonc');
+}
+
+function writeConfig(transform: (config: Record<string, unknown>) => void): string {
+  const configPath = createConfigPath();
   const config = JSON.parse(readFileSync('workers/metar-proxy/wrangler.jsonc', 'utf8')) as Record<string, unknown>;
   transform(config);
   writeFileSync(configPath, JSON.stringify(config));
+  return configPath;
+}
+
+function writeRawConfig(content: string): string {
+  const configPath = createConfigPath();
+  writeFileSync(configPath, content);
   return configPath;
 }
 
@@ -37,6 +47,24 @@ afterEach(() => {
 describe('worker configuration validation', () => {
   it('accepts the production rate limiter binding and migration', async () => {
     const result = await validateConfig('workers/metar-proxy/wrangler.jsonc');
+    expect(result.status).toBe(0);
+  });
+
+  it('accepts Wrangler JSONC comments and trailing commas', async () => {
+    const result = await validateConfig(writeRawConfig(`{
+      // Wrangler accepts line comments.
+      "durable_objects": {
+        "bindings": [{
+          "name": "API_RATE_LIMITER",
+          "class_name": "ApiRateLimiter",
+        }],
+      },
+      /* Wrangler also accepts block comments. */
+      "migrations": [{
+        "new_sqlite_classes": ["ApiRateLimiter",],
+      },],
+    }`));
+
     expect(result.status).toBe(0);
   });
 

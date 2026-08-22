@@ -1,11 +1,21 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { parse, printParseErrorCode } from 'jsonc-parser';
 
 const REQUIRED_BINDING = 'API_RATE_LIMITER';
 const REQUIRED_CLASS = 'ApiRateLimiter';
 
 function parseJsonc(content) {
-  return JSON.parse(content.replace(/^\s*\/\/.*$/gm, ''));
+  const errors = [];
+  const config = parse(content, errors, {
+    allowTrailingComma: true,
+    disallowComments: false
+  });
+  if (errors.length > 0) {
+    throw new Error(errors.map(({ error, offset }) => `${printParseErrorCode(error)} at offset ${offset}`).join(', '));
+  }
+
+  return config;
 }
 
 export function validateWorkerConfig(config) {

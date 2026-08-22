@@ -582,7 +582,6 @@ describe('metar worker', () => {
   });
 
   it('records bounded health metadata when an invalid ICAO penalty signal fails', async () => {
-    const requestId = 'a6c87502-a28d-4d0c-938c-d6b1bfca64c5';
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const limiter = {
       idFromName: (name: string) => name,
@@ -602,15 +601,16 @@ describe('metar worker', () => {
 
     const response = await handleMetarRequestFromWorker(
       new Request('https://metar.internal/api/metar?icao=ABC', {
-        headers: { 'X-Request-Id': requestId, 'X-Client-IP': '203.0.113.10' }
+        headers: { 'X-Client-IP': '203.0.113.10' }
       }),
       { METAR_CACHE: new MemoryKv(), API_RATE_LIMITER: limiter }
     );
 
     expect(response.status).toBe(400);
+    const payload = (await response.json()) as { requestId: string };
     expect(consoleErrorSpy).toHaveBeenCalledWith('Rate limiter invalid ICAO signal failed.', {
       endpoint: 'metar',
-      requestId,
+      requestId: payload.requestId,
       failureCategory: 'non_success_response'
     });
     consoleErrorSpy.mockRestore();
