@@ -1,4 +1,4 @@
-import type { CacheEngineEnv, CacheProvenance } from './types';
+import type { CacheEngineEnv, CacheProvenance, KvListPage } from './types';
 import { buildCacheKey } from './keys';
 
 export type HotCacheResource = 'metar' | 'airport';
@@ -17,6 +17,12 @@ export interface HotCacheQueueEntry extends HotCacheEntry {
   cacheKey: string;
 }
 
+export interface HotCacheQueuePage {
+  entries: HotCacheQueueEntry[];
+  scanned: number;
+  listComplete: boolean;
+}
+
 export interface CacheRefresherConfig {
   enabled: boolean;
   metarRefreshIntervalSeconds: number;
@@ -27,6 +33,8 @@ export interface CacheRefresherConfig {
 
 const HOT_QUEUE_SCHEMA_VERSION = 2;
 const HOT_QUEUE_KEY_PREFIX = 'v2:hot:';
+const HOT_QUEUE_CURSOR_SCHEMA_VERSION = 1;
+const HOT_QUEUE_CURSOR_KEY_PREFIX = 'v2:control:hot-refresh-cursor:';
 const KV_LIST_PAGE_LIMIT = 1000;
 
 const DEFAULT_CONFIG: CacheRefresherConfig = {
@@ -123,6 +131,53 @@ function hotQueueKey(resource: HotCacheResource, normalizedKey: string): string 
   return `${HOT_QUEUE_KEY_PREFIX}${resource}:${normalizedKey}`;
 }
 
+function hotQueueResourcePrefix(resource: HotCacheResource): string {
+  return `${HOT_QUEUE_KEY_PREFIX}${resource}:`;
+}
+
+function hotQueueCursorKey(resource: HotCacheResource): string {
+  return `${HOT_QUEUE_CURSOR_KEY_PREFIX}${resource}`;
+}
+
+function parseCursorCheckpoint(candidate: unknown): string | null {
+  if (!candidate || typeof candidate !== 'object') {
+    return null;
+  }
+
+  const checkpoint = candidate as { schemaVersion?: unknown; cursor?: unknown };
+  if (
+    checkpoint.schemaVersion !== HOT_QUEUE_CURSOR_SCHEMA_VERSION ||
+    typeof checkpoint.cursor !== 'string' ||
+    checkpoint.cursor.length === 0
+  ) {
+    return null;
+  }
+
+  return checkpoint.cursor;
+}
+
+async function clearHotQueueCursor(env: CacheEngineEnv, resource: HotCacheResource): Promise<void> {
+  if (env.METAR_CACHE.delete) {
+    await env.METAR_CACHE.delete(hotQueueCursorKey(resource));
+  }
+}
+
+async function saveHotQueueCursor(
+  env: CacheEngineEnv,
+  resource: HotCacheResource,
+  cursor: string
+): Promise<void> {
+  await env.METAR_CACHE.put(
+    hotQueueCursorKey(resource),
+    JSON.stringify({ schemaVersion: HOT_QUEUE_CURSOR_SCHEMA_VERSION, cursor })
+  );
+}
+
+function logCursorRecovery(resource: HotCacheResource, reason: 'malformed' | 'rejected'): void {
+  // One diagnostic per resource page keeps recovery observable without logging opaque cursors.
+  console.warn('Scheduled cache refresh cursor checkpoint reset.', { resource, reason });
+}
+
 export function parseCacheRefresherConfig(env: CacheEngineEnv): CacheRefresherConfig {
   return {
     enabled: readBoolean(env.CACHE_REFRESH_ENABLED, DEFAULT_CONFIG.enabled),
@@ -153,50 +208,68 @@ export function refreshIntervalSecondsForResource(
   return config.airportRefreshIntervalSeconds;
 }
 
-export async function listHotCacheQueueEntries(
+export async function readHotCacheQueuePage(
   env: CacheEngineEnv,
-  maxScanEntries?: number
-): Promise<HotCacheQueueEntry[]> {
-  if (!env.METAR_CACHE.list) {
-    return [];
+  resource: HotCacheResource,
+  maxScanEntries: number
+): Promise<HotCacheQueuePage> {
+  if (!env.METAR_CACHE.list || maxScanEntries <= 0) {
+    return { entries: [], scanned: 0, listComplete: true };
   }
 
-  const entries: HotCacheQueueEntry[] = [];
+  const cursorKey = hotQueueCursorKey(resource);
+  const checkpointRaw = await env.METAR_CACHE.get(cursorKey, 'json');
   let cursor: string | undefined;
-  let complete = false;
-  let scanned = 0;
-
-  while (!complete) {
-    const remaining = maxScanEntries !== undefined ? maxScanEntries - scanned : KV_LIST_PAGE_LIMIT;
-    if (remaining <= 0) {
-      break;
+  if (checkpointRaw !== null) {
+    const parsedCursor = parseCursorCheckpoint(checkpointRaw);
+    if (parsedCursor) {
+      cursor = parsedCursor;
+    } else {
+      await clearHotQueueCursor(env, resource);
+      logCursorRecovery(resource, 'malformed');
     }
-
-    const page = await env.METAR_CACHE.list({
-      prefix: HOT_QUEUE_KEY_PREFIX,
-      cursor,
-      limit: Math.min(KV_LIST_PAGE_LIMIT, remaining)
-    });
-
-    const pageEntries = await Promise.all(
-      page.keys.map(async (key) => {
-        const raw = await env.METAR_CACHE.get(key.name, 'json');
-        return parseHotCacheEntry(raw, key.name);
-      })
-    );
-
-    for (const parsed of pageEntries) {
-      if (parsed) {
-        entries.push(parsed);
-      }
-    }
-
-    scanned += page.keys.length;
-    complete = page.list_complete;
-    cursor = page.cursor;
   }
 
-  return entries;
+  let page: KvListPage;
+  try {
+    page = await env.METAR_CACHE.list({
+      prefix: hotQueueResourcePrefix(resource),
+      cursor,
+      limit: Math.min(KV_LIST_PAGE_LIMIT, maxScanEntries)
+    });
+  } catch (error) {
+    if (!cursor) {
+      throw error;
+    }
+
+    await clearHotQueueCursor(env, resource);
+    logCursorRecovery(resource, 'rejected');
+    page = await env.METAR_CACHE.list({
+      prefix: hotQueueResourcePrefix(resource),
+      limit: Math.min(KV_LIST_PAGE_LIMIT, maxScanEntries)
+    });
+  }
+
+  if (page.list_complete) {
+    await clearHotQueueCursor(env, resource);
+  } else if (typeof page.cursor === 'string' && page.cursor.length > 0) {
+    await saveHotQueueCursor(env, resource, page.cursor);
+  } else {
+    throw new Error('KV returned an incomplete hot-cache queue page without a cursor.');
+  }
+
+  const parsedEntries = await Promise.all(
+    page.keys.map(async (key) => {
+      const raw = await env.METAR_CACHE.get(key.name, 'json');
+      return parseHotCacheEntry(raw, key.name);
+    })
+  );
+
+  return {
+    entries: parsedEntries.filter((entry): entry is HotCacheQueueEntry => entry !== null),
+    scanned: page.keys.length,
+    listComplete: page.list_complete
+  };
 }
 
 export async function readHotCacheQueueEntry(

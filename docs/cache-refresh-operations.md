@@ -9,12 +9,15 @@ This runbook covers day-2 operations for the scheduled hot-cache refresher in `w
   - `v2:hot:metar:{ICAO}`
   - `v2:hot:airport:{ICAO}`
 - Queue metadata contains only the resource and normalized ICAO. The worker derives the payload cache key, so queue metadata cannot redirect a refresh to another resource or payload variant. Legacy `v1:hot:*` entries are not scanned and expire using their already-written inactivity TTL; no manual migration or cleanup is required.
+- Each resource is scanned independently (`v2:hot:metar:` and `v2:hot:airport:`). Its opaque continuation is stored separately at `v2:control:hot-refresh-cursor:{resource}`, outside the hot-entry namespace. These two small control records are scheduler state only; they never contain payload keys or airport/METAR data.
 - `/api/airport-location` is deliberately not hot-refreshed. It is long-lived reference data and has its own normal cache policy, so it cannot be accidentally refreshed as a runway profile.
 - Scheduled runs:
-  1. Load hot entries.
-  2. Evict entries inactive longer than inactivity TTL (also purges cache payload key).
-  3. Refresh due entries (oldest first), up to `CACHE_REFRESH_MAX_ITEMS_PER_RUN`.
-  4. Leave failed refreshes queued for later retries.
+  1. Scan bounded pages for each resource. The global scan cap is ten times `CACHE_REFRESH_MAX_ITEMS_PER_RUN`, split between resources; unused budget from a short page is available to the other resource without exceeding that cap.
+  2. Persist each next cursor immediately after a successful page read, or clear it after the resource scan wraps. A failed item refresh therefore cannot pin a scan at the same page.
+  3. Evict entries inactive longer than inactivity TTL (also purges cache payload key).
+  4. Sort due entries oldest-first within each resource and refresh them round-robin, up to `CACHE_REFRESH_MAX_ITEMS_PER_RUN`.
+  5. Leave failed refreshes queued for later retries.
+- If a saved cursor is malformed or rejected by KV, the worker clears only that resource's cursor record, retries once from the beginning, and writes one `Scheduled cache refresh cursor checkpoint reset` warning. It does not delete hot entries or cache payloads during cursor recovery.
 
 ## Runtime controls
 
@@ -72,6 +75,14 @@ Inspect one cache payload:
 
 ```bash
 npx wrangler kv key get "v1:metar:KJFK" \
+  --binding METAR_CACHE \
+  --config workers/metar-proxy/wrangler.jsonc
+```
+
+Inspect a resource scan cursor (normally absent immediately after a full scan):
+
+```bash
+npx wrangler kv key get "v2:control:hot-refresh-cursor:metar" \
   --binding METAR_CACHE \
   --config workers/metar-proxy/wrangler.jsonc
 ```

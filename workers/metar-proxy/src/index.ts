@@ -1,8 +1,8 @@
 import { CacheEngineError, getOrRefreshCached } from './cache/engine';
 import {
   deleteHotCacheEntryAndPayload,
-  listHotCacheQueueEntries,
   parseCacheRefresherConfig,
+  readHotCacheQueuePage,
   readHotCacheQueueEntry,
   readIsoTimestamp,
   refreshIntervalSecondsForResource,
@@ -294,6 +294,70 @@ function isRefreshDue(entry: HotCacheQueueEntry, nowMs: number, config: ReturnTy
   return lastRefreshedAtMs <= 0 || nowMs - lastRefreshedAtMs >= refreshIntervalMs;
 }
 
+function selectRoundRobinDueEntries(
+  dueEntries: Record<'metar' | 'airport', HotCacheQueueEntry[]>,
+  maxItems: number
+): HotCacheQueueEntry[] {
+  const remaining = {
+    metar: [...dueEntries.metar].sort(
+      (left, right) => readIsoTimestamp(left.lastRefreshedAt) - readIsoTimestamp(right.lastRefreshedAt)
+    ),
+    airport: [...dueEntries.airport].sort(
+      (left, right) => readIsoTimestamp(left.lastRefreshedAt) - readIsoTimestamp(right.lastRefreshedAt)
+    )
+  };
+  const queues = [remaining.metar, remaining.airport];
+  const selected: HotCacheQueueEntry[] = [];
+  let nextQueueIndex =
+    readIsoTimestamp(remaining.metar[0]?.lastRefreshedAt ?? '') <=
+    readIsoTimestamp(remaining.airport[0]?.lastRefreshedAt ?? '')
+      ? 0
+      : 1;
+
+  while (selected.length < maxItems) {
+    const entry = queues[nextQueueIndex]?.shift() ?? queues[1 - nextQueueIndex]?.shift();
+    if (!entry) {
+      break;
+    }
+
+    selected.push(entry);
+    nextQueueIndex = 1 - nextQueueIndex;
+  }
+
+  return selected;
+}
+
+async function scanHotQueueEntries(
+  env: CacheEngineEnv,
+  scanCap: number
+): Promise<Record<'metar' | 'airport', HotCacheQueueEntry[]>> {
+  const metarBudget = Math.ceil(scanCap / 2);
+  const airportBudget = scanCap - metarBudget;
+  const [metarPage, airportPage] = await Promise.all([
+    readHotCacheQueuePage(env, 'metar', metarBudget),
+    readHotCacheQueuePage(env, 'airport', airportBudget)
+  ]);
+  const entries = {
+    metar: [...metarPage.entries],
+    airport: [...airportPage.entries]
+  };
+  const unusedBudget = scanCap - metarPage.scanned - airportPage.scanned;
+
+  if (unusedBudget <= 0) {
+    return entries;
+  }
+
+  if (metarPage.scanned < metarBudget && airportPage.scanned === airportBudget) {
+    const extraAirportPage = await readHotCacheQueuePage(env, 'airport', unusedBudget);
+    entries.airport.push(...extraAirportPage.entries);
+  } else if (airportPage.scanned < airportBudget && metarPage.scanned === metarBudget) {
+    const extraMetarPage = await readHotCacheQueuePage(env, 'metar', unusedBudget);
+    entries.metar.push(...extraMetarPage.entries);
+  }
+
+  return entries;
+}
+
 async function keepOrEvictQueueEntry(
   env: CacheEngineEnv,
   entry: HotCacheQueueEntry,
@@ -328,7 +392,8 @@ async function keepOrEvictQueueEntry(
 export const __cacheRefreshHelpers = {
   isInactive,
   isRefreshDue,
-  keepOrEvictQueueEntry
+  keepOrEvictQueueEntry,
+  selectRoundRobinDueEntries
 };
 
 export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Date()): Promise<void> {
@@ -337,30 +402,30 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
     return;
   }
 
-  const scanCap = config.maxItemsPerRun * 10;
-  const queueEntries = await listHotCacheQueueEntries(env, scanCap);
-  if (queueEntries.length === 0) {
+  const queueEntries = await scanHotQueueEntries(env, config.maxItemsPerRun * 10);
+  if (queueEntries.metar.length === 0 && queueEntries.airport.length === 0) {
     return;
   }
 
   const nowMs = now.getTime();
   const inactivityTtlMs = config.inactivityTtlSeconds * 1000;
-  const dueEntries: HotCacheQueueEntry[] = [];
+  const dueEntries: Record<'metar' | 'airport', HotCacheQueueEntry[]> = {
+    metar: [],
+    airport: []
+  };
 
-  for (const entry of queueEntries) {
+  for (const entry of [...queueEntries.metar, ...queueEntries.airport]) {
     const effectiveEntry = await keepOrEvictQueueEntry(env, entry, nowMs, inactivityTtlMs);
     if (!effectiveEntry) {
       continue;
     }
 
     if (isRefreshDue(effectiveEntry, nowMs, config)) {
-      dueEntries.push(effectiveEntry);
+      dueEntries[effectiveEntry.resource].push(effectiveEntry);
     }
   }
 
-  dueEntries.sort((left, right) => readIsoTimestamp(left.lastRefreshedAt) - readIsoTimestamp(right.lastRefreshedAt));
-
-  const toRefresh = dueEntries.slice(0, config.maxItemsPerRun);
+  const toRefresh = selectRoundRobinDueEntries(dueEntries, config.maxItemsPerRun);
   for (const entry of toRefresh) {
     try {
       const refreshedCache = await refreshQueueEntry(entry, env);
