@@ -1,4 +1,5 @@
 import { CacheEngineError, getOrRefreshCached } from './cache/engine';
+import { provenanceAtResponseTime } from './cache/freshness';
 import {
   deleteHotCacheEntryAndPayload,
   listHotCacheQueueEntries,
@@ -33,7 +34,12 @@ import {
   type MetarResourceData,
   type MetarResourceInput
 } from './resources/metar/adapter';
-import { ApiRateLimiter, enforceRateLimit, noteInvalidIcao, type RateLimitHeaders } from './security/rateLimiter';
+import {
+  ApiRateLimiter,
+  enforceRateLimit,
+  noteInvalidIcao,
+  type RateLimitHeaders
+} from './security/rateLimiter';
 
 const RESOURCE_REGISTRY = createResourceRegistry();
 const METAR_ADAPTER = getAdapterOrThrow(RESOURCE_REGISTRY, 'metar') as typeof metarResourceAdapter;
@@ -47,6 +53,7 @@ const API_SECURITY_HEADERS: Record<string, string> = {
   'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
   'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
 };
+const RATE_LIMITER_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
 
 interface MetarApiSuccessPayload extends MetarResourceData {
   cache: CacheProvenance;
@@ -65,8 +72,8 @@ type Endpoint = 'metar' | 'airport';
 interface ResponseOptions {
   requestId: string;
   cache?: CacheProvenance;
-  ttlSeconds?: number;
   rateLimit?: RateLimitHeaders;
+  retryAfterSeconds?: number;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -118,9 +125,27 @@ function shouldIncludeDebug(env: CacheEngineEnv): boolean {
   return appEnv === 'preview' || appEnv === 'development' || appEnv === 'dev';
 }
 
+function buildSuccessCacheControl(cache: CacheProvenance | undefined): string {
+  if (!cache) {
+    return 'no-store';
+  }
+
+  const responseCache = provenanceAtResponseTime(cache);
+  if (
+    responseCache.freshnessRemainingSeconds <= 0 ||
+    responseCache.status === 'stale_while_refresh' ||
+    responseCache.status === 'stale_on_error'
+  ) {
+    return 'no-store';
+  }
+
+  const sharedMaxAge = responseCache.freshnessRemainingSeconds;
+  return `public, max-age=${Math.min(60, sharedMaxAge)}, s-maxage=${sharedMaxAge}`;
+}
+
 function withApiHeaders(status: number, options: ResponseOptions): Headers {
   const headers = new Headers({
-    'Cache-Control': status === 200 ? `public, max-age=60, s-maxage=${options.ttlSeconds ?? 60}` : 'no-store',
+    'Cache-Control': status === 200 ? buildSuccessCacheControl(options.cache) : 'no-store',
     'X-Request-Id': options.requestId
   });
 
@@ -142,13 +167,22 @@ function withApiHeaders(status: number, options: ResponseOptions): Headers {
     }
   }
 
+  if (typeof options.retryAfterSeconds === 'number' && options.retryAfterSeconds > 0) {
+    headers.set('Retry-After', `${options.retryAfterSeconds}`);
+  }
+
   return headers;
 }
 
 function buildJsonResponse(payload: unknown, status: number, options: ResponseOptions): Response {
-  return Response.json(payload, {
+  const responseCache = options.cache ? provenanceAtResponseTime(options.cache) : undefined;
+  const responsePayload = responseCache && payload && typeof payload === 'object'
+    ? { ...(payload as Record<string, unknown>), cache: responseCache }
+    : payload;
+
+  return Response.json(responsePayload, {
     status,
-    headers: withApiHeaders(status, options)
+    headers: withApiHeaders(status, { ...options, cache: responseCache })
   });
 }
 
@@ -193,7 +227,23 @@ async function applyRateLimit(
   requestId: string
 ): Promise<{ allowed: true; headers: RateLimitHeaders } | { allowed: false; response: Response }> {
   const decision = await enforceRateLimit(env.API_RATE_LIMITER, getClientIdentifier(request), endpoint);
-  if (!decision.allowed) {
+  if (decision.status === 'unavailable') {
+    console.error('Rate limiter unavailable.', {
+      endpoint,
+      requestId,
+      failureCategory: decision.failureCategory
+    });
+
+    return {
+      allowed: false,
+      response: buildErrorResponse('Service temporarily unavailable. Please retry later.', 503, 'RATE_LIMITER_UNAVAILABLE', {
+        requestId,
+        retryAfterSeconds: RATE_LIMITER_UNAVAILABLE_RETRY_AFTER_SECONDS
+      })
+    };
+  }
+
+  if (decision.status === 'denied') {
     return {
       allowed: false,
       response: buildErrorResponse('Rate limit exceeded. Please retry later.', 429, 'RATE_LIMITED', {
@@ -209,8 +259,20 @@ async function applyRateLimit(
   };
 }
 
-async function noteInvalidIcaoAttempt(request: Request, env: CacheEngineEnv, endpoint: Endpoint): Promise<void> {
-  await noteInvalidIcao(env.API_RATE_LIMITER, getClientIdentifier(request), endpoint);
+async function noteInvalidIcaoAttempt(
+  request: Request,
+  env: CacheEngineEnv,
+  endpoint: Endpoint,
+  requestId: string
+): Promise<void> {
+  const result = await noteInvalidIcao(env.API_RATE_LIMITER, getClientIdentifier(request), endpoint);
+  if (!result.delivered) {
+    console.error('Rate limiter invalid ICAO signal failed.', {
+      endpoint,
+      requestId,
+      failureCategory: result.failureCategory
+    });
+  }
 }
 
 async function noteSuccessfulCacheAccess(
@@ -418,13 +480,12 @@ export async function handleMetarRequest(request: Request, env: CacheEngineEnv, 
     return buildJsonResponse(payload, 200, {
       requestId,
       cache: result.cache,
-      ttlSeconds: metarResourceAdapter.policy.ttlSeconds,
       rateLimit: rateResult.headers
     });
   } catch (error) {
     if (error instanceof MetarWorkerError) {
       if (error.code === 'INVALID_ICAO') {
-        await noteInvalidIcaoAttempt(request, env, 'metar');
+        await noteInvalidIcaoAttempt(request, env, 'metar', requestId);
       }
 
       return buildErrorResponse(error.message, error.status, error.code, {
@@ -491,13 +552,12 @@ export async function handleAirportRequest(request: Request, env: CacheEngineEnv
     return buildJsonResponse(payload, 200, {
       requestId,
       cache: result.cache,
-      ttlSeconds: airportResourceAdapter.policy.ttlSeconds,
       rateLimit: rateResult.headers
     });
   } catch (error) {
     if (error instanceof AirportWorkerError) {
       if (error.code === 'INVALID_ICAO') {
-        await noteInvalidIcaoAttempt(request, env, 'airport');
+        await noteInvalidIcaoAttempt(request, env, 'airport', requestId);
       }
 
       return buildErrorResponse(error.message, error.status, error.code, {
@@ -552,13 +612,12 @@ export async function handleAirportLocationRequest(request: Request, env: CacheE
     return buildJsonResponse(payload, 200, {
       requestId,
       cache: result.cache,
-      ttlSeconds: airportLocationResourceAdapter.policy.ttlSeconds,
       rateLimit: rateResult.headers
     });
   } catch (error) {
     if (error instanceof AirportWorkerError) {
       if (error.code === 'INVALID_ICAO') {
-        await noteInvalidIcaoAttempt(request, env, 'airport');
+        await noteInvalidIcaoAttempt(request, env, 'airport', requestId);
       }
 
       return buildErrorResponse(error.message, error.status, error.code, {

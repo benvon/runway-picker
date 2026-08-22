@@ -43,6 +43,8 @@ describe('pages airport proxy', () => {
             source: 'kv',
             ageSeconds: 240,
             fetchedAt: '2026-03-03T00:00:00.000Z',
+            expiresAt: '2026-03-03T00:04:15.000Z',
+            freshnessRemainingSeconds: 15,
             servedAt: '2026-03-03T00:04:00.000Z',
             ttlSeconds: 86400,
             key: 'v1:airport:KMCI',
@@ -51,7 +53,7 @@ describe('pages airport proxy', () => {
         },
         {
           headers: {
-            'Cache-Control': 'public, max-age=60, s-maxage=86400',
+            'Cache-Control': 'public, max-age=15, s-maxage=15',
             'X-Runway-Cache-Status': 'kv_hit'
           }
         }
@@ -76,7 +78,7 @@ describe('pages airport proxy', () => {
     expect(response.status).toBe(200);
     expect(fetch).toHaveBeenCalled();
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
-    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=86400');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=15, s-maxage=15');
     expect(response.headers.get('X-Request-Id')).toEqual(expect.any(String));
     const proxiedRequest = fetch.mock.calls[0]?.[0];
     expect(proxiedRequest).toBeInstanceOf(Request);
