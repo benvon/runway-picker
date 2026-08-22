@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { validateWorkerConfigFile } from './validate-worker-config.mjs';
 
 const workflowsDir = '.github/workflows';
 const files = readdirSync(workflowsDir)
@@ -8,6 +9,10 @@ const files = readdirSync(workflowsDir)
   .sort();
 
 const errors = [];
+const workerConfigError = validateWorkerConfigFile('workers/metar-proxy/wrangler.jsonc');
+if (workerConfigError) {
+  errors.push(`workers/metar-proxy/wrangler.jsonc: ${workerConfigError}`);
+}
 
 function findGitHubExpressionsInRunBlocks(content) {
   const errors = [];

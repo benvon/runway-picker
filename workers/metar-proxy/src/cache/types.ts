@@ -110,6 +110,7 @@ export interface KvNamespaceLike {
 export interface CacheEngineEnv {
   METAR_CACHE: KvNamespaceLike;
   CACHE_COORDINATOR?: DurableObjectNamespaceLike;
+  /** Required in production; optional here so runtime configuration faults can fail closed. */
   API_RATE_LIMITER?: DurableObjectNamespaceLike;
   AIRPORTDB_API_TOKEN?: string;
   APP_ENV?: string;
