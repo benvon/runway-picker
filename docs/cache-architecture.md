@@ -30,6 +30,8 @@ Successful API responses include a `cache` object with:
 - `source`: `edge`, `kv`, `upstream`, `stale`
 - `ageSeconds`
 - `fetchedAt`
+- `expiresAt`
+- `freshnessRemainingSeconds` (whole seconds remaining, capped to the resource policy TTL)
 - `servedAt`
 - `ttlSeconds`
 - `key`
@@ -38,6 +40,10 @@ Successful API responses include a `cache` object with:
 Headers:
 
 - `X-Runway-Cache-Status`: canonical status header.
+- Successful fresh responses use `Cache-Control` values derived from
+  `freshnessRemainingSeconds` (`max-age` is capped at 60 seconds). Stale or
+  zero-remaining responses use `no-store`, so downstream caches cannot extend
+  the cache engine's freshness policy.
 
 ## Adapter model
 

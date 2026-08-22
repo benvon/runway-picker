@@ -1,4 +1,5 @@
 import { CacheEngineError, getOrRefreshCached } from './cache/engine';
+import { provenanceAtResponseTime } from './cache/freshness';
 import {
   deleteHotCacheEntryAndPayload,
   listHotCacheQueueEntries,
@@ -71,7 +72,6 @@ type Endpoint = 'metar' | 'airport';
 interface ResponseOptions {
   requestId: string;
   cache?: CacheProvenance;
-  ttlSeconds?: number;
   rateLimit?: RateLimitHeaders;
   retryAfterSeconds?: number;
 }
@@ -125,9 +125,27 @@ function shouldIncludeDebug(env: CacheEngineEnv): boolean {
   return appEnv === 'preview' || appEnv === 'development' || appEnv === 'dev';
 }
 
+function buildSuccessCacheControl(cache: CacheProvenance | undefined): string {
+  if (!cache) {
+    return 'no-store';
+  }
+
+  const responseCache = provenanceAtResponseTime(cache);
+  if (
+    responseCache.freshnessRemainingSeconds <= 0 ||
+    responseCache.status === 'stale_while_refresh' ||
+    responseCache.status === 'stale_on_error'
+  ) {
+    return 'no-store';
+  }
+
+  const sharedMaxAge = responseCache.freshnessRemainingSeconds;
+  return `public, max-age=${Math.min(60, sharedMaxAge)}, s-maxage=${sharedMaxAge}`;
+}
+
 function withApiHeaders(status: number, options: ResponseOptions): Headers {
   const headers = new Headers({
-    'Cache-Control': status === 200 ? `public, max-age=60, s-maxage=${options.ttlSeconds ?? 60}` : 'no-store',
+    'Cache-Control': status === 200 ? buildSuccessCacheControl(options.cache) : 'no-store',
     'X-Request-Id': options.requestId
   });
 
@@ -157,9 +175,14 @@ function withApiHeaders(status: number, options: ResponseOptions): Headers {
 }
 
 function buildJsonResponse(payload: unknown, status: number, options: ResponseOptions): Response {
-  return Response.json(payload, {
+  const responseCache = options.cache ? provenanceAtResponseTime(options.cache) : undefined;
+  const responsePayload = responseCache && payload && typeof payload === 'object'
+    ? { ...(payload as Record<string, unknown>), cache: responseCache }
+    : payload;
+
+  return Response.json(responsePayload, {
     status,
-    headers: withApiHeaders(status, options)
+    headers: withApiHeaders(status, { ...options, cache: responseCache })
   });
 }
 
@@ -457,7 +480,6 @@ export async function handleMetarRequest(request: Request, env: CacheEngineEnv, 
     return buildJsonResponse(payload, 200, {
       requestId,
       cache: result.cache,
-      ttlSeconds: metarResourceAdapter.policy.ttlSeconds,
       rateLimit: rateResult.headers
     });
   } catch (error) {
@@ -530,7 +552,6 @@ export async function handleAirportRequest(request: Request, env: CacheEngineEnv
     return buildJsonResponse(payload, 200, {
       requestId,
       cache: result.cache,
-      ttlSeconds: airportResourceAdapter.policy.ttlSeconds,
       rateLimit: rateResult.headers
     });
   } catch (error) {
@@ -591,7 +612,6 @@ export async function handleAirportLocationRequest(request: Request, env: CacheE
     return buildJsonResponse(payload, 200, {
       requestId,
       cache: result.cache,
-      ttlSeconds: airportLocationResourceAdapter.policy.ttlSeconds,
       rateLimit: rateResult.headers
     });
   } catch (error) {
