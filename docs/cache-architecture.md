@@ -56,6 +56,8 @@ Each resource adapter implements:
 semantic invariant required for a response to be safely reused (including that
 the cached identity exactly matches the normalized request key). Tightening an
 invariant requires a schema-version bump so incompatible records are refreshed.
+For METAR records, this includes agreement among the envelope key, cached ICAO,
+and the station token anchored at the start of the raw observation.
 
 Registered adapters live in:
 

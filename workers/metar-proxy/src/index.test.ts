@@ -296,7 +296,7 @@ describe('metar worker', () => {
     const kv = new MemoryKv();
     const fetchedAt = new Date(Date.now() - 30_000);
     kv.seed('v1:metar:KMCI', {
-      schemaVersion: 4,
+      schemaVersion: 5,
       resource: 'metar',
       key: 'v1:metar:KMCI',
       data: {
@@ -317,7 +317,7 @@ describe('metar worker', () => {
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
         expiresAt: new Date(fetchedAt.getTime() + 30 * 60 * 1000).toISOString(),
-        policyVersion: 'metar-v1',
+        policyVersion: 'metar-v2',
         source: 'upstream'
       }
     });
@@ -342,6 +342,47 @@ describe('metar worker', () => {
     expect(payload.wind.speedKt).toBe(10);
     expect(payload.cache.source).toBe('kv');
     expect(payload.cache.status).toBe('kv_hit');
+  });
+
+  it('refreshes upstream when cached METAR identities disagree', async () => {
+    const kv = new MemoryKv();
+    const fetchedAt = new Date(Date.now() - 30_000);
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KORD',
+        metarRaw: 'METAR KORD 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: new Date(fetchedAt.getTime() + 30 * 60 * 1000).toISOString(),
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMCI', { wdir: 110, wspd: 10 })]));
+    vi.stubGlobal('fetch', fetchUpstream);
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.status).toBe(200);
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
   });
 
   it('returns variable wind with non-zero speed using structured upstream fields', async () => {

@@ -1,10 +1,11 @@
 import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
+import { buildCacheKey } from '../../cache/keys';
 
 const AVIATION_WEATHER_METAR_URL = 'https://aviationweather.gov/api/data/metar';
 const AVIATION_WEATHER_STATION_INFO_URL = 'https://aviationweather.gov/api/data/stationinfo';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const METAR_SCHEMA_VERSION = 4;
+export const METAR_SCHEMA_VERSION = 5;
 
 export interface MetarResourceInput {
   icao: string;
@@ -64,6 +65,34 @@ export function normalizeIcao(value: string): string {
   }
 
   return normalized;
+}
+
+function normalizeProviderIcao(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toUpperCase();
+  return /^[A-Z0-9]{4}$/.test(normalized) ? normalized : null;
+}
+
+/**
+ * Extracts the station identifier only from the start of a METAR report.
+ * A later token must not be allowed to establish a report's identity.
+ */
+export function extractMetarStationIcao(rawMetar: string): string | null {
+  const match = rawMetar.trim().match(/^(?:(?:METAR|SPECI)\s+)?([A-Z0-9]{4})(?=\s)/);
+  return match?.[1] ?? null;
+}
+
+function hasCanonicalMetarIdentity(icao: unknown, metarRaw: unknown): boolean {
+  if (typeof metarRaw !== 'string') {
+    return false;
+  }
+
+  const normalizedIcao = normalizeProviderIcao(icao);
+  const rawStationIcao = extractMetarStationIcao(metarRaw);
+  return normalizedIcao !== null && rawStationIcao !== null && normalizedIcao === rawStationIcao;
 }
 
 export function extractMetarRaw(rawText: string): string | null {
@@ -196,6 +225,10 @@ function toMetarData(candidate: unknown): MetarResourceData | null {
     return null;
   }
 
+  if (!hasCanonicalMetarIdentity(asData.icao, asData.metarRaw)) {
+    return null;
+  }
+
   return {
     icao: asData.icao,
     metarRaw: asData.metarRaw,
@@ -244,14 +277,19 @@ function deserializeMetar(value: unknown): MetarResourceData | null {
 
   const candidate = value as Partial<CacheEnvelope<unknown>>;
   if (
-    typeof candidate.schemaVersion !== 'number' ||
-    typeof candidate.resource !== 'string' ||
+    candidate.schemaVersion !== METAR_SCHEMA_VERSION ||
+    candidate.resource !== 'metar' ||
     typeof candidate.key !== 'string'
   ) {
     return null;
   }
 
-  return toMetarData(candidate.data);
+  const data = toMetarData(candidate.data);
+  if (!data || candidate.key !== buildCacheKey('metar', data.icao)) {
+    return null;
+  }
+
+  return data;
 }
 
 function readField(report: Record<string, unknown>, keys: string[]): unknown {
@@ -484,6 +522,23 @@ function extractMetarRawFromReport(report: Record<string, unknown>): string | nu
   return null;
 }
 
+function validateMetarIdentity(report: Record<string, unknown>, requestedIcao: string, metarRaw: string): void {
+  const providerIcao = normalizeProviderIcao(report.icaoId);
+  const rawStationIcao = extractMetarStationIcao(metarRaw);
+  if (
+    providerIcao === null ||
+    rawStationIcao === null ||
+    providerIcao !== requestedIcao ||
+    rawStationIcao !== requestedIcao
+  ) {
+    throw new MetarWorkerError(
+      'METAR provider returned a report that does not match the requested ICAO code.',
+      502,
+      'PROVIDER_PAYLOAD_INVALID'
+    );
+  }
+}
+
 function createValidUtcDate(year: number, month: number, day: number, hour: number, minute: number): Date | null {
   const candidate = new Date(Date.UTC(year, month, day, hour, minute));
   if (
@@ -595,11 +650,13 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
     const metarRaw = extractMetarRawFromReport(report);
     if (!metarRaw) {
       throw new MetarWorkerError(
-        `No METAR is currently available for ICAO ${icao}. Try again later.`,
-        404,
-        'METAR_UNAVAILABLE'
+        'METAR provider returned a report without a raw observation.',
+        502,
+        'PROVIDER_PAYLOAD_INVALID'
       );
     }
+
+    validateMetarIdentity(report, icao, metarRaw);
 
     const wind = parseWind(report);
     if (!wind) {
@@ -627,7 +684,7 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
     staleWhileRevalidateSeconds: 180,
     staleOnErrorSeconds: 7200,
     negativeCacheTtlSeconds: 180,
-    policyVersion: 'metar-v1'
+    policyVersion: 'metar-v2'
   },
   negativeCache: {
     toEntry: (error) =>
