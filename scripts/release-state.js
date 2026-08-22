@@ -9,6 +9,29 @@ export const ReleaseAction = Object.freeze({
 });
 
 /**
+ * Reject an event that is no longer the current protected main commit. Release
+ * creation and automatic deployment are only safe for the current main tip;
+ * deploying an older release is an explicit rollback operation.
+ *
+ * @param {{targetSha: string, currentMainSha: string, mainProtected: boolean}} state
+ */
+export function assertCurrentProtectedMainTarget(state) {
+  if (!SHA_PATTERN.test(state.targetSha) || !SHA_PATTERN.test(state.currentMainSha)) {
+    throw new Error('Release target and current main must be full lowercase Git commit SHAs.');
+  }
+
+  if (!state.mainProtected) {
+    throw new Error('Automatic release requires the main branch to be protected.');
+  }
+
+  if (state.targetSha !== state.currentMainSha) {
+    throw new Error(
+      `Release target ${state.targetSha} is not the current protected main commit ${state.currentMainSha}.`
+    );
+  }
+}
+
+/**
  * @typedef {{tagName: string, targetCommitish: string, draft: boolean, prerelease: boolean}} ExistingRelease
  */
 
@@ -22,6 +45,7 @@ export const ReleaseAction = Object.freeze({
  *   nextTag: string | null,
  *   targetSha: string,
  *   tagSha: string | null,
+ *   latestStableTag: string | null,
  *   release: ExistingRelease | null
  * }} state
  */
@@ -49,6 +73,12 @@ export function reconcileReleaseState(state) {
   }
 
   if (state.release !== null) {
+    if (state.latestStableTag !== state.nextTag) {
+      throw new Error(
+        `Existing release ${state.nextTag} is not the latest published stable release ${state.latestStableTag ?? '(none)'}.`
+      );
+    }
+
     if (
       state.release.tagName !== state.nextTag ||
       state.release.targetCommitish !== state.targetSha ||

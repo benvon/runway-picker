@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { reconcileReleaseState, ReleaseAction } from './release-state.js';
+import {
+  assertCurrentProtectedMainTarget,
+  reconcileReleaseState,
+  ReleaseAction
+} from './release-state.js';
 
 const targetSha = 'a'.repeat(40);
 const otherSha = 'b'.repeat(40);
@@ -13,6 +17,7 @@ describe('release state reconciliation', () => {
         nextTag,
         targetSha,
         tagSha: null,
+        latestStableTag: null,
         release: null
       })
     ).toEqual({
@@ -29,6 +34,7 @@ describe('release state reconciliation', () => {
         nextTag,
         targetSha,
         tagSha: targetSha,
+        latestStableTag: null,
         release: null
       })
     ).toEqual({
@@ -45,6 +51,7 @@ describe('release state reconciliation', () => {
         nextTag,
         targetSha,
         tagSha: targetSha,
+        latestStableTag: nextTag,
         release: {
           tagName: nextTag,
           targetCommitish: targetSha,
@@ -66,6 +73,7 @@ describe('release state reconciliation', () => {
         nextTag: null,
         targetSha,
         tagSha: null,
+        latestStableTag: null,
         release: null
       })
     ).toEqual({
@@ -82,6 +90,7 @@ describe('release state reconciliation', () => {
         nextTag,
         targetSha,
         tagSha: otherSha,
+        latestStableTag: null,
         release: null
       })
     ).toThrow(`Release tag ${nextTag} resolves to ${otherSha}`);
@@ -94,6 +103,7 @@ describe('release state reconciliation', () => {
         nextTag,
         targetSha,
         tagSha: targetSha,
+        latestStableTag: nextTag,
         release: {
           tagName: nextTag,
           targetCommitish: otherSha,
@@ -111,6 +121,7 @@ describe('release state reconciliation', () => {
         nextTag,
         targetSha,
         tagSha: null,
+        latestStableTag: nextTag,
         release: {
           tagName: nextTag,
           targetCommitish: targetSha,
@@ -119,5 +130,43 @@ describe('release state reconciliation', () => {
         }
       })
     ).toThrow('has no corresponding Git tag');
+  });
+
+  it('fails closed when an old run is rerun after a newer stable release is published', () => {
+    expect(() =>
+      reconcileReleaseState({
+        shouldRelease: true,
+        nextTag,
+        targetSha,
+        tagSha: targetSha,
+        latestStableTag: 'v1.2.5',
+        release: {
+          tagName: nextTag,
+          targetCommitish: targetSha,
+          draft: false,
+          prerelease: false
+        }
+      })
+    ).toThrow('is not the latest published stable release');
+  });
+
+  it('fails closed when a rerun follows a non-release commit to main', () => {
+    expect(() =>
+      assertCurrentProtectedMainTarget({
+        targetSha,
+        currentMainSha: otherSha,
+        mainProtected: true
+      })
+    ).toThrow('is not the current protected main commit');
+  });
+
+  it('fails closed when main branch protection is unavailable', () => {
+    expect(() =>
+      assertCurrentProtectedMainTarget({
+        targetSha,
+        currentMainSha: targetSha,
+        mainProtected: false
+      })
+    ).toThrow('main branch to be protected');
   });
 });

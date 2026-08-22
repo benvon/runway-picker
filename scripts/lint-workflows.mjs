@@ -137,8 +137,10 @@ for (const file of files) {
 
     const requiredReleaseSteps = [
       'Require release automation token',
+      'Verify event targets current protected main',
       'Validate release automation access and find published stable baseline',
       'Reconcile intended tag and release state',
+      'Recheck release target before mutation',
       'Create and push annotated tag'
     ];
     const stepOffsets = Object.fromEntries(
@@ -151,7 +153,7 @@ for (const file of files) {
       }
     }
 
-    const preflightSteps = requiredReleaseSteps.slice(0, 3);
+    const preflightSteps = requiredReleaseSteps.slice(0, 5);
     const tagMutationOffset = stepOffsets['Create and push annotated tag'];
     if (
       tagMutationOffset >= 0 &&
@@ -160,21 +162,37 @@ for (const file of files) {
       errors.push(`${filePath}: release token validation and reconciliation must precede tag mutation`);
     }
 
+    const publicationRecheckOffset = content.indexOf('- name: Recheck release target before release publication');
+    if (publicationRecheckOffset < 0 || publicationRecheckOffset <= tagMutationOffset) {
+      errors.push(`${filePath}: release target must be rechecked between tag mutation and release publication`);
+    }
+
     if (
       !/github\.paginate\(github\.rest\.repos\.listReleases/.test(content) ||
       !/!release\.draft && !release\.prerelease/.test(content) ||
       !/core\.setOutput\('release_tag_at_head'/.test(content) ||
-      !/PUBLISHED_TAG_AT_HEAD/.test(content)
+      !/PUBLISHED_TAG_AT_HEAD/.test(content) ||
+      !/PUBLISHED_TAG_AT_HEAD" != "\$CURRENT_TAG/.test(content)
     ) {
       errors.push(`${filePath}: release baseline must support published stable releases and deploy reruns at the same SHA`);
     }
 
     if (
       !/reconcileReleaseState/.test(content) ||
+      !/assertCurrentProtectedMainTarget/.test(content) ||
       !/git', \['rev-list', '-n', '1', `refs\/tags\/\$\{nextTag\}`\]/.test(content) ||
       !/targetCommitish: data\.target_commitish/.test(content)
     ) {
       errors.push(`${filePath}: release reconciliation must preserve exact-SHA collision checks`);
+    }
+
+    const deploymentRecheckCount = (content.match(/- name: Recheck current stable release before deployment/g) ?? []).length;
+    if (
+      deploymentRecheckCount !== 2 ||
+      !/main\.commit\.sha !== process\.env\.RELEASE_SHA/.test(content) ||
+      !/latestStableTag !== process\.env\.RELEASE_TAG/.test(content)
+    ) {
+      errors.push(`${filePath}: each production deployment must recheck current protected main and latest stable release`);
     }
   }
 

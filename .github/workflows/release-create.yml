@@ -48,6 +48,27 @@ jobs:
             exit 1
           fi
 
+      - name: Verify event targets current protected main
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { assertCurrentProtectedMainTarget } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const { data: main } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main'
+            });
+            assertCurrentProtectedMainTarget({
+              targetSha: process.env.HEAD_SHA,
+              currentMainSha: main.commit.sha,
+              mainProtected: main.protected
+            });
+
       - name: Validate release automation access and find published stable baseline
         id: latest
         env:
@@ -96,6 +117,11 @@ jobs:
         shell: bash
         run: |
           if [ -n "$PUBLISHED_TAG_AT_HEAD" ]; then
+            if [ "$PUBLISHED_TAG_AT_HEAD" != "$CURRENT_TAG" ]; then
+              echo "Release $PUBLISHED_TAG_AT_HEAD is not the latest published stable release $CURRENT_TAG."
+              exit 1
+            fi
+
             should_release=true
             next_tag="$PUBLISHED_TAG_AT_HEAD"
             bump_type=already-published
@@ -120,6 +146,7 @@ jobs:
           SHOULD_RELEASE: ${{ steps.plan.outputs.should_release }}
           NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          LATEST_STABLE_TAG: ${{ steps.latest.outputs.latest_tag }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         with:
           github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
@@ -169,6 +196,7 @@ jobs:
               nextTag,
               targetSha,
               tagSha,
+              latestStableTag: process.env.LATEST_STABLE_TAG || null,
               release
             });
             core.setOutput('action', result.action);
@@ -206,6 +234,28 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Recheck release target before mutation
+        if: steps.reconcile.outputs.should_release == 'true'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { assertCurrentProtectedMainTarget } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const { data: main } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main'
+            });
+            assertCurrentProtectedMainTarget({
+              targetSha: process.env.HEAD_SHA,
+              currentMainSha: main.commit.sha,
+              mainProtected: main.protected
+            });
+
       - name: Configure git identity for release tag
         if: steps.reconcile.outputs.action == 'create-tag-and-release'
         env:
@@ -231,6 +281,30 @@ jobs:
         run: |
           git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG"
           git push origin "$NEXT_TAG"
+
+      - name: Recheck release target before release publication
+        if: >-
+          steps.reconcile.outputs.action == 'create-tag-and-release' ||
+          steps.reconcile.outputs.action == 'create-release'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { assertCurrentProtectedMainTarget } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const { data: main } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main'
+            });
+            assertCurrentProtectedMainTarget({
+              targetSha: process.env.HEAD_SHA,
+              currentMainSha: main.commit.sha,
+              mainProtected: main.protected
+            });
 
       - name: Create GitHub release
         if: >-
@@ -328,6 +402,61 @@ jobs:
           VITE_APP_COMMIT_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: npm run build
 
+      - name: Recheck current stable release before deployment
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
+            const compareTags = (left, right) => {
+              const leftParts = semverPattern.exec(left).slice(1).map(Number);
+              const rightParts = semverPattern.exec(right).slice(1).map(Number);
+              for (let index = 0; index < leftParts.length; index += 1) {
+                if (leftParts[index] !== rightParts[index]) {
+                  return leftParts[index] - rightParts[index];
+                }
+              }
+              return 0;
+            };
+            const [{ data: main }, { data: release }, releases] = await Promise.all([
+              github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'main'
+              }),
+              github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: process.env.RELEASE_TAG
+              }),
+              github.paginate(github.rest.repos.listReleases, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100
+              })
+            ]);
+            const latestStableTag = releases
+              .filter((candidate) => !candidate.draft && !candidate.prerelease && semverPattern.test(candidate.tag_name))
+              .map((candidate) => candidate.tag_name)
+              .sort(compareTags)
+              .at(-1) ?? '';
+
+            if (!main.protected || main.commit.sha !== process.env.RELEASE_SHA) {
+              throw new Error('Automatic deployment target is no longer the current protected main commit.');
+            }
+            if (
+              latestStableTag !== process.env.RELEASE_TAG ||
+              release.tag_name !== process.env.RELEASE_TAG ||
+              release.target_commitish !== process.env.RELEASE_SHA ||
+              release.draft ||
+              release.prerelease
+            ) {
+              throw new Error('Automatic deployment target is not the latest published stable release at the expected SHA.');
+            }
+
       - name: Deploy production to Cloudflare Pages
         shell: bash
         env:
@@ -419,6 +548,61 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Recheck current stable release before deployment
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
+            const compareTags = (left, right) => {
+              const leftParts = semverPattern.exec(left).slice(1).map(Number);
+              const rightParts = semverPattern.exec(right).slice(1).map(Number);
+              for (let index = 0; index < leftParts.length; index += 1) {
+                if (leftParts[index] !== rightParts[index]) {
+                  return leftParts[index] - rightParts[index];
+                }
+              }
+              return 0;
+            };
+            const [{ data: main }, { data: release }, releases] = await Promise.all([
+              github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'main'
+              }),
+              github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: process.env.RELEASE_TAG
+              }),
+              github.paginate(github.rest.repos.listReleases, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100
+              })
+            ]);
+            const latestStableTag = releases
+              .filter((candidate) => !candidate.draft && !candidate.prerelease && semverPattern.test(candidate.tag_name))
+              .map((candidate) => candidate.tag_name)
+              .sort(compareTags)
+              .at(-1) ?? '';
+
+            if (!main.protected || main.commit.sha !== process.env.RELEASE_SHA) {
+              throw new Error('Automatic deployment target is no longer the current protected main commit.');
+            }
+            if (
+              latestStableTag !== process.env.RELEASE_TAG ||
+              release.tag_name !== process.env.RELEASE_TAG ||
+              release.target_commitish !== process.env.RELEASE_SHA ||
+              release.draft ||
+              release.prerelease
+            ) {
+              throw new Error('Automatic deployment target is not the latest published stable release at the expected SHA.');
+            }
 
       - name: Set AirportDB token secret
         shell: bash
