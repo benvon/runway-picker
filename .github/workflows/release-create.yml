@@ -15,8 +15,8 @@ concurrency:
 jobs:
   create-release:
     outputs:
-      should_release: ${{ steps.plan.outputs.should_release }}
-      release_tag: ${{ steps.plan.outputs.next_tag }}
+      should_release: ${{ steps.reconcile.outputs.should_release }}
+      release_tag: ${{ steps.reconcile.outputs.release_tag }}
       release_sha: ${{ github.event.workflow_run.head_sha }}
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
@@ -38,40 +38,209 @@ jobs:
       - name: Fetch tags
         run: git fetch --tags --force
 
-      - name: Detect latest semver tag
-        id: latest
+      - name: Require release automation token
+        env:
+          RELEASE_AUTOMATION_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
         shell: bash
         run: |
-          latest_tag="$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1)"
-          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$RELEASE_AUTOMATION_TOKEN" ]; then
+            echo 'Missing secret RELEASE_AUTOMATION_TOKEN. Configure a bot/App token with contents write access.'
+            exit 1
+          fi
+
+      - name: Verify event targets current protected main
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { assertCurrentProtectedMainTarget } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const { data: main } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main'
+            });
+            assertCurrentProtectedMainTarget({
+              targetSha: process.env.HEAD_SHA,
+              currentMainSha: main.commit.sha,
+              mainProtected: main.protected
+            });
+
+      - name: Validate release automation access and find published stable baseline
+        id: latest
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { resolveTagCommitSha } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
+            const compareTags = (left, right) => {
+              const leftParts = semverPattern.exec(left).slice(1).map(Number);
+              const rightParts = semverPattern.exec(right).slice(1).map(Number);
+              for (let index = 0; index < leftParts.length; index += 1) {
+                if (leftParts[index] !== rightParts[index]) {
+                  return leftParts[index] - rightParts[index];
+                }
+              }
+              return 0;
+            };
+            const resolveReleaseTagCommitSha = async (tag) => {
+              let ref;
+              try {
+                ({ data: ref } = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`
+                }));
+              } catch (error) {
+                throw new Error(`Unable to resolve release tag ${tag}.`, { cause: error });
+              }
+
+              return resolveTagCommitSha(ref.object, async (tagSha) => {
+                const { data } = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: tagSha
+                });
+                return data;
+              });
+            };
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            const stableReleases = releases.filter(
+              (release) => !release.draft && !release.prerelease && semverPattern.test(release.tag_name)
+            );
+            const latestTag = stableReleases
+              .map((release) => release.tag_name)
+              .sort(compareTags)
+              .at(-1) ?? '';
+            const stableReleasesWithTagShas = await Promise.all(
+              stableReleases.map(async (release) => ({
+                release,
+                tagSha: await resolveReleaseTagCommitSha(release.tag_name)
+              }))
+            );
+            const releaseTagAtHead = stableReleasesWithTagShas.find(
+              ({ tagSha }) => tagSha === process.env.HEAD_SHA
+            )?.release.tag_name ?? '';
+
+            core.setOutput('latest_tag', latestTag);
+            core.setOutput('release_tag_at_head', releaseTagAtHead);
 
       - name: Compute release plan
         id: plan
         env:
           CURRENT_TAG: ${{ steps.latest.outputs.latest_tag }}
+          PUBLISHED_TAG_AT_HEAD: ${{ steps.latest.outputs.release_tag_at_head }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         shell: bash
         run: |
-          node scripts/release-version.js --current-tag "$CURRENT_TAG" --to-ref "$HEAD_SHA" > release-plan.json
+          if [ -n "$PUBLISHED_TAG_AT_HEAD" ]; then
+            if [ "$PUBLISHED_TAG_AT_HEAD" != "$CURRENT_TAG" ]; then
+              echo "Release $PUBLISHED_TAG_AT_HEAD is not the latest published stable release $CURRENT_TAG."
+              exit 1
+            fi
 
-          should_release="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(String(plan.shouldRelease));")"
-          next_tag="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(plan.nextTag ?? '');")"
-          bump_type="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(plan.bumpType ?? '');")"
-          analyzed_count="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(String(plan.analyzedCommitCount ?? 0));")"
+            should_release=true
+            next_tag="$PUBLISHED_TAG_AT_HEAD"
+            bump_type=already-published
+            analyzed_count=0
+          else
+            node scripts/release-version.js --current-tag "$CURRENT_TAG" --to-ref "$HEAD_SHA" > release-plan.json
+
+            should_release="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(String(plan.shouldRelease));")"
+            next_tag="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(plan.nextTag ?? '');")"
+            bump_type="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(plan.bumpType ?? '');")"
+            analyzed_count="$(node -e "const fs=require('node:fs'); const plan=JSON.parse(fs.readFileSync('release-plan.json','utf8')); process.stdout.write(String(plan.analyzedCommitCount ?? 0));")"
+          fi
 
           echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
           echo "next_tag=$next_tag" >> "$GITHUB_OUTPUT"
           echo "bump_type=$bump_type" >> "$GITHUB_OUTPUT"
           echo "analyzed_count=$analyzed_count" >> "$GITHUB_OUTPUT"
 
+      - name: Reconcile intended tag and release state
+        id: reconcile
+        env:
+          SHOULD_RELEASE: ${{ steps.plan.outputs.should_release }}
+          NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          LATEST_STABLE_TAG: ${{ steps.latest.outputs.latest_tag }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { execFileSync } = require('node:child_process');
+            const { reconcileReleaseState } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const shouldRelease = process.env.SHOULD_RELEASE === 'true';
+            const nextTag = process.env.NEXT_TAG || null;
+            const targetSha = process.env.HEAD_SHA;
+            let tagSha = null;
+            let release = null;
+
+            if (shouldRelease) {
+              try {
+                tagSha = execFileSync('git', ['rev-list', '-n', '1', `refs/tags/${nextTag}`], {
+                  encoding: 'utf8'
+                }).trim() || null;
+              } catch (error) {
+                if (error.status !== 128) {
+                  throw error;
+                }
+              }
+
+              try {
+                const { data } = await github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: nextTag
+                });
+                release = {
+                  tagName: data.tag_name,
+                  draft: data.draft,
+                  prerelease: data.prerelease
+                };
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+              }
+            }
+
+            const result = reconcileReleaseState({
+              shouldRelease,
+              nextTag,
+              targetSha,
+              tagSha,
+              latestStableTag: process.env.LATEST_STABLE_TAG || null,
+              release
+            });
+            core.setOutput('action', result.action);
+            core.setOutput('should_release', String(result.shouldRelease));
+            core.setOutput('release_tag', result.releaseTag ?? '');
+
       - name: Write release summary
         shell: bash
         env:
           CURRENT_TAG: ${{ steps.latest.outputs.latest_tag }}
-          SHOULD_RELEASE: ${{ steps.plan.outputs.should_release }}
-          NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
+          SHOULD_RELEASE: ${{ steps.reconcile.outputs.should_release }}
+          NEXT_TAG: ${{ steps.reconcile.outputs.release_tag }}
           BUMP_TYPE: ${{ steps.plan.outputs.bump_type }}
           ANALYZED_COUNT: ${{ steps.plan.outputs.analyzed_count }}
+          RELEASE_ACTION: ${{ steps.reconcile.outputs.action }}
         run: |
           if [ "$SHOULD_RELEASE" = "true" ]; then
             {
@@ -81,6 +250,7 @@ jobs:
               echo "- Next tag: $NEXT_TAG"
               echo "- Bump: $BUMP_TYPE"
               echo "- Commits analyzed: $ANALYZED_COUNT"
+              echo "- Reconciliation: $RELEASE_ACTION"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             {
@@ -93,19 +263,30 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Ensure release tag does not exist
-        if: steps.plan.outputs.should_release == 'true'
+      - name: Recheck release target before mutation
+        if: steps.reconcile.outputs.should_release == 'true'
         env:
-          NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
-        shell: bash
-        run: |
-          if git rev-parse -q --verify "refs/tags/$NEXT_TAG" >/dev/null; then
-            echo "Tag $NEXT_TAG already exists."
-            exit 1
-          fi
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { assertCurrentProtectedMainTarget } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const { data: main } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main'
+            });
+            assertCurrentProtectedMainTarget({
+              targetSha: process.env.HEAD_SHA,
+              currentMainSha: main.commit.sha,
+              mainProtected: main.protected
+            });
 
       - name: Configure git identity for release tag
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.action == 'create-tag-and-release'
         env:
           GITHUB_ACTOR_NAME: ${{ github.actor }}
           GITHUB_ACTOR_ID: ${{ github.actor_id }}
@@ -122,27 +303,42 @@ jobs:
           git config user.email "$actor_email"
 
       - name: Create and push annotated tag
-        if: steps.plan.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.action == 'create-tag-and-release'
         env:
-          NEXT_TAG: ${{ steps.plan.outputs.next_tag }}
+          NEXT_TAG: ${{ steps.reconcile.outputs.release_tag }}
         shell: bash
         run: |
           git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG"
           git push origin "$NEXT_TAG"
 
-      - name: Validate release automation token
-        if: steps.plan.outputs.should_release == 'true'
+      - name: Recheck release target before release publication
+        if: >-
+          steps.reconcile.outputs.action == 'create-tag-and-release' ||
+          steps.reconcile.outputs.action == 'create-release'
         env:
-          RELEASE_AUTOMATION_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
-        shell: bash
-        run: |
-          if [ -z "$RELEASE_AUTOMATION_TOKEN" ]; then
-            echo "Missing secret RELEASE_AUTOMATION_TOKEN. Configure a bot/App token with contents write access."
-            exit 1
-          fi
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          script: |
+            const { assertCurrentProtectedMainTarget } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const { data: main } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main'
+            });
+            assertCurrentProtectedMainTarget({
+              targetSha: process.env.HEAD_SHA,
+              currentMainSha: main.commit.sha,
+              mainProtected: main.protected
+            });
 
       - name: Create GitHub release
-        if: steps.plan.outputs.should_release == 'true'
+        if: >-
+          steps.reconcile.outputs.action == 'create-tag-and-release' ||
+          steps.reconcile.outputs.action == 'create-release'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         with:
           github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
@@ -158,7 +354,7 @@ jobs:
               generate_release_notes: true
             });
         env:
-          RELEASE_TAG: ${{ steps.plan.outputs.next_tag }}
+          RELEASE_TAG: ${{ steps.reconcile.outputs.release_tag }}
           RELEASE_TARGET: ${{ github.event.workflow_run.head_sha }}
 
   deploy-pages:
@@ -198,7 +394,7 @@ jobs:
           RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: |
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          tag_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
           head_sha="$(git rev-parse HEAD)"
           if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then
             echo 'Release tag does not resolve to the CI-gated main commit.'
@@ -234,6 +430,86 @@ jobs:
           VITE_APP_VERSION: ${{ needs.create-release.outputs.release_tag }}
           VITE_APP_COMMIT_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: npm run build
+
+      - name: Recheck current stable release before deployment
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { resolveTagCommitSha } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
+            const compareTags = (left, right) => {
+              const leftParts = semverPattern.exec(left).slice(1).map(Number);
+              const rightParts = semverPattern.exec(right).slice(1).map(Number);
+              for (let index = 0; index < leftParts.length; index += 1) {
+                if (leftParts[index] !== rightParts[index]) {
+                  return leftParts[index] - rightParts[index];
+                }
+              }
+              return 0;
+            };
+            const resolveReleaseTagCommitSha = async (tag) => {
+              let ref;
+              try {
+                ({ data: ref } = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`
+                }));
+              } catch (error) {
+                throw new Error(`Unable to resolve release tag ${tag}.`, { cause: error });
+              }
+
+              return resolveTagCommitSha(ref.object, async (tagSha) => {
+                const { data } = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: tagSha
+                });
+                return data;
+              });
+            };
+            const [{ data: main }, { data: release }, releases] = await Promise.all([
+              github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'main'
+              }),
+              github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: process.env.RELEASE_TAG
+              }),
+              github.paginate(github.rest.repos.listReleases, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100
+              })
+            ]);
+            const tagSha = await resolveReleaseTagCommitSha(process.env.RELEASE_TAG);
+            const latestStableTag = releases
+              .filter((candidate) => !candidate.draft && !candidate.prerelease && semverPattern.test(candidate.tag_name))
+              .map((candidate) => candidate.tag_name)
+              .sort(compareTags)
+              .at(-1) ?? '';
+
+            if (!main.protected || main.commit.sha !== process.env.RELEASE_SHA) {
+              throw new Error('Automatic deployment target is no longer the current protected main commit.');
+            }
+            if (
+              latestStableTag !== process.env.RELEASE_TAG ||
+              release.tag_name !== process.env.RELEASE_TAG ||
+              tagSha !== process.env.RELEASE_SHA ||
+              release.draft ||
+              release.prerelease
+            ) {
+              throw new Error('Automatic deployment target is not the latest published stable release at the expected SHA.');
+            }
 
       - name: Deploy production to Cloudflare Pages
         shell: bash
@@ -299,7 +575,7 @@ jobs:
           RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: |
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          tag_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
           head_sha="$(git rev-parse HEAD)"
           if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then
             echo 'Release tag does not resolve to the CI-gated main commit.'
@@ -326,6 +602,86 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Recheck current stable release before deployment
+        env:
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { resolveTagCommitSha } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
+            const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
+            const compareTags = (left, right) => {
+              const leftParts = semverPattern.exec(left).slice(1).map(Number);
+              const rightParts = semverPattern.exec(right).slice(1).map(Number);
+              for (let index = 0; index < leftParts.length; index += 1) {
+                if (leftParts[index] !== rightParts[index]) {
+                  return leftParts[index] - rightParts[index];
+                }
+              }
+              return 0;
+            };
+            const resolveReleaseTagCommitSha = async (tag) => {
+              let ref;
+              try {
+                ({ data: ref } = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`
+                }));
+              } catch (error) {
+                throw new Error(`Unable to resolve release tag ${tag}.`, { cause: error });
+              }
+
+              return resolveTagCommitSha(ref.object, async (tagSha) => {
+                const { data } = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: tagSha
+                });
+                return data;
+              });
+            };
+            const [{ data: main }, { data: release }, releases] = await Promise.all([
+              github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'main'
+              }),
+              github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: process.env.RELEASE_TAG
+              }),
+              github.paginate(github.rest.repos.listReleases, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100
+              })
+            ]);
+            const tagSha = await resolveReleaseTagCommitSha(process.env.RELEASE_TAG);
+            const latestStableTag = releases
+              .filter((candidate) => !candidate.draft && !candidate.prerelease && semverPattern.test(candidate.tag_name))
+              .map((candidate) => candidate.tag_name)
+              .sort(compareTags)
+              .at(-1) ?? '';
+
+            if (!main.protected || main.commit.sha !== process.env.RELEASE_SHA) {
+              throw new Error('Automatic deployment target is no longer the current protected main commit.');
+            }
+            if (
+              latestStableTag !== process.env.RELEASE_TAG ||
+              release.tag_name !== process.env.RELEASE_TAG ||
+              tagSha !== process.env.RELEASE_SHA ||
+              release.draft ||
+              release.prerelease
+            ) {
+              throw new Error('Automatic deployment target is not the latest published stable release at the expected SHA.');
+            }
 
       - name: Set AirportDB token secret
         shell: bash

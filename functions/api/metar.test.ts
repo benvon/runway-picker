@@ -40,6 +40,8 @@ describe('pages metar proxy', () => {
             source: 'kv',
             ageSeconds: 12,
             fetchedAt: '2026-03-02T00:00:00.000Z',
+            expiresAt: '2026-03-02T00:00:17.000Z',
+            freshnessRemainingSeconds: 5,
             servedAt: '2026-03-02T00:00:12.000Z',
             ttlSeconds: 1800,
             key: 'v1:metar:KMCI',
@@ -48,7 +50,7 @@ describe('pages metar proxy', () => {
         },
         {
           headers: {
-            'Cache-Control': 'public, max-age=60, s-maxage=1800',
+            'Cache-Control': 'public, max-age=5, s-maxage=5',
             'X-Runway-Cache-Status': 'kv_hit'
           }
         }
@@ -73,12 +75,34 @@ describe('pages metar proxy', () => {
     expect(response.status).toBe(200);
     expect(fetch).toHaveBeenCalled();
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('kv_hit');
-    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=1800');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
     expect(response.headers.get('X-Request-Id')).toEqual(expect.any(String));
     const proxiedRequest = fetch.mock.calls[0]?.[0];
     expect(proxiedRequest).toBeInstanceOf(Request);
     expect((proxiedRequest as Request).headers.get('X-Client-IP')).toBe('203.0.113.10');
     expect((proxiedRequest as Request).headers.get('X-Request-Id')).toEqual(expect.any(String));
+  });
+
+  it('preserves no-store for stale worker responses', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json(
+        { cache: { status: 'stale_on_error', freshnessRemainingSeconds: 0 } },
+        { headers: { 'Cache-Control': 'no-store', 'X-Runway-Cache-Status': 'stale_on_error' } }
+      )
+    );
+
+    const response = await onRequestGet({
+      request: new Request('https://example.com/api/metar?icao=KMCI'),
+      env: { METAR_API: { fetch } },
+      params: {},
+      data: {},
+      waitUntil: () => {},
+      next: async () => new Response('')
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('stale_on_error');
   });
 
   it('returns INVALID_ICAO for malformed input before proxying', async () => {

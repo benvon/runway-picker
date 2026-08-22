@@ -3,9 +3,9 @@ import {
   __cacheRefreshHelpers,
   default as workerEntrypoint,
   extractMetarRaw,
-  handleAirportRequest,
-  handleAirportLocationRequest,
-  handleMetarRequest,
+  handleAirportRequest as handleAirportRequestFromWorker,
+  handleAirportLocationRequest as handleAirportLocationRequestFromWorker,
+  handleMetarRequest as handleMetarRequestFromWorker,
   MetarWorkerError,
   normalizeAirportIcao,
   normalizeIcao,
@@ -80,6 +80,45 @@ function alwaysBlockedRateLimiter() {
         })
     })
   };
+}
+
+function alwaysAllowedRateLimiter() {
+  return {
+    idFromName: (name: string) => name,
+    get: () => ({
+      fetch: async () =>
+        Response.json({
+          allowed: true,
+          limit: 60,
+          remaining: 59,
+          resetSeconds: 60,
+          retryAfterSeconds: null
+        })
+    })
+  };
+}
+
+function rateLimiterWithCheck(fetchCheck: () => Promise<Response>) {
+  return {
+    idFromName: (name: string) => name,
+    get: () => ({ fetch: fetchCheck })
+  };
+}
+
+function withHealthyRateLimiter(env: CacheEngineEnv): CacheEngineEnv {
+  return env.API_RATE_LIMITER ? env : { ...env, API_RATE_LIMITER: alwaysAllowedRateLimiter() };
+}
+
+function handleMetarRequest(request: Request, env: CacheEngineEnv, ctx?: { waitUntil(promise: Promise<unknown>): void }) {
+  return handleMetarRequestFromWorker(request, withHealthyRateLimiter(env), ctx);
+}
+
+function handleAirportRequest(request: Request, env: CacheEngineEnv, ctx?: { waitUntil(promise: Promise<unknown>): void }) {
+  return handleAirportRequestFromWorker(request, withHealthyRateLimiter(env), ctx);
+}
+
+function handleAirportLocationRequest(request: Request, env: CacheEngineEnv) {
+  return handleAirportLocationRequestFromWorker(request, withHealthyRateLimiter(env));
 }
 
 function capturingRateLimiter(capturedNames: string[]) {
@@ -304,6 +343,7 @@ describe('cache refresh helpers', () => {
 describe('metar worker', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('normalizes ICAO values', () => {
@@ -323,7 +363,7 @@ describe('metar worker', () => {
     const kv = new MemoryKv();
     const fetchedAt = new Date(Date.now() - 30_000);
     kv.seed('v1:metar:KMCI', {
-      schemaVersion: 4,
+      schemaVersion: 5,
       resource: 'metar',
       key: 'v1:metar:KMCI',
       data: {
@@ -344,7 +384,7 @@ describe('metar worker', () => {
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
         expiresAt: new Date(fetchedAt.getTime() + 30 * 60 * 1000).toISOString(),
-        policyVersion: 'metar-v1',
+        policyVersion: 'metar-v2',
         source: 'upstream'
       }
     });
@@ -369,6 +409,186 @@ describe('metar worker', () => {
     expect(payload.wind.speedKt).toBe(10);
     expect(payload.cache.source).toBe('kv');
     expect(payload.cache.status).toBe('kv_hit');
+  });
+
+  it('refreshes upstream when cached METAR identities disagree', async () => {
+    const kv = new MemoryKv();
+    const fetchedAt = new Date(Date.now() - 30_000);
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KORD',
+        metarRaw: 'METAR KORD 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: new Date(fetchedAt.getTime() + 30 * 60 * 1000).toISOString(),
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+    const fetchUpstream = vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMCI', { wdir: 110, wspd: 10 })]));
+    vi.stubGlobal('fetch', fetchUpstream);
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.status).toBe(200);
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+  });
+
+  it('derives public METAR cache lifetime from the cached record remaining freshness', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
+    const kv = new MemoryKv();
+    const fetchedAt = new Date('2026-03-03T11:59:30.000Z');
+    const expiresAt = new Date('2026-03-03T12:00:05.000Z');
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI',
+        metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
+    await expect(response.json()).resolves.toMatchObject({
+      cache: {
+        expiresAt: expiresAt.toISOString(),
+        freshnessRemainingSeconds: 5
+      }
+    });
+  });
+
+  it('does not let downstream caches retain stale METAR data', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('provider unavailable')));
+    const kv = new MemoryKv();
+    const fetchedAt = new Date('2026-03-03T11:29:00.000Z');
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI',
+        metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: '2026-03-03T11:59:00.000Z',
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    await expect(response.json()).resolves.toMatchObject({
+      cache: { status: 'stale_on_error', freshnessRemainingSeconds: 0 }
+    });
+  });
+
+  it('does not emit cache lifetime after a delayed KV read passes record expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('provider unavailable')));
+    const kv = new MemoryKv();
+    const fetchedAt = new Date('2026-03-03T11:30:05.000Z');
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI',
+        metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: '2026-03-03T12:00:05.000Z',
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+    const get = kv.get.bind(kv);
+    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
+      vi.setSystemTime(new Date('2026-03-03T12:00:06.000Z'));
+      return get(key, type);
+    });
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    await expect(response.json()).resolves.toMatchObject({
+      cache: { status: 'stale_on_error', freshnessRemainingSeconds: 0 }
+    });
   });
 
   it('returns variable wind with non-zero speed using structured upstream fields', async () => {
@@ -499,6 +719,109 @@ describe('metar worker', () => {
     await expect(response.json()).resolves.toMatchObject({
       code: 'RATE_LIMITED'
     });
+  });
+
+  it('returns a generic, non-cacheable 503 and logs bounded metadata when the rate limiter binding is missing', async () => {
+    const requestId = '95cac136-65e0-4cce-8ecc-02a66a98b75d';
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const response = await handleMetarRequestFromWorker(
+      new Request('https://metar.internal/api/metar?icao=KMCI', {
+        headers: { 'X-Request-Id': requestId, 'X-Client-IP': '203.0.113.10' }
+      }),
+      { METAR_CACHE: new MemoryKv() }
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(response.headers.get('Retry-After')).toBe('5');
+    expect(response.headers.get('X-RateLimit-Limit')).toBeNull();
+    expect(response.headers.get('X-RateLimit-Remaining')).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      error: 'Service temporarily unavailable. Please retry later.',
+      code: 'RATE_LIMITER_UNAVAILABLE',
+      requestId
+    });
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Rate limiter unavailable.', {
+      endpoint: 'metar',
+      requestId,
+      failureCategory: 'binding_missing'
+    });
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('returns 503 when the rate limiter is unhealthy or its decision is malformed', async () => {
+    const validDecision = {
+      allowed: true,
+      limit: 60,
+      remaining: 59,
+      resetSeconds: 60,
+      retryAfterSeconds: null
+    };
+    const malformedDecisions = [
+      { ...validDecision, allowed: 'true' },
+      { ...validDecision, limit: 0 },
+      { ...validDecision, remaining: -1 },
+      { ...validDecision, resetSeconds: 0 },
+      { ...validDecision, retryAfterSeconds: 1 }
+    ];
+    const unhealthyLimiters = [
+      { idFromName: () => { throw new Error('unavailable'); }, get: () => ({ fetch: async () => Response.json(validDecision) }) },
+      rateLimiterWithCheck(async () => { throw new Error('unavailable'); }),
+      rateLimiterWithCheck(async () => new Response(null, { status: 502 })),
+      rateLimiterWithCheck(async () => new Response('{', { headers: { 'Content-Type': 'application/json' } })),
+      ...malformedDecisions.map((decision) => rateLimiterWithCheck(async () => Response.json(decision)))
+    ];
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    for (const limiter of unhealthyLimiters) {
+      const response = await handleMetarRequestFromWorker(
+        new Request('https://metar.internal/api/metar?icao=KMCI'),
+        { METAR_CACHE: new MemoryKv(), API_RATE_LIMITER: limiter }
+      );
+
+      expect(response.status).toBe(503);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(response.headers.get('X-RateLimit-Limit')).toBeNull();
+      await expect(response.json()).resolves.toMatchObject({ code: 'RATE_LIMITER_UNAVAILABLE' });
+    }
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('records bounded health metadata when an invalid ICAO penalty signal fails', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const limiter = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async (input: RequestInfo | URL) =>
+          new URL(typeof input === 'string' ? input : input.toString()).pathname === '/check'
+            ? Response.json({
+              allowed: true,
+              limit: 60,
+              remaining: 59,
+              resetSeconds: 60,
+              retryAfterSeconds: null
+            })
+            : new Response(null, { status: 502 })
+      })
+    };
+
+    const response = await handleMetarRequestFromWorker(
+      new Request('https://metar.internal/api/metar?icao=ABC', {
+        headers: { 'X-Client-IP': '203.0.113.10' }
+      }),
+      { METAR_CACHE: new MemoryKv(), API_RATE_LIMITER: limiter }
+    );
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { requestId: string };
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Rate limiter invalid ICAO signal failed.', {
+      endpoint: 'metar',
+      requestId: payload.requestId,
+      failureCategory: 'non_success_response'
+    });
+    consoleErrorSpy.mockRestore();
   });
 
   it('fetches from upstream on miss then returns cached on repeated request', async () => {
@@ -808,6 +1131,7 @@ describe('metar worker', () => {
 describe('airport worker', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('normalizes airport ICAO values', () => {
@@ -815,6 +1139,8 @@ describe('airport worker', () => {
   });
 
   it('returns airport payload with runway ends and cache metadata', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
 
     const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
@@ -824,6 +1150,7 @@ describe('airport worker', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=86400');
 
     const payload = (await response.json()) as {
       requestedIcao: string;
@@ -970,6 +1297,8 @@ describe('airport worker', () => {
   });
 
   it('uses an independent long-lived location cache without enrolling it in the hot queue', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json({
       ident: 'KLOC',
       latitude_deg: '41.8781',
@@ -984,6 +1313,7 @@ describe('airport worker', () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=2592000');
     await expect(response.json()).resolves.toMatchObject({
       icao: 'KLOC',
       coordinates: { latitudeDeg: 41.8781, longitudeDeg: -87.6298 },
@@ -1346,13 +1676,13 @@ describe('airport worker', () => {
   it('routes airport and metar requests through the worker entrypoint', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 10 })])));
 
-    const airportResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/airport?icao=ABC'), {
+    const airportResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/airport?icao=ABC'), withHealthyRateLimiter({
       METAR_CACHE: new MemoryKv(),
       AIRPORTDB_API_TOKEN: 'token'
-    });
-    const metarResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+    }));
+    const metarResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/metar?icao=KMCI'), withHealthyRateLimiter({
       METAR_CACHE: new MemoryKv()
-    });
+    }));
 
     expect(airportResponse.status).toBe(400);
     expect(metarResponse.status).toBe(200);

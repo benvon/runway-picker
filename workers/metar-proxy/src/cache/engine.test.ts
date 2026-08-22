@@ -266,7 +266,150 @@ describe('cache engine', () => {
     expect(result.payload.value).toBe('kv-value');
     expect(result.cache.status).toBe('kv_hit');
     expect(result.cache.source).toBe('kv');
+    expect(result.cache.expiresAt).toBe('2026-03-03T12:00:15.000Z');
+    expect(result.cache.freshnessRemainingSeconds).toBe(15);
     expect(adapter.fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it('limits edge-cache promotion to the cached record remaining freshness', async () => {
+    const adapter = buildAdapter({ fetchUpstream: vi.fn().mockResolvedValue('not-used') });
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'kv-value', '2026-03-03T11:59:45.000Z', 20)
+    );
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.freshnessRemainingSeconds).toBe(5);
+    const promoted = await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Aalpha'));
+    expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
+  });
+
+  it('rechecks freshness after a delayed KV read before promoting a cache record', async () => {
+    let now = new Date('2026-03-03T12:00:00.000Z');
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn().mockResolvedValue('refreshed-value'),
+      validate: (value) => ({ value, fetchedAt: now.toISOString() })
+    });
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'near-expiry-value', '2026-03-03T11:59:35.000Z', 30)
+    );
+    const get = kv.get.bind(kv);
+    vi.spyOn(kv, 'get').mockImplementation(async (key) => {
+      now = new Date('2026-03-03T12:00:06.000Z');
+      return get(key);
+    });
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      clock: () => now
+    });
+
+    expect(result.payload.value).toBe('refreshed-value');
+    expect(result.cache.status).toBe('upstream_refresh');
+    const promoted = await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Aalpha'));
+    expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=30, s-maxage=30');
+  });
+
+  it('does not return a KV hit that expires while edge promotion is pending', async () => {
+    const adapter = buildAdapter({ fetchUpstream: vi.fn().mockRejectedValue(new Error('upstream unavailable')) });
+    const kv = new MemoryKv();
+    let now = new Date('2026-03-03T12:00:00.000Z');
+    let promoted: Response | undefined;
+    const edge: EdgeCacheLike = {
+      match: async () => undefined,
+      put: async (_request, response) => {
+        promoted = response.clone();
+        now = new Date('2026-03-03T12:00:06.000Z');
+      }
+    };
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'near-expiry-value', '2026-03-03T11:59:35.000Z', 30)
+    );
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      clock: () => now
+    });
+
+    expect(result.cache.status).toBe('stale_on_error');
+    expect(result.cache.freshnessRemainingSeconds).toBe(0);
+    expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
+    expect(Date.parse(promoted?.headers.get('Date') ?? '') + 5_000).toBeLessThanOrEqual(
+      Date.parse('2026-03-03T12:00:05.000Z')
+    );
+  });
+
+  it('clamps sub-second and future cached expiries without extending edge-cache lifetime', async () => {
+    const adapter = buildAdapter({ fetchUpstream: vi.fn().mockResolvedValue('not-used') });
+    const now = new Date('2026-03-03T12:00:00.000Z');
+    const edge = new MemoryEdgeCache();
+    const kv = new MemoryKv();
+    kv.seed('v1:demo:alpha', {
+      ...buildEnvelope('v1:demo:alpha', 'sub-second', '2026-03-03T11:59:30.000Z'),
+      cacheMeta: {
+        fetchedAt: '2026-03-03T11:59:30.000Z',
+        expiresAt: '2026-03-03T12:00:00.999Z',
+        policyVersion: 'demo-v1',
+        source: 'upstream'
+      }
+    });
+
+    const subSecond = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now
+    });
+
+    expect(subSecond.cache.freshnessRemainingSeconds).toBe(0);
+    expect(await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Aalpha'))).toBeUndefined();
+
+    kv.seed('v1:demo:bravo', {
+      ...buildEnvelope('v1:demo:bravo', 'future', '2026-03-03T12:00:00.000Z'),
+      cacheMeta: {
+        fetchedAt: '2026-03-03T12:00:00.000Z',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+        policyVersion: 'demo-v1',
+        source: 'upstream'
+      }
+    });
+
+    const future = await getOrRefreshCached({
+      adapter,
+      input: { key: 'bravo' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now
+    });
+
+    expect(future.cache.freshnessRemainingSeconds).toBe(30);
+    const promoted = await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Abravo'));
+    expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=30, s-maxage=30');
   });
 
   it('preserves cache-only envelope fields when promoting a kv hit back into edge cache', async () => {
@@ -530,6 +673,46 @@ describe('cache engine', () => {
     ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
   });
 
+  it('limits negative-cache edge promotion to its recorded remaining lifetime', async () => {
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn(),
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const now = new Date('2026-03-03T12:00:00.000Z');
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+    kv.seed('v1:demo:missing', {
+      schemaVersion: 2,
+      resource: 'demo',
+      key: 'v1:demo:missing',
+      negative: { status: 404, code: 'DEMO_NOT_FOUND' },
+      cacheMeta: {
+        fetchedAt: '2026-03-03T11:59:55.000Z',
+        expiresAt: '2026-03-03T12:00:03.000Z',
+        policyVersion: 'demo-v1',
+        source: 'upstream'
+      }
+    });
+
+    await expect(
+      getOrRefreshCached({
+        adapter,
+        input: { key: 'missing' },
+        request: new Request('https://example.com'),
+        env: { METAR_CACHE: kv },
+        edgeCache: edge,
+        now
+      })
+    ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
+
+    const promoted = await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Amissing'));
+    expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=3, s-maxage=3');
+  });
+
   it('does not cache errors an adapter has not explicitly declared stable', async () => {
     const fetchUpstream = vi.fn().mockRejectedValue(new Error('provider unavailable'));
     const adapter = buildAdapter({
@@ -578,6 +761,7 @@ describe('cache engine', () => {
     expect(result.payload.value).toBe('stale-value');
     expect(result.cache.status).toBe('stale_on_error');
     expect(result.cache.source).toBe('stale');
+    expect(result.cache.freshnessRemainingSeconds).toBe(0);
   });
 
   it('ignores schema mismatches and refreshes from upstream', async () => {
@@ -681,6 +865,7 @@ describe('cache engine', () => {
 
     expect(result.cache.status).toBe('stale_while_refresh');
     expect(result.payload.value).toBe('stale-value');
+    expect(result.cache.freshnessRemainingSeconds).toBe(0);
   });
 
   it('throws a cache engine error when non-Error values bubble from upstream refresh', async () => {

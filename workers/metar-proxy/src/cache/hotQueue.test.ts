@@ -78,6 +78,8 @@ function fakeProvenance(key: string, fetchedAt: string): CacheProvenance {
     source: 'upstream',
     ageSeconds: 0,
     fetchedAt,
+    expiresAt: new Date(new Date(fetchedAt).getTime() + 1_800_000).toISOString(),
+    freshnessRemainingSeconds: 1800,
     servedAt: fetchedAt,
     ttlSeconds: 1800,
     key,

@@ -64,6 +64,12 @@ export function buildProxyResponse(upstreamResponse: Response, requestId: string
     }
   }
 
+  // Do not let a malformed or future Worker response acquire an implicit
+  // platform cache lifetime at the Pages boundary.
+  if (!headers.has('Cache-Control')) {
+    headers.set('Cache-Control', 'no-store');
+  }
+
   appendSecurityHeaders(headers);
   if (!headers.get('X-Request-Id')) {
     appendRequestId(headers, requestId);

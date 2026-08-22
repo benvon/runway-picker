@@ -76,6 +76,13 @@ export interface CacheProvenance {
   source: CacheDataSource;
   ageSeconds: number;
   fetchedAt: string;
+  /** Exact record expiry selected by the cache engine. */
+  expiresAt: string;
+  /**
+   * Whole seconds for which this response may still be treated as fresh.
+   * This is bounded to the adapter policy TTL and never negative.
+   */
+  freshnessRemainingSeconds: number;
   servedAt: string;
   ttlSeconds: number;
   key: string;
@@ -112,6 +119,7 @@ export interface KvNamespaceLike {
 export interface CacheEngineEnv {
   METAR_CACHE: KvNamespaceLike;
   CACHE_COORDINATOR?: DurableObjectNamespaceLike;
+  /** Required in production; optional here so runtime configuration faults can fail closed. */
   API_RATE_LIMITER?: DurableObjectNamespaceLike;
   AIRPORTDB_API_TOKEN?: string;
   APP_ENV?: string;
@@ -134,5 +142,7 @@ export interface CacheEngineInput<TInput, TUpstream, TData> {
   request: Request;
   env: CacheEngineEnv;
   edgeCache?: EdgeCacheLike;
+  /** Injectable clock for cache-operation timing tests. */
+  clock?: () => Date;
   now?: Date;
 }
