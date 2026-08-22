@@ -5,10 +5,12 @@ import type {
   CacheAdapterContext,
   CacheDataSource,
   CacheEngineInput,
+  CacheEngineEnv,
   CacheEngineResult,
   CacheEnvelope,
   NegativeCacheEnvelope,
   CacheProvenance,
+  CachePolicy,
   CacheResourceAdapter,
   EdgeCacheLike,
   StableNegativeCacheEntry
@@ -17,6 +19,7 @@ import type {
 interface CachedRecord<TData> {
   data: TData;
   fetchedAt: Date;
+  hasTrustedFetchedAt: boolean;
   expiresAt: Date;
   envelope: CacheEnvelope<TData>;
 }
@@ -152,7 +155,7 @@ function toCacheRecords<TInput, TUpstream, TData>(
   now: Date
 ): CacheRecords<TData> {
   return {
-    data: toCachedRecord(raw, adapter, cacheKey, now),
+    data: toCachedRecord(raw, adapter, cacheKey),
     negative: toCachedNegativeRecord(raw, adapter, cacheKey, input, now)
   };
 }
@@ -160,8 +163,7 @@ function toCacheRecords<TInput, TUpstream, TData>(
 function toCachedRecord<TInput, TUpstream, TData>(
   raw: unknown,
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
-  cacheKey: string,
-  now: Date
+  cacheKey: string
 ): CachedRecord<TData> | null {
   if (!raw || typeof raw !== 'object') {
     return null;
@@ -177,8 +179,8 @@ function toCachedRecord<TInput, TUpstream, TData>(
     return null;
   }
 
-  const fetchedAt =
-    parseIsoDate(candidate?.cacheMeta?.fetchedAt) ?? extractFetchedAt(data) ?? now;
+  const trustedFetchedAt = parseIsoDate(candidate?.cacheMeta?.fetchedAt) ?? extractFetchedAt(data);
+  const fetchedAt = trustedFetchedAt ?? new Date(0);
 
   const expiresAt =
     parseIsoDate(candidate?.cacheMeta?.expiresAt) ??
@@ -187,13 +189,26 @@ function toCachedRecord<TInput, TUpstream, TData>(
   return {
     data,
     fetchedAt,
+    hasTrustedFetchedAt: trustedFetchedAt !== null,
     expiresAt,
     envelope: candidate as CacheEnvelope<TData>
   };
 }
 
-function isFresh(record: CachedRecord<unknown>, now: Date): boolean {
-  return record.expiresAt.getTime() > now.getTime();
+function isWithinPayloadAge(record: CachedRecord<unknown>, now: Date, policy: CachePolicy): boolean {
+  if (!record.hasTrustedFetchedAt) {
+    return false;
+  }
+
+  return now.getTime() < record.fetchedAt.getTime() + policy.maxPayloadAgeSeconds * 1000;
+}
+
+function isFresh(
+  record: CachedRecord<unknown>,
+  now: Date,
+  policy: CachePolicy
+): boolean {
+  return isWithinPayloadAge(record, now, policy) && record.expiresAt.getTime() > now.getTime();
 }
 
 async function throwIfFreshNegative(
@@ -209,8 +224,16 @@ async function throwIfFreshNegative(
   throw record.error;
 }
 
-function isWithinStaleWindow(record: CachedRecord<unknown>, now: Date, staleWindowSeconds: number): boolean {
-  return now.getTime() <= record.expiresAt.getTime() + staleWindowSeconds * 1000;
+function isWithinStaleWindow(
+  record: CachedRecord<unknown>,
+  now: Date,
+  staleWindowSeconds: number,
+  policy: CachePolicy
+): boolean {
+  return (
+    isWithinPayloadAge(record, now, policy) &&
+    now.getTime() <= record.expiresAt.getTime() + staleWindowSeconds * 1000
+  );
 }
 
 function buildProvenance(
@@ -389,11 +412,110 @@ function cacheResultFromRecord<TInput, TUpstream, TData>(
 function toStaleCandidate<TData>(
   edgeRecord: CachedRecord<TData> | null,
   kvRecord: CachedRecord<TData> | null,
-  now: Date
+  now: Date,
+  policy: CachePolicy
 ): CachedRecord<TData> | null {
-  const staleEdge = edgeRecord && !isFresh(edgeRecord, now) ? edgeRecord : null;
-  const staleKv = kvRecord && !isFresh(kvRecord, now) ? kvRecord : null;
+  const staleEdge = edgeRecord && isWithinPayloadAge(edgeRecord, now, policy) && !isFresh(edgeRecord, now, policy)
+    ? edgeRecord
+    : null;
+  const staleKv = kvRecord && isWithinPayloadAge(kvRecord, now, policy) && !isFresh(kvRecord, now, policy)
+    ? kvRecord
+    : null;
   return chooseFresher(staleKv, staleEdge);
+}
+
+async function purgeInvalidPayloadCopies(
+  env: CacheEngineEnv,
+  edgeCache: EdgeCacheLike | undefined,
+  cacheKey: string,
+  purgeKv: boolean,
+  purgeEdge: boolean
+): Promise<void> {
+  const cleanups: Array<Promise<unknown>> = [];
+  if (purgeKv && env.METAR_CACHE.delete) {
+    cleanups.push(env.METAR_CACHE.delete(cacheKey));
+  }
+  if (purgeEdge && edgeCache?.delete) {
+    cleanups.push(edgeCache.delete(buildEdgeRequest(cacheKey)));
+  }
+  await Promise.allSettled(cleanups);
+}
+
+async function discardPayloadOutsideValidity<TData>(
+  record: CachedRecord<TData> | null,
+  source: 'edge' | 'kv',
+  now: Date,
+  policy: CachePolicy,
+  env: CacheEngineEnv,
+  edgeCache: EdgeCacheLike | undefined,
+  cacheKey: string
+): Promise<CachedRecord<TData> | null> {
+  if (!record || isWithinPayloadAge(record, now, policy)) {
+    return record;
+  }
+
+  await purgeInvalidPayloadCopies(env, edgeCache, cacheKey, source === 'kv', source === 'edge');
+  return null;
+}
+
+interface CachedReadDecision<TData> {
+  fresh: CacheEngineResult<TData> | null;
+  staleCandidate: CachedRecord<TData> | null;
+}
+
+async function readCachedData<TInput, TUpstream, TData>(
+  adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
+  cacheKey: string,
+  input: TInput,
+  env: CacheEngineInput<TInput, TUpstream, TData>['env'],
+  edgeCache: EdgeCacheLike | undefined,
+  readKv: (cacheKey: string) => Promise<unknown>,
+  clock: () => Date
+): Promise<CachedReadDecision<TData>> {
+  const edgeRecords = await readEdgeCacheRecords(edgeCache, adapter, cacheKey, input, clock);
+  const edgeDecisionTime = clock();
+  await throwIfFreshNegative(edgeRecords.negative, edgeDecisionTime);
+  const edgeRecord = await discardPayloadOutsideValidity(
+    edgeRecords.data,
+    'edge',
+    edgeDecisionTime,
+    adapter.policy,
+    env,
+    edgeCache,
+    cacheKey
+  );
+  if (edgeRecord && isFresh(edgeRecord, edgeDecisionTime, adapter.policy)) {
+    return { fresh: cacheResultFromRecord(adapter, cacheKey, edgeRecord, edgeDecisionTime, 'edge_hit', 'edge'), staleCandidate: null };
+  }
+
+  const kvRecords = await readKvCacheRecords(adapter, cacheKey, input, clock, readKv);
+  const kvDecisionTime = clock();
+  const kvRecord = await discardPayloadOutsideValidity(
+    kvRecords.data,
+    'kv',
+    kvDecisionTime,
+    adapter.policy,
+    env,
+    edgeCache,
+    cacheKey
+  );
+  if (kvRecord && isFresh(kvRecord, kvDecisionTime, adapter.policy)) {
+    await writeEdgeEnvelope(edgeCache, cacheKey, kvRecord.envelope, adapter.policy.ttlSeconds, clock);
+    const kvResponseTime = clock();
+    if (isFresh(kvRecord, kvResponseTime, adapter.policy)) {
+      return { fresh: cacheResultFromRecord(adapter, cacheKey, kvRecord, kvResponseTime, 'kv_hit', 'kv'), staleCandidate: null };
+    }
+  }
+
+  await throwIfFreshNegative(kvRecords.negative, kvDecisionTime, async () => {
+    if (kvRecords.negative) {
+      await Promise.allSettled([
+        writeEdgeEnvelope(edgeCache, cacheKey, kvRecords.negative.envelope, adapter.policy.negativeCacheTtlSeconds, clock)
+      ]);
+    }
+  });
+
+  return { fresh: null, staleCandidate: toStaleCandidate(edgeRecord, kvRecord, clock(), adapter.policy) };
 }
 
 async function waitForFreshKvRecords<TInput, TUpstream, TData>(
@@ -411,7 +533,7 @@ async function waitForFreshKvRecords<TInput, TUpstream, TData>(
     const records = await readKvCacheRecords(adapter, cacheKey, input, clock, readKv);
     const now = clock();
     if (
-      (records.data && isFresh(records.data, now)) ||
+      (records.data && isFresh(records.data, now, adapter.policy)) ||
       (records.negative && records.negative.expiresAt.getTime() > now.getTime())
     ) {
       return records;
@@ -432,7 +554,7 @@ async function waitForLeaderOrServeStale<TInput, TUpstream, TData>(
   const staleWhileRefreshNow = clock();
   if (
     staleCandidate &&
-    isWithinStaleWindow(staleCandidate, staleWhileRefreshNow, adapter.policy.staleWhileRevalidateSeconds)
+    isWithinStaleWindow(staleCandidate, staleWhileRefreshNow, adapter.policy.staleWhileRevalidateSeconds, adapter.policy)
   ) {
     return cacheResultFromRecord(adapter, cacheKey, staleCandidate, staleWhileRefreshNow, 'stale_while_refresh', 'stale');
   }
@@ -446,7 +568,10 @@ async function waitForLeaderOrServeStale<TInput, TUpstream, TData>(
   }
 
   const staleOnErrorNow = clock();
-  if (staleCandidate && isWithinStaleWindow(staleCandidate, staleOnErrorNow, adapter.policy.staleOnErrorSeconds)) {
+  if (
+    staleCandidate &&
+    isWithinStaleWindow(staleCandidate, staleOnErrorNow, adapter.policy.staleOnErrorSeconds, adapter.policy)
+  ) {
     return cacheResultFromRecord(adapter, cacheKey, staleCandidate, staleOnErrorNow, 'stale_on_error', 'stale');
   }
 
@@ -465,9 +590,10 @@ async function refreshFromUpstream<TInput, TUpstream, TData>(
   const upstreamPayload = await adapter.fetchUpstream(input, context);
   const validatedData = await adapter.validate(upstreamPayload, input, context);
   const envelope = toEnvelope(adapter, validatedData, cacheKey, clock(), upstreamPayload);
-  const retentionTtl =
-    adapter.policy.ttlSeconds +
-    Math.max(adapter.policy.staleWhileRevalidateSeconds, adapter.policy.staleOnErrorSeconds);
+  const retentionTtl = Math.min(
+    adapter.policy.maxPayloadAgeSeconds,
+    adapter.policy.ttlSeconds + Math.max(adapter.policy.staleWhileRevalidateSeconds, adapter.policy.staleOnErrorSeconds)
+  );
 
   await env.METAR_CACHE.put(cacheKey, JSON.stringify(envelope), {
     expirationTtl: retentionTtl
@@ -478,6 +604,7 @@ async function refreshFromUpstream<TInput, TUpstream, TData>(
   const record: CachedRecord<TData> = {
     data: envelope.data,
     fetchedAt: new Date(envelope.cacheMeta.fetchedAt),
+    hasTrustedFetchedAt: true,
     expiresAt: new Date(envelope.cacheMeta.expiresAt),
     envelope
   };
@@ -510,7 +637,10 @@ async function refreshAsLeader<TInput, TUpstream, TData>(
     }
 
     const staleOnErrorNow = clock();
-    if (staleCandidate && isWithinStaleWindow(staleCandidate, staleOnErrorNow, adapter.policy.staleOnErrorSeconds)) {
+    if (
+      staleCandidate &&
+      isWithinStaleWindow(staleCandidate, staleOnErrorNow, adapter.policy.staleOnErrorSeconds, adapter.policy)
+    ) {
       return cacheResultFromRecord(adapter, cacheKey, staleCandidate, staleOnErrorNow, 'stale_on_error', 'stale');
     }
 
@@ -533,41 +663,11 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
   const readKv = async (key: string): Promise<unknown> => env.METAR_CACHE.get(key, 'json');
   const adapterContext: CacheAdapterContext = { request, env };
 
-  const edgeRecords = await readEdgeCacheRecords(edgeCache, adapter, cacheKey, input.input, clock);
-  const edgeDecisionTime = clock();
-  await throwIfFreshNegative(edgeRecords.negative, edgeDecisionTime);
-
-  const edgeRecord = edgeRecords.data;
-  if (edgeRecord && isFresh(edgeRecord, edgeDecisionTime)) {
-    return cacheResultFromRecord(adapter, cacheKey, edgeRecord, edgeDecisionTime, 'edge_hit', 'edge');
+  const cached = await readCachedData(adapter, cacheKey, input.input, env, edgeCache, readKv, clock);
+  if (cached.fresh) {
+    return cached.fresh;
   }
-
-  const kvRecords = await readKvCacheRecords(adapter, cacheKey, input.input, clock, readKv);
-  const kvDecisionTime = clock();
-  const kvRecord = kvRecords.data;
-  if (kvRecord && isFresh(kvRecord, kvDecisionTime)) {
-    await writeEdgeEnvelope(edgeCache, cacheKey, kvRecord.envelope, adapter.policy.ttlSeconds, clock);
-    const kvResponseTime = clock();
-    if (isFresh(kvRecord, kvResponseTime)) {
-      return cacheResultFromRecord(adapter, cacheKey, kvRecord, kvResponseTime, 'kv_hit', 'kv');
-    }
-  }
-
-  await throwIfFreshNegative(kvRecords.negative, kvDecisionTime, async () => {
-    if (kvRecords.negative) {
-      await Promise.allSettled([
-        writeEdgeEnvelope(
-          edgeCache,
-          cacheKey,
-          kvRecords.negative.envelope,
-          adapter.policy.negativeCacheTtlSeconds,
-          clock
-        )
-      ]);
-    }
-  });
-
-  const staleCandidate = toStaleCandidate(edgeRecord, kvRecord, clock());
+  const { staleCandidate } = cached;
 
   const lease = await acquireSingleFlightLease(env.CACHE_COORDINATOR, cacheKey, 20);
   const hasCoordinator = Boolean(env.CACHE_COORDINATOR);

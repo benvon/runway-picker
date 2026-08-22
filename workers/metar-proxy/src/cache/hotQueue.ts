@@ -346,17 +346,28 @@ export async function touchHotCacheEntry(params: {
   lastAccessedAt: string;
   expirationTtl?: number;
 }): Promise<void> {
-  const entry: HotCacheEntry = {
-    schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
-    resource: params.resource,
-    normalizedKey: params.normalizedKey,
-    lastAccessedAt: params.lastAccessedAt,
-    lastRefreshedAt: params.cache.fetchedAt,
-    consecutiveRefreshFailures: 0
-  };
+  const metadataKey = hotQueueKey(params.resource, params.normalizedKey);
+  const existing = await readHotCacheQueueEntry(params.env, metadataKey);
+  const entry: HotCacheEntry = existing
+    ? {
+      schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
+      resource: existing.resource,
+      normalizedKey: existing.normalizedKey,
+      lastAccessedAt: params.lastAccessedAt,
+      lastRefreshedAt: existing.lastRefreshedAt,
+      consecutiveRefreshFailures: existing.consecutiveRefreshFailures
+    }
+    : {
+      schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
+      resource: params.resource,
+      normalizedKey: params.normalizedKey,
+      lastAccessedAt: params.lastAccessedAt,
+      lastRefreshedAt: params.cache.fetchedAt,
+      consecutiveRefreshFailures: 0
+    };
 
   await params.env.METAR_CACHE.put(
-    hotQueueKey(params.resource, params.normalizedKey),
+    metadataKey,
     JSON.stringify(entry),
     params.expirationTtl ? { expirationTtl: params.expirationTtl } : undefined
   );

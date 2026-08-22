@@ -18,6 +18,8 @@ This runbook covers day-2 operations for the scheduled hot-cache refresher in `w
   4. Persist each next cursor or clear it after the resource scan wraps. A metadata, eviction, or checkpoint failure leaves the prior cursor in place for retry; an individual refresh failure is recorded and does not pin the scan.
   5. A scheduled refresh failure increments that entry's consecutive failure count. A successful scheduled refresh resets it. On the third consecutive scheduled failure, the worker removes only the hot-entry metadata; the payload cache remains subject to its normal TTL and a later client request can re-enqueue the ICAO.
 - If a saved cursor is malformed (including invalid JSON) or KV specifically rejects it as invalid, the worker clears only that resource's cursor record, retries once from the beginning, and writes one `Scheduled cache refresh cursor checkpoint reset` warning. Transient KV/list communication failures retain a valid cursor for retry. Cursor recovery never deletes hot entries or cache payloads.
+- A scheduled refresh resets its failure count only after a real upstream refresh. A stale-on-error fallback is recorded as a failed refresh; client access updates demand time only and never changes scheduled refresh outcome state.
+- METAR payloads at or beyond 90 minutes from trusted `fetchedAt` are purged and never delivered. This payload safety cleanup does not remove hot demand metadata.
 
 ## Runtime controls
 

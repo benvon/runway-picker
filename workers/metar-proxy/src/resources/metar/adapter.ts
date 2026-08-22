@@ -681,6 +681,7 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
   deserialize: deserializeMetar,
   policy: {
     ttlSeconds: 1800,
+    maxPayloadAgeSeconds: 5400,
     staleWhileRevalidateSeconds: 180,
     staleOnErrorSeconds: 7200,
     negativeCacheTtlSeconds: 180,

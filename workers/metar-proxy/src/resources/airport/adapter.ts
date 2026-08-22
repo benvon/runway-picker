@@ -646,6 +646,7 @@ export const airportResourceAdapter: CacheResourceAdapter<AirportResourceInput, 
   },
   policy: {
     ttlSeconds: 86400,
+    maxPayloadAgeSeconds: 345600,
     staleWhileRevalidateSeconds: 43200,
     staleOnErrorSeconds: 259200,
     negativeCacheTtlSeconds: 3600,

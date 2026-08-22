@@ -509,6 +509,30 @@ export const __cacheRefreshHelpers = {
   selectRoundRobinDueEntries
 };
 
+async function recordScheduledRefreshFailure(
+  env: CacheEngineEnv,
+  entry: HotCacheQueueEntry,
+  inactivityTtlSeconds: number,
+  message: string,
+  details: Record<string, unknown>
+): Promise<void> {
+  try {
+    const failure = await recordHotCacheRefreshFailure(env, entry, inactivityTtlSeconds);
+    console.error(message, {
+      entry,
+      ...details,
+      consecutiveRefreshFailures: failure.consecutiveRefreshFailures,
+      droppedFromHotQueue: failure.dropped
+    });
+  } catch (failureRecordError) {
+    console.error('Scheduled cache refresh failure count could not be recorded.', {
+      entry,
+      ...details,
+      failureRecordError
+    });
+  }
+}
+
 export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Date()): Promise<void> {
   const config = parseCacheRefresherConfig(env);
   if (!config.enabled) {
@@ -544,21 +568,28 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
     try {
       refreshedCache = await refreshQueueEntry(entry, env);
     } catch (error) {
-      try {
-        const failure = await recordHotCacheRefreshFailure(env, entry, config.inactivityTtlSeconds);
-        console.error('Scheduled cache refresh failed for hot cache queue entry.', {
-          entry,
-          error,
-          consecutiveRefreshFailures: failure.consecutiveRefreshFailures,
-          droppedFromHotQueue: failure.dropped
-        });
-      } catch (failureRecordError) {
-        console.error('Scheduled cache refresh failed and its failure count could not be recorded.', {
-          entry,
-          error,
-          failureRecordError
-        });
-      }
+      await recordScheduledRefreshFailure(
+        env,
+        entry,
+        config.inactivityTtlSeconds,
+        'Scheduled cache refresh failed for hot cache queue entry.',
+        { error }
+      );
+      continue;
+    }
+
+    if (refreshedCache.status === 'stale_on_error') {
+      await recordScheduledRefreshFailure(
+        env,
+        entry,
+        config.inactivityTtlSeconds,
+        'Scheduled cache refresh fell back to stale data after an upstream failure.',
+        {}
+      );
+      continue;
+    }
+
+    if (refreshedCache.status !== 'upstream_refresh') {
       continue;
     }
 

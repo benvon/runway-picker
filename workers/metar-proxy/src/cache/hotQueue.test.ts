@@ -165,6 +165,40 @@ describe('readHotCacheQueueEntry', () => {
 });
 
 describe('touchHotCacheEntry', () => {
+  it('updates only demand state on an existing entry', async () => {
+    const metadataKey = 'v2:hot:metar:KJFK';
+    const store = new Map<string, unknown>([[metadataKey, {
+      schemaVersion: 3,
+      resource: 'metar',
+      normalizedKey: 'KJFK',
+      lastAccessedAt: '2026-03-06T11:00:00.000Z',
+      lastRefreshedAt: '2026-03-06T10:00:00.000Z',
+      consecutiveRefreshFailures: 2
+    }]]);
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key) => store.get(key) ?? null,
+        put: async (key, value) => { store.set(key, JSON.parse(value) as unknown); },
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: async () => {}
+      }
+    });
+
+    await touchHotCacheEntry({
+      env,
+      resource: 'metar',
+      normalizedKey: 'KJFK',
+      cache: fakeProvenance('v1:metar:KJFK', '2026-03-06T12:00:00.000Z'),
+      lastAccessedAt: '2026-03-06T12:05:00.000Z'
+    });
+
+    expect(store.get(metadataKey)).toMatchObject({
+      lastAccessedAt: '2026-03-06T12:05:00.000Z',
+      lastRefreshedAt: '2026-03-06T10:00:00.000Z',
+      consecutiveRefreshFailures: 2
+    });
+  });
+
   it('forwards expirationTtl to the KV put call', async () => {
     const puts: Array<[string, string, { expirationTtl?: number } | undefined]> = [];
     const env = createEnv({

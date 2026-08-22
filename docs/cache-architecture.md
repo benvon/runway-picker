@@ -34,6 +34,7 @@ Successful API responses include a `cache` object with:
 - `freshnessRemainingSeconds` (whole seconds remaining, capped to the resource policy TTL)
 - `servedAt`
 - `ttlSeconds`
+- `maxPayloadAgeSeconds` (hard delivery limit; records at or beyond it are purged and never served)
 - `key`
 - `resource`
 
@@ -45,6 +46,12 @@ Headers:
   zero-remaining responses use `no-store`, so downstream caches cannot extend
   the cache engine's freshness policy.
 
+METAR has a 90-minute hard cache-age limit from its trusted `fetchedAt` timestamp.
+This is independent from its 30-minute fresh TTL and stale-on-error behavior: at
+90 minutes the Worker fails closed, removes payload copies from KV and edge cache
+when possible, and never returns stale weather. Hot-queue metadata is demand state,
+not payload state, and remains available for a later scheduled recovery attempt.
+
 ## Adapter model
 
 Each resource adapter implements:
@@ -55,7 +62,7 @@ Each resource adapter implements:
 - `validate(upstream, input, ctx)`
 - `serialize(data, key, resource)`
 - `deserialize(cached)`
-- `policy` (`ttlSeconds`, `staleWhileRevalidateSeconds`, `staleOnErrorSeconds`, `negativeCacheTtlSeconds`, `policyVersion`)
+- `policy` (`ttlSeconds`, `maxPayloadAgeSeconds`, `staleWhileRevalidateSeconds`, `staleOnErrorSeconds`, `negativeCacheTtlSeconds`, `policyVersion`)
 - `observability(input, key)`
 
 `deserialize(cached)` is a cache trust boundary. It must validate every

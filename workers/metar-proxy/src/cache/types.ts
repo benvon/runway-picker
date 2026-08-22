@@ -9,6 +9,8 @@ export type CacheStatus =
 
 export interface CachePolicy {
   ttlSeconds: number;
+  /** Absolute payload-age limit. Records at or beyond it are never delivered. */
+  maxPayloadAgeSeconds: number;
   staleWhileRevalidateSeconds: number;
   staleOnErrorSeconds: number;
   negativeCacheTtlSeconds: number;
@@ -134,6 +136,7 @@ export interface CacheEngineEnv {
 export interface EdgeCacheLike {
   match(request: Request): Promise<Response | undefined>;
   put(request: Request, response: Response): Promise<void>;
+  delete?(request: Request): Promise<boolean>;
 }
 
 export interface CacheEngineInput<TInput, TUpstream, TData> {

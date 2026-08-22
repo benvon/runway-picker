@@ -49,6 +49,14 @@ class MemoryKv implements KvNamespaceLike {
   getWriteOptions(key: string): { expirationTtl?: number } | undefined {
     return this.writeOptions.get(key);
   }
+
+  async delete(key: string): Promise<void> {
+    this.values.delete(key);
+  }
+
+  has(key: string): boolean {
+    return this.values.has(key);
+  }
 }
 
 class MemoryEdgeCache implements EdgeCacheLike {
@@ -63,8 +71,16 @@ class MemoryEdgeCache implements EdgeCacheLike {
     this.values.set(request.url, response.clone());
   }
 
+  async delete(request: Request): Promise<boolean> {
+    return this.values.delete(request.url);
+  }
+
   seed(cacheKey: string, response: Response): void {
     this.values.set(`https://cache.runway.internal/${encodeURIComponent(cacheKey)}`, response);
+  }
+
+  has(cacheKey: string): boolean {
+    return this.values.has(`https://cache.runway.internal/${encodeURIComponent(cacheKey)}`);
   }
 }
 
@@ -125,6 +141,7 @@ function buildAdapter(overrides?: {
   validate?: CacheResourceAdapter<DemoInput, string, DemoData>['validate'];
   serialize?: CacheResourceAdapter<DemoInput, string, DemoData>['serialize'];
   ttlSeconds?: number;
+  maxPayloadAgeSeconds?: number;
   staleWhileRevalidateSeconds?: number;
   staleOnErrorSeconds?: number;
   negativeCache?: NegativeCachePolicy<DemoInput>;
@@ -182,6 +199,7 @@ function buildAdapter(overrides?: {
     },
     policy: {
       ttlSeconds: overrides?.ttlSeconds ?? 30,
+      maxPayloadAgeSeconds: overrides?.maxPayloadAgeSeconds ?? 150,
       staleWhileRevalidateSeconds: overrides?.staleWhileRevalidateSeconds ?? 10,
       staleOnErrorSeconds: overrides?.staleOnErrorSeconds ?? 120,
       negativeCacheTtlSeconds: 5,
@@ -916,5 +934,61 @@ describe('cache engine', () => {
 
     expect(result.cache.status).toBe('stale_on_error');
     expect(result.payload.value).toBe('older-stale');
+  });
+
+  it('allows stale fallback immediately before the payload age boundary', async () => {
+    const adapter = buildAdapter({ maxPayloadAgeSeconds: 5400, staleOnErrorSeconds: 7200, fetchUpstream: vi.fn().mockRejectedValue(new Error('offline')) });
+    const kv = new MemoryKv();
+    kv.seed('v1:demo:alpha', buildEnvelope('v1:demo:alpha', 'still-valid', '2026-03-03T10:30:01.000Z', 30));
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('stale_on_error');
+    expect(result.payload.value).toBe('still-valid');
+  });
+
+  it('purges KV and edge copies at the payload age boundary and never serves stale fallback', async () => {
+    const adapter = buildAdapter({ maxPayloadAgeSeconds: 5400, fetchUpstream: vi.fn().mockRejectedValue(new Error('offline')) });
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+    const envelope = buildEnvelope('v1:demo:alpha', 'expired', '2026-03-03T10:30:00.000Z', 30);
+    kv.seed('v1:demo:alpha', envelope);
+    edge.seed('v1:demo:alpha', Response.json(envelope));
+
+    await expect(getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now: new Date('2026-03-03T12:00:00.000Z')
+    })).rejects.toThrow('offline');
+
+    expect(kv.has('v1:demo:alpha')).toBe(false);
+    expect(edge.has('v1:demo:alpha')).toBe(false);
+  });
+
+  it('fails closed for a record without a trusted fetched timestamp even when cleanup fails', async () => {
+    const adapter = buildAdapter({ maxPayloadAgeSeconds: 5400, fetchUpstream: vi.fn().mockRejectedValue(new Error('offline')) });
+    const kv = new MemoryKv();
+    const envelope = buildEnvelope('v1:demo:alpha', 'unknown-age', '2026-03-03T11:59:00.000Z', 30);
+    envelope.cacheMeta.fetchedAt = 'not-a-date';
+    envelope.data.fetchedAt = 'not-a-date';
+    kv.seed('v1:demo:alpha', envelope);
+    vi.spyOn(kv, 'delete').mockRejectedValue(new Error('cleanup unavailable'));
+
+    await expect(getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      now: new Date('2026-03-03T12:00:00.000Z')
+    })).rejects.toThrow('offline');
   });
 });

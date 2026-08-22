@@ -1897,6 +1897,37 @@ describe('airport worker', () => {
     expect(queueEntry?.lastRefreshedAt).toBe('2026-03-06T10:00:00.000Z');
   });
 
+  it('counts stale-on-error scheduler results as failures and drops hot metadata on the third', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-06T12:00:00.000Z'));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('provider unavailable')));
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const kv = new MemoryKv();
+    seedHotQueueEntry(kv, {
+      resource: 'metar', normalizedKey: 'KMCI', cacheKey: 'v1:metar:KMCI',
+      lastAccessedAt: '2026-03-06T11:50:00.000Z', lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+    });
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5, resource: 'metar', key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI', metarRaw: 'METAR KMCI 061130Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: { raw: '11010KT', directionType: 'fixed', directionDegTrue: 110, directionVariation: null, speedKt: 10, gustKt: null },
+        source: 'aviationweather', fetchedAt: '2026-03-06T11:00:00.000Z', observedAt: '2026-03-06T11:30:00.000Z'
+      },
+      cacheMeta: { fetchedAt: '2026-03-06T11:00:00.000Z', expiresAt: '2026-03-06T11:30:00.000Z', policyVersion: 'metar-v2', source: 'upstream' }
+    });
+    const now = new Date('2026-03-06T12:00:00.000Z');
+
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
+    expect(kv.read<{ consecutiveRefreshFailures?: number }>('v2:hot:metar:KMCI')).toMatchObject({ consecutiveRefreshFailures: 1 });
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
+
+    expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
+    expect(kv.has('v1:metar:KMCI')).toBe(true);
+    consoleErrorSpy.mockRestore();
+  });
+
   it('drops only hot metadata after the third consecutive scheduled refresh failure', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
