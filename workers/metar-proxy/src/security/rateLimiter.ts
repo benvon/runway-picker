@@ -1,4 +1,4 @@
-import type { DurableObjectNamespaceLike } from '../cache/types';
+import type { DurableObjectNamespaceLike, DurableObjectStub } from '../cache/types';
 
 const BURST_LIMIT = 20;
 const BURST_WINDOW_SECONDS = 10;
@@ -56,10 +56,34 @@ export interface RateLimitHeaders {
   retryAfterSeconds: number | null;
 }
 
-export interface RateLimitDecision {
-  allowed: boolean;
+export type RateLimiterFailureCategory =
+  | 'binding_missing'
+  | 'namespace_failure'
+  | 'request_failed'
+  | 'non_success_response'
+  | 'invalid_json'
+  | 'invalid_decision';
+
+export interface RateLimitAllowedDecision {
+  status: 'allowed';
   headers: RateLimitHeaders;
 }
+
+export interface RateLimitDeniedDecision {
+  status: 'denied';
+  headers: RateLimitHeaders;
+}
+
+export interface RateLimitUnavailableDecision {
+  status: 'unavailable';
+  failureCategory: RateLimiterFailureCategory;
+}
+
+export type RateLimitDecision = RateLimitAllowedDecision | RateLimitDeniedDecision | RateLimitUnavailableDecision;
+
+export type InvalidIcaoNoteResult =
+  | { delivered: true }
+  | { delivered: false; failureCategory: RateLimiterFailureCategory };
 
 const STATE_KEY = 'state';
 
@@ -106,15 +130,6 @@ function toHeadersFromDecision(decision: RateLimitDecisionResponse): RateLimitHe
     remaining: decision.remaining,
     resetSeconds: decision.resetSeconds,
     retryAfterSeconds: decision.retryAfterSeconds
-  };
-}
-
-function createAllowedHeaders(): RateLimitHeaders {
-  return {
-    limit: SUSTAINED_LIMIT,
-    remaining: SUSTAINED_LIMIT,
-    resetSeconds: SUSTAINED_WINDOW_SECONDS,
-    retryAfterSeconds: null
   };
 }
 
@@ -262,75 +277,124 @@ export class ApiRateLimiter {
   }
 }
 
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isRateLimitDecisionResponse(value: unknown): value is RateLimitDecisionResponse {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const response = value as Partial<RateLimitDecisionResponse>;
+  const remaining = response.remaining;
+  if (
+    typeof response.allowed !== 'boolean' ||
+    !isPositiveSafeInteger(response.limit) ||
+    typeof remaining !== 'number' ||
+    !Number.isSafeInteger(remaining) ||
+    remaining < 0 ||
+    remaining > response.limit ||
+    !isPositiveSafeInteger(response.resetSeconds)
+  ) {
+    return false;
+  }
+
+  if (response.allowed) {
+    return response.retryAfterSeconds === null;
+  }
+
+  return isPositiveSafeInteger(response.retryAfterSeconds);
+}
+
+function unavailable(failureCategory: RateLimiterFailureCategory): RateLimitUnavailableDecision {
+  return { status: 'unavailable', failureCategory };
+}
+
 export async function enforceRateLimit(
   namespace: DurableObjectNamespaceLike | undefined,
   clientId: string,
   endpoint: string
 ): Promise<RateLimitDecision> {
   if (!namespace) {
-    return {
-      allowed: true,
-      headers: createAllowedHeaders()
-    };
+    return unavailable('binding_missing');
   }
 
+  let stub: DurableObjectStub;
   try {
     const id = namespace.idFromName(`rl:${clientId}:${endpoint}`);
-    const stub = namespace.get(id);
-    const response = await stub.fetch('https://rate-limiter.internal/check', {
+    stub = namespace.get(id);
+    if (!stub || typeof stub.fetch !== 'function') {
+      return unavailable('namespace_failure');
+    }
+  } catch {
+    return unavailable('namespace_failure');
+  }
+
+  let response: Response;
+  try {
+    response = await stub.fetch('https://rate-limiter.internal/check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nowMs: Date.now() } satisfies CheckRequestBody)
     });
-
-    if (!response.ok) {
-      return {
-        allowed: true,
-        headers: createAllowedHeaders()
-      };
-    }
-
-    const body = (await response.json()) as Partial<RateLimitDecisionResponse>;
-    const decision: RateLimitDecisionResponse = {
-      allowed: Boolean(body.allowed),
-      limit: typeof body.limit === 'number' && body.limit > 0 ? body.limit : SUSTAINED_LIMIT,
-      remaining: typeof body.remaining === 'number' && body.remaining >= 0 ? body.remaining : 0,
-      resetSeconds: typeof body.resetSeconds === 'number' && body.resetSeconds > 0 ? body.resetSeconds : 1,
-      retryAfterSeconds:
-        typeof body.retryAfterSeconds === 'number' && body.retryAfterSeconds > 0 ? body.retryAfterSeconds : null
-    };
-
-    return {
-      allowed: decision.allowed,
-      headers: toHeadersFromDecision(decision)
-    };
   } catch {
-    return {
-      allowed: true,
-      headers: createAllowedHeaders()
-    };
+    return unavailable('request_failed');
   }
+
+  if (!response.ok) {
+    return unavailable('non_success_response');
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return unavailable('invalid_json');
+  }
+
+  if (!isRateLimitDecisionResponse(body)) {
+    return unavailable('invalid_decision');
+  }
+
+  return body.allowed
+    ? { status: 'allowed', headers: toHeadersFromDecision(body) }
+    : { status: 'denied', headers: toHeadersFromDecision(body) };
 }
 
 export async function noteInvalidIcao(
   namespace: DurableObjectNamespaceLike | undefined,
   clientId: string,
   endpoint: string
-): Promise<void> {
+): Promise<InvalidIcaoNoteResult> {
   if (!namespace) {
-    return;
+    return { delivered: false, failureCategory: 'binding_missing' };
+  }
+
+  let stub: DurableObjectStub;
+  try {
+    const id = namespace.idFromName(`rl:${clientId}:${endpoint}`);
+    stub = namespace.get(id);
+    if (!stub || typeof stub.fetch !== 'function') {
+      return { delivered: false, failureCategory: 'namespace_failure' };
+    }
+  } catch {
+    return { delivered: false, failureCategory: 'namespace_failure' };
   }
 
   try {
-    const id = namespace.idFromName(`rl:${clientId}:${endpoint}`);
-    const stub = namespace.get(id);
-
-    await stub.fetch('https://rate-limiter.internal/invalid-icao', {
+    const response = await stub.fetch('https://rate-limiter.internal/invalid-icao', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nowMs: Date.now() } satisfies PenalizeRequestBody)
     });
+
+    if (!response.ok) {
+      return { delivered: false, failureCategory: 'non_success_response' };
+    }
   } catch {
-    // Best-effort abuse signal.
+    return { delivered: false, failureCategory: 'request_failed' };
   }
+
+  return { delivered: true };
 }
