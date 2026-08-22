@@ -12,12 +12,12 @@ This runbook covers day-2 operations for the scheduled hot-cache refresher in `w
 - Each resource is scanned independently (`v2:hot:metar:` and `v2:hot:airport:`). Its opaque continuation is stored separately at `v2:control:hot-refresh-cursor:{resource}`, outside the hot-entry namespace. These two small control records are scheduler state only; they never contain payload keys or airport/METAR data.
 - `/api/airport-location` is deliberately not hot-refreshed. It is long-lived reference data and has its own normal cache policy, so it cannot be accidentally refreshed as a runway profile.
 - Scheduled runs:
-  1. Scan bounded pages for each resource. The global scan cap is ten times `CACHE_REFRESH_MAX_ITEMS_PER_RUN`, split between resources; unused budget from a short page is available to the other resource without exceeding that cap.
+  1. Scan bounded pages for each resource. The global scan cap is ten times the effective refresh capacity, split between resources; unused budget from a short page is available to the other resource without exceeding that cap.
   2. Load and validate every listed metadata record before any entry is processed.
-  3. Evict entries inactive longer than inactivity TTL (also purges cache payload key), then refresh due entries oldest-first within each resource and round-robin, up to `CACHE_REFRESH_MAX_ITEMS_PER_RUN`.
+  3. Evict entries inactive longer than inactivity TTL (also purges cache payload key), then refresh due entries oldest-first within each resource and round-robin, up to the effective refresh capacity. When both resource types have due work, the first two refreshes are one METAR and one airport entry. A missing resource or lack of due work never creates work.
   4. Persist each next cursor or clear it after the resource scan wraps. A metadata, eviction, or checkpoint failure leaves the prior cursor in place for retry; an individual refresh failure is recorded and does not pin the scan.
-  5. Leave failed refreshes queued for later retries.
-- If a saved cursor is malformed or rejected by KV, the worker clears only that resource's cursor record, retries once from the beginning, and writes one `Scheduled cache refresh cursor checkpoint reset` warning. It does not delete hot entries or cache payloads during cursor recovery.
+  5. A scheduled refresh failure increments that entry's consecutive failure count. A successful scheduled refresh resets it. On the third consecutive scheduled failure, the worker removes only the hot-entry metadata; the payload cache remains subject to its normal TTL and a later client request can re-enqueue the ICAO.
+- If a saved cursor is malformed (including invalid JSON) or KV specifically rejects it as invalid, the worker clears only that resource's cursor record, retries once from the beginning, and writes one `Scheduled cache refresh cursor checkpoint reset` warning. Transient KV/list communication failures retain a valid cursor for retry. Cursor recovery never deletes hot entries or cache payloads.
 
 ## Runtime controls
 
@@ -27,7 +27,7 @@ Configured in [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wran
 - `CACHE_REFRESH_METAR_INTERVAL_SECONDS` (default `1800`)
 - `CACHE_REFRESH_AIRPORT_INTERVAL_SECONDS` (default `86400`)
 - `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` (default `432000`)
-- `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (default `25`)
+- `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (default `25`; configured values below `2` are normalized to an effective capacity of `2`)
 
 Emergency stop:
 
@@ -105,7 +105,7 @@ npx wrangler kv key delete "v2:hot:metar:KJFK" \
 
 ### High upstream traffic / higher cost than expected
 
-- Reduce `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (first lever).
+- Reduce `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (first lever; `1` is still an effective capacity of `2`).
 - Increase `CACHE_REFRESH_METAR_INTERVAL_SECONDS` and/or `CACHE_REFRESH_AIRPORT_INTERVAL_SECONDS`.
 - Temporarily set `CACHE_REFRESH_ENABLED=false` during provider incidents.
 
@@ -129,7 +129,7 @@ Approximate monthly refresh attempts for `N` continuously active ICAOs:
 
 Primary cost levers:
 
-1. `CACHE_REFRESH_MAX_ITEMS_PER_RUN`
+1. `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (minimum effective value: `2`)
 2. METAR/airport refresh intervals
 3. Inactivity TTL
 

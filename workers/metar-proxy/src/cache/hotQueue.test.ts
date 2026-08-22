@@ -6,6 +6,7 @@ import {
   parseCacheRefresherConfig,
   readHotCacheQueueCursor,
   readHotCacheQueueEntry,
+  recordHotCacheRefreshFailure,
   recoverRejectedHotCacheQueueCursor,
   refreshIntervalSecondsForResource,
   touchHotCacheEntry,
@@ -73,6 +74,11 @@ describe('hot queue refresher config', () => {
     expect(config.maxItemsPerRun).toBe(50);
     expect(refreshIntervalSecondsForResource('metar', config)).toBe(900);
     expect(refreshIntervalSecondsForResource('airport', config)).toBe(43200);
+  });
+
+  it('normalizes a configured refresh cap below two to the effective floor', () => {
+    const config = parseCacheRefresherConfig(createEnv({ CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }));
+    expect(config.maxItemsPerRun).toBe(2);
   });
 });
 
@@ -341,6 +347,58 @@ describe('updateHotCacheEntryAfterRefresh', () => {
   });
 });
 
+describe('recordHotCacheRefreshFailure', () => {
+  it('migrates V2 metadata, resets failures after success, and drops only the queue entry on the third failure', async () => {
+    const metadataKey = 'v2:hot:metar:KJFK';
+    const payloadKey = 'v1:metar:KJFK';
+    const store = new Map<string, unknown>([
+      [
+        metadataKey,
+        {
+          schemaVersion: 2,
+          resource: 'metar',
+          normalizedKey: 'KJFK',
+          lastAccessedAt: '2026-03-06T11:00:00.000Z',
+          lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+        }
+      ],
+      [payloadKey, { cached: true }]
+    ]);
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key) => store.get(key) ?? null,
+        put: async (key, value) => { store.set(key, JSON.parse(value) as unknown); },
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: async (key) => { store.delete(key); }
+      }
+    });
+    const entry = buildValidEntry('metar', 'KJFK', metadataKey);
+
+    await expect(recordHotCacheRefreshFailure(env, entry, 432000)).resolves.toEqual({
+      consecutiveRefreshFailures: 1,
+      dropped: false
+    });
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 3, consecutiveRefreshFailures: 1 });
+
+    await updateHotCacheEntryAfterRefresh(
+      env,
+      entry,
+      fakeProvenance(payloadKey, '2026-03-06T12:00:00.000Z'),
+      432000
+    );
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 3, consecutiveRefreshFailures: 0 });
+
+    await recordHotCacheRefreshFailure(env, entry, 432000);
+    await recordHotCacheRefreshFailure(env, entry, 432000);
+    await expect(recordHotCacheRefreshFailure(env, entry, 432000)).resolves.toEqual({
+      consecutiveRefreshFailures: 3,
+      dropped: true
+    });
+    expect(store.has(metadataKey)).toBe(false);
+    expect(store.get(payloadKey)).toEqual({ cached: true });
+  });
+});
+
 describe('hot queue scan pages', () => {
   it('returns an empty completed page when KV does not support list', async () => {
     const env = createEnv({
@@ -555,6 +613,48 @@ describe('hot queue scan pages', () => {
     expect(listCursors).toEqual([undefined]);
     expect(store.has('v2:control:hot-refresh-cursor:airport')).toBe(false);
     expect(warning).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith(
+      'Scheduled cache refresh cursor checkpoint reset.',
+      { resource: 'airport', reason: 'malformed' }
+    );
+    warning.mockRestore();
+  });
+
+  it('reads a valid cursor from raw JSON without changing the checkpoint', async () => {
+    const store = new Map<string, unknown>([
+      ['v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'opaque-cursor' }]
+    ]);
+    const deleteSpy = vi.fn();
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key, type) => {
+          const value = store.get(key) ?? null;
+          return type === 'text' && value !== null ? JSON.stringify(value) : value;
+        },
+        put: async () => {},
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: deleteSpy
+      }
+    });
+
+    await expect(readHotCacheQueueCursor(env, 'metar')).resolves.toBe('opaque-cursor');
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it('clears syntactically invalid raw JSON checkpoints and recovers from the prefix', async () => {
+    const deletedKeys: string[] = [];
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (_key, type) => (type === 'text' ? '{not-json' : null),
+        put: async () => {},
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: async (key) => { deletedKeys.push(key); }
+      }
+    });
+
+    await expect(readHotCacheQueueCursor(env, 'airport')).resolves.toBeUndefined();
+    expect(deletedKeys).toEqual(['v2:control:hot-refresh-cursor:airport']);
     expect(warning).toHaveBeenCalledWith(
       'Scheduled cache refresh cursor checkpoint reset.',
       { resource: 'airport', reason: 'malformed' }

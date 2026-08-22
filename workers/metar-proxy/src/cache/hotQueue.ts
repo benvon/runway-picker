@@ -9,6 +9,8 @@ export interface HotCacheEntry {
   normalizedKey: string;
   lastAccessedAt: string;
   lastRefreshedAt: string;
+  /** Consecutive scheduled refresh failures; absent V2 metadata is treated as zero. */
+  consecutiveRefreshFailures?: number;
 }
 
 export interface HotCacheQueueEntry extends HotCacheEntry {
@@ -32,11 +34,13 @@ export interface CacheRefresherConfig {
   maxItemsPerRun: number;
 }
 
-const HOT_QUEUE_SCHEMA_VERSION = 2;
+const HOT_QUEUE_SCHEMA_VERSION = 3;
+const LEGACY_HOT_QUEUE_SCHEMA_VERSION = 2;
 const HOT_QUEUE_KEY_PREFIX = 'v2:hot:';
 const HOT_QUEUE_CURSOR_SCHEMA_VERSION = 1;
 const HOT_QUEUE_CURSOR_KEY_PREFIX = 'v2:control:hot-refresh-cursor:';
 const KV_LIST_PAGE_LIMIT = 1000;
+const MIN_REFRESH_ITEMS_PER_RUN = 2;
 
 const DEFAULT_CONFIG: CacheRefresherConfig = {
   enabled: true,
@@ -93,37 +97,50 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
+function hasValidHotCacheIdentity(entry: Partial<HotCacheEntry>, metadataKey: string): boolean {
+  if (entry.schemaVersion !== HOT_QUEUE_SCHEMA_VERSION && entry.schemaVersion !== LEGACY_HOT_QUEUE_SCHEMA_VERSION) {
+    return false;
+  }
+  if (!isHotResource(entry.resource) || typeof entry.normalizedKey !== 'string' || entry.normalizedKey.length === 0) {
+    return false;
+  }
+  if (!parseDate(entry.lastAccessedAt) || !parseDate(entry.lastRefreshedAt)) {
+    return false;
+  }
+  return metadataKey === hotQueueKey(entry.resource, entry.normalizedKey);
+}
+
+function readConsecutiveRefreshFailures(entry: Partial<HotCacheEntry>): number | null {
+  const failures = entry.consecutiveRefreshFailures ?? 0;
+  return Number.isInteger(failures) && failures >= 0 ? failures : null;
+}
+
 function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQueueEntry | null {
   if (!candidate || typeof candidate !== 'object') {
     return null;
   }
 
   const entry = candidate as Partial<HotCacheEntry>;
-  if (
-    entry.schemaVersion !== HOT_QUEUE_SCHEMA_VERSION ||
-    !isHotResource(entry.resource) ||
-    typeof entry.normalizedKey !== 'string' ||
-    entry.normalizedKey.length === 0 ||
-    !parseDate(entry.lastAccessedAt) ||
-    !parseDate(entry.lastRefreshedAt) ||
-    metadataKey !== hotQueueKey(entry.resource, entry.normalizedKey)
-  ) {
+  if (!hasValidHotCacheIdentity(entry, metadataKey)) {
     return null;
   }
+  const validatedEntry = entry as HotCacheEntry;
+  const lastAccessedAt = validatedEntry.lastAccessedAt;
+  const lastRefreshedAt = validatedEntry.lastRefreshedAt;
 
-  const lastAccessedAt = entry.lastAccessedAt;
-  const lastRefreshedAt = entry.lastRefreshedAt;
-  if (typeof lastAccessedAt !== 'string' || typeof lastRefreshedAt !== 'string') {
+  const consecutiveRefreshFailures = readConsecutiveRefreshFailures(validatedEntry);
+  if (consecutiveRefreshFailures === null) {
     return null;
   }
 
   return {
-    schemaVersion: entry.schemaVersion,
-    resource: entry.resource,
-    normalizedKey: entry.normalizedKey,
-    cacheKey: buildCacheKey(entry.resource, entry.normalizedKey),
+    schemaVersion: validatedEntry.schemaVersion,
+    resource: validatedEntry.resource,
+    normalizedKey: validatedEntry.normalizedKey,
+    cacheKey: buildCacheKey(validatedEntry.resource, validatedEntry.normalizedKey),
     lastAccessedAt,
     lastRefreshedAt,
+    consecutiveRefreshFailures,
     metadataKey
   };
 }
@@ -179,6 +196,16 @@ function logCursorRecovery(resource: HotCacheResource, reason: 'malformed' | 're
   console.warn('Scheduled cache refresh cursor checkpoint reset.', { resource, reason });
 }
 
+export function isInvalidHotCacheQueueCursorError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /\b(?:invalid|malformed|expired)\s+cursor\b|\bcursor\s+(?:is\s+)?(?:invalid|malformed|expired)\b/i.test(
+    error.message
+  );
+}
+
 export function parseCacheRefresherConfig(env: CacheEngineEnv): CacheRefresherConfig {
   return {
     enabled: readBoolean(env.CACHE_REFRESH_ENABLED, DEFAULT_CONFIG.enabled),
@@ -194,7 +221,10 @@ export function parseCacheRefresherConfig(env: CacheEngineEnv): CacheRefresherCo
       env.CACHE_REFRESH_INACTIVITY_TTL_SECONDS,
       DEFAULT_CONFIG.inactivityTtlSeconds
     ),
-    maxItemsPerRun: readPositiveNumber(env.CACHE_REFRESH_MAX_ITEMS_PER_RUN, DEFAULT_CONFIG.maxItemsPerRun)
+    maxItemsPerRun: Math.max(
+      MIN_REFRESH_ITEMS_PER_RUN,
+      readPositiveNumber(env.CACHE_REFRESH_MAX_ITEMS_PER_RUN, DEFAULT_CONFIG.maxItemsPerRun)
+    )
   };
 }
 
@@ -213,11 +243,17 @@ export async function readHotCacheQueueCursor(
   env: CacheEngineEnv,
   resource: HotCacheResource
 ): Promise<string | undefined> {
-  const checkpointRaw = await env.METAR_CACHE.get(hotQueueCursorKey(resource), 'json');
-  if (checkpointRaw === null) {
+  const checkpointText = await env.METAR_CACHE.get(hotQueueCursorKey(resource), 'text');
+  if (checkpointText === null) {
     return undefined;
   }
 
+  let checkpointRaw: unknown;
+  try {
+    checkpointRaw = typeof checkpointText === 'string' ? JSON.parse(checkpointText) : null;
+  } catch {
+    checkpointRaw = null;
+  }
   const cursor = parseCursorCheckpoint(checkpointRaw);
   if (cursor) {
     return cursor;
@@ -315,7 +351,8 @@ export async function touchHotCacheEntry(params: {
     resource: params.resource,
     normalizedKey: params.normalizedKey,
     lastAccessedAt: params.lastAccessedAt,
-    lastRefreshedAt: params.cache.fetchedAt
+    lastRefreshedAt: params.cache.fetchedAt,
+    consecutiveRefreshFailures: 0
   };
 
   await params.env.METAR_CACHE.put(
@@ -351,7 +388,8 @@ export async function updateHotCacheEntryAfterRefresh(
     resource: entry.resource,
     normalizedKey: entry.normalizedKey,
     lastAccessedAt,
-    lastRefreshedAt: cache.fetchedAt
+    lastRefreshedAt: cache.fetchedAt,
+    consecutiveRefreshFailures: 0
   };
 
   await env.METAR_CACHE.put(
@@ -369,6 +407,40 @@ export async function deleteHotCacheEntryAndPayload(
     await env.METAR_CACHE.delete(entry.metadataKey);
     await env.METAR_CACHE.delete(entry.cacheKey);
   }
+}
+
+export async function recordHotCacheRefreshFailure(
+  env: CacheEngineEnv,
+  entry: HotCacheQueueEntry,
+  expirationTtl?: number
+): Promise<{ consecutiveRefreshFailures: number; dropped: boolean }> {
+  const existing = await readHotCacheQueueEntry(env, entry.metadataKey);
+  if (!existing) {
+    return { consecutiveRefreshFailures: 0, dropped: false };
+  }
+
+  const consecutiveRefreshFailures = (existing.consecutiveRefreshFailures ?? 0) + 1;
+  if (consecutiveRefreshFailures >= 3) {
+    if (env.METAR_CACHE.delete) {
+      await env.METAR_CACHE.delete(existing.metadataKey);
+    }
+    return { consecutiveRefreshFailures, dropped: true };
+  }
+
+  const next: HotCacheEntry = {
+    schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
+    resource: existing.resource,
+    normalizedKey: existing.normalizedKey,
+    lastAccessedAt: existing.lastAccessedAt,
+    lastRefreshedAt: existing.lastRefreshedAt,
+    consecutiveRefreshFailures
+  };
+  await env.METAR_CACHE.put(
+    existing.metadataKey,
+    JSON.stringify(next),
+    expirationTtl ? { expirationTtl } : undefined
+  );
+  return { consecutiveRefreshFailures, dropped: false };
 }
 
 export function readIsoTimestamp(value: string): number {

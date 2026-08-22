@@ -110,7 +110,7 @@ export interface KvListPage {
 }
 
 export interface KvNamespaceLike {
-  get(key: string, type: 'json'): Promise<unknown>;
+  get(key: string, type: 'json' | 'text'): Promise<unknown>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
   list?(options?: { prefix?: string; cursor?: string; limit?: number }): Promise<KvListPage>;
   delete?(key: string): Promise<void>;

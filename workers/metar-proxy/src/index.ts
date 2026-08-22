@@ -3,9 +3,11 @@ import { provenanceAtResponseTime } from './cache/freshness';
 import {
   commitHotCacheQueueCursor,
   deleteHotCacheEntryAndPayload,
+  isInvalidHotCacheQueueCursorError,
   listHotCacheQueuePage,
   loadHotCacheQueueEntries,
   parseCacheRefresherConfig,
+  recordHotCacheRefreshFailure,
   readHotCacheQueueCursor,
   readHotCacheQueueEntry,
   readIsoTimestamp,
@@ -412,7 +414,7 @@ async function startResourceScan(
   try {
     page = await listHotCacheQueuePage(env, resource, savedCursor, scanBudget);
   } catch (error) {
-    if (!savedCursor) {
+    if (!savedCursor || !isInvalidHotCacheQueueCursorError(error)) {
       throw error;
     }
 
@@ -538,11 +540,32 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
 
   const toRefresh = selectRoundRobinDueEntries(dueEntries, config.maxItemsPerRun);
   for (const entry of toRefresh) {
+    let refreshedCache: CacheProvenance;
     try {
-      const refreshedCache = await refreshQueueEntry(entry, env);
+      refreshedCache = await refreshQueueEntry(entry, env);
+    } catch (error) {
+      try {
+        const failure = await recordHotCacheRefreshFailure(env, entry, config.inactivityTtlSeconds);
+        console.error('Scheduled cache refresh failed for hot cache queue entry.', {
+          entry,
+          error,
+          consecutiveRefreshFailures: failure.consecutiveRefreshFailures,
+          droppedFromHotQueue: failure.dropped
+        });
+      } catch (failureRecordError) {
+        console.error('Scheduled cache refresh failed and its failure count could not be recorded.', {
+          entry,
+          error,
+          failureRecordError
+        });
+      }
+      continue;
+    }
+
+    try {
       await updateHotCacheEntryAfterRefresh(env, entry, refreshedCache, config.inactivityTtlSeconds);
     } catch (error) {
-      console.error('Scheduled cache refresh failed for hot cache queue entry.', {
+      console.error('Scheduled cache refresh succeeded but hot cache metadata could not be updated.', {
         entry,
         error
       });
