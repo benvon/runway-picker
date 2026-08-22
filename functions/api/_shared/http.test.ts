@@ -60,6 +60,22 @@ describe('shared HTTP helpers', () => {
     });
     const response = buildProxyResponse(upstream, 'generated-req');
     expect(response.headers.get('X-Request-Id')).toBe('generated-req');
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+
+  it('does not extend an upstream no-store cache policy', () => {
+    const upstream = new Response('stale response', {
+      status: 200,
+      headers: {
+        'Cache-Control': 'no-store',
+        'X-Runway-Cache-Status': 'stale_on_error'
+      }
+    });
+
+    const response = buildProxyResponse(upstream, 'generated-req');
+
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(response.headers.get('X-Runway-Cache-Status')).toBe('stale_on_error');
   });
 
   it('extracts client IP from CF-Connecting-IP or X-Forwarded-For', () => {

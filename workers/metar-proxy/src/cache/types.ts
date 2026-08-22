@@ -76,6 +76,13 @@ export interface CacheProvenance {
   source: CacheDataSource;
   ageSeconds: number;
   fetchedAt: string;
+  /** Exact record expiry selected by the cache engine. */
+  expiresAt: string;
+  /**
+   * Whole seconds for which this response may still be treated as fresh.
+   * This is bounded to the adapter policy TTL and never negative.
+   */
+  freshnessRemainingSeconds: number;
   servedAt: string;
   ttlSeconds: number;
   key: string;

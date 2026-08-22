@@ -212,6 +212,12 @@ function isWithinStaleWindow(record: CachedRecord<unknown>, now: Date, staleWind
   return now.getTime() <= record.expiresAt.getTime() + staleWindowSeconds * 1000;
 }
 
+function freshnessRemainingSeconds(expiresAt: Date, now: Date, ttlSeconds: number): number {
+  const remainingMilliseconds = expiresAt.getTime() - now.getTime();
+  const wholeRemainingSeconds = Math.floor(remainingMilliseconds / 1000);
+  return Math.min(Math.max(0, wholeRemainingSeconds), Math.max(0, Math.floor(ttlSeconds)));
+}
+
 function buildProvenance(
   status: CacheProvenance['status'],
   source: CacheDataSource,
@@ -228,6 +234,8 @@ function buildProvenance(
     source,
     ageSeconds,
     fetchedAt: record.fetchedAt.toISOString(),
+    expiresAt: record.expiresAt.toISOString(),
+    freshnessRemainingSeconds: freshnessRemainingSeconds(record.expiresAt, now, ttlSeconds),
     servedAt: now.toISOString(),
     ttlSeconds,
     key: cacheKey,
@@ -239,16 +247,23 @@ async function writeEdgeEnvelope<TData>(
   edgeCache: EdgeCacheLike | undefined,
   cacheKey: string,
   envelope: CacheEnvelope<TData> | NegativeCacheEnvelope,
-  ttlSeconds: number
+  ttlSeconds: number,
+  now = new Date()
 ): Promise<void> {
   if (!edgeCache) {
     return;
   }
 
   const request = buildEdgeRequest(cacheKey);
+  const expiresAt = parseIsoDate(envelope.cacheMeta.expiresAt);
+  const remainingSeconds = expiresAt ? freshnessRemainingSeconds(expiresAt, now, ttlSeconds) : 0;
+  if (remainingSeconds === 0) {
+    return;
+  }
+
   const response = Response.json(envelope, {
     headers: {
-      'Cache-Control': `public, max-age=60, s-maxage=${ttlSeconds}`
+      'Cache-Control': `public, max-age=${Math.min(60, remainingSeconds)}, s-maxage=${remainingSeconds}`
     }
   });
 
@@ -524,14 +539,20 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
   const kvRecords = await readKvCacheRecords(adapter, cacheKey, input.input, now, readKv);
   const kvRecord = kvRecords.data;
   if (kvRecord && isFresh(kvRecord, now)) {
-    await writeEdgeEnvelope(edgeCache, cacheKey, kvRecord.envelope, adapter.policy.ttlSeconds);
+    await writeEdgeEnvelope(edgeCache, cacheKey, kvRecord.envelope, adapter.policy.ttlSeconds, now);
     return cacheResultFromRecord(adapter, cacheKey, kvRecord, now, 'kv_hit', 'kv');
   }
 
   await throwIfFreshNegative(kvRecords.negative, now, async () => {
     if (kvRecords.negative) {
       await Promise.allSettled([
-        writeEdgeEnvelope(edgeCache, cacheKey, kvRecords.negative.envelope, adapter.policy.negativeCacheTtlSeconds)
+        writeEdgeEnvelope(
+          edgeCache,
+          cacheKey,
+          kvRecords.negative.envelope,
+          adapter.policy.negativeCacheTtlSeconds,
+          now
+        )
       ]);
     }
   });

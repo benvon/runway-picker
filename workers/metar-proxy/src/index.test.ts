@@ -277,6 +277,7 @@ describe('cache refresh helpers', () => {
 describe('metar worker', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('normalizes ICAO values', () => {
@@ -383,6 +384,96 @@ describe('metar worker', () => {
     expect(response.status).toBe(200);
     expect(fetchUpstream).toHaveBeenCalledOnce();
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+  });
+
+  it('derives public METAR cache lifetime from the cached record remaining freshness', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
+    const kv = new MemoryKv();
+    const fetchedAt = new Date('2026-03-03T11:59:30.000Z');
+    const expiresAt = new Date('2026-03-03T12:00:05.000Z');
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI',
+        metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
+    await expect(response.json()).resolves.toMatchObject({
+      cache: {
+        expiresAt: expiresAt.toISOString(),
+        freshnessRemainingSeconds: 5
+      }
+    });
+  });
+
+  it('does not let downstream caches retain stale METAR data', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('provider unavailable')));
+    const kv = new MemoryKv();
+    const fetchedAt = new Date('2026-03-03T11:29:00.000Z');
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI',
+        metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: '2026-03-03T11:59:00.000Z',
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    await expect(response.json()).resolves.toMatchObject({
+      cache: { status: 'stale_on_error', freshnessRemainingSeconds: 0 }
+    });
   });
 
   it('returns variable wind with non-zero speed using structured upstream fields', async () => {
@@ -822,6 +913,7 @@ describe('metar worker', () => {
 describe('airport worker', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('normalizes airport ICAO values', () => {
@@ -829,6 +921,8 @@ describe('airport worker', () => {
   });
 
   it('returns airport payload with runway ends and cache metadata', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
 
     const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), {
@@ -838,6 +932,7 @@ describe('airport worker', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('upstream_refresh');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=86400');
 
     const payload = (await response.json()) as {
       requestedIcao: string;
@@ -984,6 +1079,8 @@ describe('airport worker', () => {
   });
 
   it('uses an independent long-lived location cache without enrolling it in the hot queue', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json({
       ident: 'KLOC',
       latitude_deg: '41.8781',
@@ -998,6 +1095,7 @@ describe('airport worker', () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, s-maxage=2592000');
     await expect(response.json()).resolves.toMatchObject({
       icao: 'KLOC',
       coordinates: { latitudeDeg: 41.8781, longitudeDeg: -87.6298 },
