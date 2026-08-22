@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { airportResourceAdapter, type AirportCacheEnvelope } from './airport/adapter';
 import { airportLocationResourceAdapter } from './airport/locationAdapter';
-import { extractObservedAt, metarResourceAdapter } from './metar/adapter';
+import { extractMetarStationIcao, extractObservedAt, metarResourceAdapter } from './metar/adapter';
 
 describe('resource adapters', () => {
   afterEach(() => {
@@ -32,10 +32,10 @@ describe('resource adapters', () => {
       'metar'
     );
 
-    expect(envelope.schemaVersion).toBe(4);
+    expect(envelope.schemaVersion).toBe(5);
     expect(envelope.resource).toBe('metar');
     expect(envelope.key).toBe('v1:metar:KJFK');
-    expect(envelope.cacheMeta.policyVersion).toBe('metar-v1');
+    expect(envelope.cacheMeta.policyVersion).toBe('metar-v2');
     expect(metarResourceAdapter.deserialize(envelope)?.icao).toBe('KJFK');
     expect(metarResourceAdapter.deserialize(envelope)?.wind.directionType).toBe('fixed');
     expect(
@@ -58,10 +58,35 @@ describe('resource adapters', () => {
     expect(extractObservedAt('METAR KJFK 011260Z 18010KT 10SM CLR', now)).toBeNull();
   });
 
+  it('extracts station identity only from the anchored METAR report prefix', () => {
+    expect(extractMetarStationIcao('METAR KJFK 021953Z 11010KT 10SM CLR')).toBe('KJFK');
+    expect(extractMetarStationIcao('SPECI KJFK 021953Z 11010KT 10SM CLR')).toBe('KJFK');
+    expect(extractMetarStationIcao('KJFK 021953Z 11010KT 10SM CLR')).toBe('KJFK');
+    expect(extractMetarStationIcao('RMK KJFK 021953Z 11010KT 10SM CLR')).toBeNull();
+  });
+
+  it('accepts matching METAR, SPECI, and no-keyword raw station forms', async () => {
+    const context = {
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: { get: async () => null, put: async () => {} } }
+    };
+
+    for (const rawOb of [
+      'METAR KJFK 021953Z 11010KT 10SM CLR',
+      'SPECI KJFK 021953Z 11010KT 10SM CLR',
+      'KJFK 021953Z 11010KT 10SM CLR'
+    ]) {
+      await expect(
+        metarResourceAdapter.validate([{ icaoId: 'KJFK', rawOb, wdir: 110, wspd: 10 }], { icao: 'KJFK' }, context)
+      ).resolves.toMatchObject({ icao: 'KJFK', metarRaw: rawOb });
+    }
+  });
+
   it('parses provider JSON wind objects during validation', async () => {
     const validated = await metarResourceAdapter.validate(
       [
         {
+          icaoId: 'KARR',
           rawOb: 'METAR KARR 031652Z VRB03KT 4SM HZ OVC013 05/00 A3011 RMK AO2',
           wdir: { repr: 'VRB' },
           wspd: { value: 3 },
@@ -81,6 +106,7 @@ describe('resource adapters', () => {
     const validated = await metarResourceAdapter.validate(
       [
         {
+          icaoId: 'KARR',
           rawOb: 'METAR KARR 031652Z 22015G25KT 180V260 4SM HZ OVC013 05/00 A3011 RMK AO2',
           wdir: { value: 220 },
           wspd: { value: 15 },
@@ -98,6 +124,7 @@ describe('resource adapters', () => {
     const validated = await metarResourceAdapter.validate(
       [
         {
+          icaoId: 'KARR',
           rawOb: 'METAR KARR 031652Z 22015G25KT 4SM TEMPO 180V260 2SM HZ',
           wdir: { value: 220 },
           wspd: { value: 15 },
@@ -115,6 +142,7 @@ describe('resource adapters', () => {
     const validated = await metarResourceAdapter.validate(
       [
         {
+          icaoId: 'KJVL',
           rawOb: 'METAR KJVL 031845Z 0000KT 7SM OVC013 04/M01 A3012'
         }
       ],
@@ -126,6 +154,59 @@ describe('resource adapters', () => {
     expect(validated.wind.speedKt).toBe(0);
     expect(validated.wind.gustKt).toBeNull();
     expect(validated.wind.raw).toBe('00000KT');
+  });
+
+  it('requires structured and raw METAR station identities to match the request', async () => {
+    const context = {
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: { get: async () => null, put: async () => {} } }
+    };
+
+    for (const report of [
+      { rawOb: 'METAR KJFK 021953Z 11010KT 10SM CLR', icaoId: 'KORD' },
+      { rawOb: 'METAR KORD 021953Z 11010KT 10SM CLR', icaoId: 'KJFK' },
+      { rawOb: 'METAR KJFK 021953Z 11010KT 10SM CLR', icaoId: 'INVALID' },
+      { rawOb: 'METAR KJFK 021953Z 11010KT 10SM CLR' },
+      { rawOb: 'RMK KJFK 021953Z 11010KT 10SM CLR', icaoId: 'KJFK' }
+    ]) {
+      await expect(metarResourceAdapter.validate([report], { icao: 'KJFK' }, context)).rejects.toMatchObject({
+        status: 502,
+        code: 'PROVIDER_PAYLOAD_INVALID'
+      });
+    }
+  });
+
+  it('rejects cached METAR records whose envelope, data, or raw station identities disagree', () => {
+    const envelope = metarResourceAdapter.serialize(
+      {
+        icao: 'KJFK',
+        metarRaw: 'METAR KJFK 021953Z 11010KT 10SM CLR',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: '2026-03-03T12:00:00.000Z',
+        observedAt: '2026-03-02T19:53:00.000Z'
+      },
+      'v1:metar:KJFK',
+      'metar'
+    );
+
+    expect(metarResourceAdapter.deserialize({ ...envelope, key: 'v1:metar:KORD' })).toBeNull();
+    expect(
+      metarResourceAdapter.deserialize({ ...envelope, data: { ...envelope.data, icao: 'KORD' } })
+    ).toBeNull();
+    expect(
+      metarResourceAdapter.deserialize({
+        ...envelope,
+        data: { ...envelope.data, metarRaw: 'METAR KORD 021953Z 11010KT 10SM CLR' }
+      })
+    ).toBeNull();
   });
 
   it('requires airportdb token for airport fetches', async () => {
