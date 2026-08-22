@@ -18,9 +18,10 @@ export interface HotCacheQueueEntry extends HotCacheEntry {
 }
 
 export interface HotCacheQueuePage {
-  entries: HotCacheQueueEntry[];
+  metadataKeys: string[];
   scanned: number;
   listComplete: boolean;
+  nextCursor?: string;
 }
 
 export interface CacheRefresherConfig {
@@ -208,68 +209,89 @@ export function refreshIntervalSecondsForResource(
   return config.airportRefreshIntervalSeconds;
 }
 
-export async function readHotCacheQueuePage(
+export async function readHotCacheQueueCursor(
+  env: CacheEngineEnv,
+  resource: HotCacheResource
+): Promise<string | undefined> {
+  const checkpointRaw = await env.METAR_CACHE.get(hotQueueCursorKey(resource), 'json');
+  if (checkpointRaw === null) {
+    return undefined;
+  }
+
+  const cursor = parseCursorCheckpoint(checkpointRaw);
+  if (cursor) {
+    return cursor;
+  }
+
+  await clearHotQueueCursor(env, resource);
+  logCursorRecovery(resource, 'malformed');
+  return undefined;
+}
+
+export async function recoverRejectedHotCacheQueueCursor(
+  env: CacheEngineEnv,
+  resource: HotCacheResource
+): Promise<void> {
+  await clearHotQueueCursor(env, resource);
+  logCursorRecovery(resource, 'rejected');
+}
+
+export async function listHotCacheQueuePage(
   env: CacheEngineEnv,
   resource: HotCacheResource,
+  cursor: string | undefined,
   maxScanEntries: number
 ): Promise<HotCacheQueuePage> {
   if (!env.METAR_CACHE.list || maxScanEntries <= 0) {
-    return { entries: [], scanned: 0, listComplete: true };
+    return { metadataKeys: [], scanned: 0, listComplete: true };
   }
 
-  const cursorKey = hotQueueCursorKey(resource);
-  const checkpointRaw = await env.METAR_CACHE.get(cursorKey, 'json');
-  let cursor: string | undefined;
-  if (checkpointRaw !== null) {
-    const parsedCursor = parseCursorCheckpoint(checkpointRaw);
-    if (parsedCursor) {
-      cursor = parsedCursor;
-    } else {
-      await clearHotQueueCursor(env, resource);
-      logCursorRecovery(resource, 'malformed');
-    }
-  }
-
-  let page: KvListPage;
-  try {
-    page = await env.METAR_CACHE.list({
-      prefix: hotQueueResourcePrefix(resource),
-      cursor,
-      limit: Math.min(KV_LIST_PAGE_LIMIT, maxScanEntries)
-    });
-  } catch (error) {
-    if (!cursor) {
-      throw error;
-    }
-
-    await clearHotQueueCursor(env, resource);
-    logCursorRecovery(resource, 'rejected');
-    page = await env.METAR_CACHE.list({
-      prefix: hotQueueResourcePrefix(resource),
-      limit: Math.min(KV_LIST_PAGE_LIMIT, maxScanEntries)
-    });
-  }
-
-  if (page.list_complete) {
-    await clearHotQueueCursor(env, resource);
-  } else if (typeof page.cursor === 'string' && page.cursor.length > 0) {
-    await saveHotQueueCursor(env, resource, page.cursor);
-  } else {
+  const page: KvListPage = await env.METAR_CACHE.list({
+    prefix: hotQueueResourcePrefix(resource),
+    cursor,
+    limit: Math.min(KV_LIST_PAGE_LIMIT, maxScanEntries)
+  });
+  if (!page.list_complete && (typeof page.cursor !== 'string' || page.cursor.length === 0)) {
     throw new Error('KV returned an incomplete hot-cache queue page without a cursor.');
   }
 
+  return {
+    metadataKeys: page.keys.map((key) => key.name),
+    scanned: page.keys.length,
+    listComplete: page.list_complete,
+    nextCursor: page.cursor
+  };
+}
+
+export async function loadHotCacheQueueEntries(
+  env: CacheEngineEnv,
+  page: HotCacheQueuePage
+): Promise<HotCacheQueueEntry[]> {
   const parsedEntries = await Promise.all(
-    page.keys.map(async (key) => {
-      const raw = await env.METAR_CACHE.get(key.name, 'json');
-      return parseHotCacheEntry(raw, key.name);
+    page.metadataKeys.map(async (metadataKey) => {
+      const raw = await env.METAR_CACHE.get(metadataKey, 'json');
+      return parseHotCacheEntry(raw, metadataKey);
     })
   );
 
-  return {
-    entries: parsedEntries.filter((entry): entry is HotCacheQueueEntry => entry !== null),
-    scanned: page.keys.length,
-    listComplete: page.list_complete
-  };
+  return parsedEntries.filter((entry): entry is HotCacheQueueEntry => entry !== null);
+}
+
+export async function commitHotCacheQueueCursor(
+  env: CacheEngineEnv,
+  resource: HotCacheResource,
+  page: HotCacheQueuePage
+): Promise<void> {
+  if (page.listComplete) {
+    await clearHotQueueCursor(env, resource);
+    return;
+  }
+
+  if (!page.nextCursor) {
+    throw new Error('Cannot commit an incomplete hot-cache queue page without a cursor.');
+  }
+
+  await saveHotQueueCursor(env, resource, page.nextCursor);
 }
 
 export async function readHotCacheQueueEntry(

@@ -1,14 +1,20 @@
 import { CacheEngineError, getOrRefreshCached } from './cache/engine';
 import { provenanceAtResponseTime } from './cache/freshness';
 import {
+  commitHotCacheQueueCursor,
   deleteHotCacheEntryAndPayload,
+  listHotCacheQueuePage,
+  loadHotCacheQueueEntries,
   parseCacheRefresherConfig,
-  readHotCacheQueuePage,
+  readHotCacheQueueCursor,
   readHotCacheQueueEntry,
   readIsoTimestamp,
+  recoverRejectedHotCacheQueueCursor,
   refreshIntervalSecondsForResource,
   touchHotCacheEntry,
   updateHotCacheEntryAfterRefresh,
+  type HotCacheQueuePage,
+  type HotCacheResource,
   type HotCacheQueueEntry
 } from './cache/hotQueue';
 import { getAdapterOrThrow } from './cache/registry';
@@ -389,35 +395,78 @@ function selectRoundRobinDueEntries(
   return selected;
 }
 
+interface ResourceScan {
+  resource: HotCacheResource;
+  entries: HotCacheQueueEntry[];
+  scanned: number;
+  finalPage: HotCacheQueuePage;
+}
+
+async function startResourceScan(
+  env: CacheEngineEnv,
+  resource: HotCacheResource,
+  scanBudget: number
+): Promise<ResourceScan> {
+  const savedCursor = await readHotCacheQueueCursor(env, resource);
+  let page: HotCacheQueuePage;
+  try {
+    page = await listHotCacheQueuePage(env, resource, savedCursor, scanBudget);
+  } catch (error) {
+    if (!savedCursor) {
+      throw error;
+    }
+
+    await recoverRejectedHotCacheQueueCursor(env, resource);
+    page = await listHotCacheQueuePage(env, resource, undefined, scanBudget);
+  }
+
+  return {
+    resource,
+    entries: await loadHotCacheQueueEntries(env, page),
+    scanned: page.scanned,
+    finalPage: page
+  };
+}
+
+async function extendResourceScan(
+  env: CacheEngineEnv,
+  scan: ResourceScan,
+  scanBudget: number
+): Promise<void> {
+  if (scan.finalPage.listComplete || scanBudget <= 0) {
+    return;
+  }
+
+  const page = await listHotCacheQueuePage(env, scan.resource, scan.finalPage.nextCursor, scanBudget);
+  scan.entries.push(...(await loadHotCacheQueueEntries(env, page)));
+  scan.scanned += page.scanned;
+  scan.finalPage = page;
+}
+
 async function scanHotQueueEntries(
   env: CacheEngineEnv,
   scanCap: number
-): Promise<Record<'metar' | 'airport', HotCacheQueueEntry[]>> {
+): Promise<Record<'metar' | 'airport', ResourceScan>> {
   const metarBudget = Math.ceil(scanCap / 2);
   const airportBudget = scanCap - metarBudget;
   const [metarPage, airportPage] = await Promise.all([
-    readHotCacheQueuePage(env, 'metar', metarBudget),
-    readHotCacheQueuePage(env, 'airport', airportBudget)
+    startResourceScan(env, 'metar', metarBudget),
+    startResourceScan(env, 'airport', airportBudget)
   ]);
-  const entries = {
-    metar: [...metarPage.entries],
-    airport: [...airportPage.entries]
-  };
+  const scans = { metar: metarPage, airport: airportPage };
   const unusedBudget = scanCap - metarPage.scanned - airportPage.scanned;
 
   if (unusedBudget <= 0) {
-    return entries;
+    return scans;
   }
 
-  if (metarPage.scanned < metarBudget && airportPage.scanned === airportBudget) {
-    const extraAirportPage = await readHotCacheQueuePage(env, 'airport', unusedBudget);
-    entries.airport.push(...extraAirportPage.entries);
-  } else if (airportPage.scanned < airportBudget && metarPage.scanned === metarBudget) {
-    const extraMetarPage = await readHotCacheQueuePage(env, 'metar', unusedBudget);
-    entries.metar.push(...extraMetarPage.entries);
+  if (metarPage.scanned < metarBudget && !airportPage.finalPage.listComplete) {
+    await extendResourceScan(env, airportPage, unusedBudget);
+  } else if (airportPage.scanned < airportBudget && !metarPage.finalPage.listComplete) {
+    await extendResourceScan(env, metarPage, unusedBudget);
   }
 
-  return entries;
+  return scans;
 }
 
 async function keepOrEvictQueueEntry(
@@ -463,11 +512,11 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
   if (!config.enabled) {
     return;
   }
-
-  const queueEntries = await scanHotQueueEntries(env, config.maxItemsPerRun * 10);
-  if (queueEntries.metar.length === 0 && queueEntries.airport.length === 0) {
+  if (!env.METAR_CACHE.list) {
     return;
   }
+
+  const scans = await scanHotQueueEntries(env, config.maxItemsPerRun * 10);
 
   const nowMs = now.getTime();
   const inactivityTtlMs = config.inactivityTtlSeconds * 1000;
@@ -476,7 +525,7 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
     airport: []
   };
 
-  for (const entry of [...queueEntries.metar, ...queueEntries.airport]) {
+  for (const entry of [...scans.metar.entries, ...scans.airport.entries]) {
     const effectiveEntry = await keepOrEvictQueueEntry(env, entry, nowMs, inactivityTtlMs);
     if (!effectiveEntry) {
       continue;
@@ -499,6 +548,11 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
       });
     }
   }
+
+  await Promise.all([
+    commitHotCacheQueueCursor(env, scans.metar.resource, scans.metar.finalPage),
+    commitHotCacheQueueCursor(env, scans.airport.resource, scans.airport.finalPage)
+  ]);
 }
 
 export async function handleMetarRequest(request: Request, env: CacheEngineEnv, ctx?: WorkerExecutionContext): Promise<Response> {

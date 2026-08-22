@@ -1437,6 +1437,164 @@ describe('airport worker', () => {
     expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
   });
 
+  it('does not re-list a resource that completed exactly at its initial scan budget', async () => {
+    const kv = new MemoryKv();
+    const listSpy = vi.spyOn(kv, 'list');
+    for (let index = 0; index < 5; index++) {
+      const normalizedKey = `K${String(index).padStart(3, '0')}`;
+      seedHotQueueEntry(kv, {
+        resource: 'airport',
+        normalizedKey,
+        cacheKey: `v1:airport:${normalizedKey}`,
+        lastAccessedAt: '2026-03-06T11:59:00.000Z',
+        lastRefreshedAt: '2026-03-06T11:59:00.000Z'
+      });
+    }
+
+    await runScheduledCacheRefresh(
+      { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
+      new Date('2026-03-06T12:00:00.000Z')
+    );
+
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(listSpy.mock.calls.map(([options]) => options?.prefix).sort()).toEqual([
+      'v2:hot:airport:',
+      'v2:hot:metar:'
+    ]);
+  });
+
+  it('retries a rejected saved cursor from the prefix without deleting queue or payload data', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'stale' });
+    seedHotQueueEntry(kv, {
+      resource: 'metar',
+      normalizedKey: 'KJFK',
+      cacheKey: 'v1:metar:KJFK',
+      lastAccessedAt: '2026-03-06T11:59:00.000Z',
+      lastRefreshedAt: '2026-03-06T11:59:00.000Z'
+    });
+    kv.seed('v1:metar:KJFK', { cached: true });
+    const originalList = kv.list.bind(kv);
+    const listSpy = vi.spyOn(kv, 'list').mockImplementation(async (options) => {
+      if (options?.prefix === 'v2:hot:metar:' && options.cursor === 'stale') {
+        throw new Error('invalid cursor');
+      }
+      return originalList(options);
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
+
+    expect(listSpy.mock.calls.filter(([options]) => options?.prefix === 'v2:hot:metar:').map(([options]) => options?.cursor)).toEqual([
+      'stale',
+      undefined
+    ]);
+    expect(kv.has('v2:hot:metar:KJFK')).toBe(true);
+    expect(kv.has('v1:metar:KJFK')).toBe(true);
+    expect(warning).toHaveBeenCalledWith(
+      'Scheduled cache refresh cursor checkpoint reset.',
+      { resource: 'metar', reason: 'rejected' }
+    );
+    warning.mockRestore();
+  });
+
+  it('keeps the prior cursor when metadata loading fails before page processing', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: '0' });
+    for (let index = 0; index < 11; index++) {
+      const normalizedKey = `K${String(index).padStart(3, '0')}`;
+      seedHotQueueEntry(kv, {
+        resource: 'metar',
+        normalizedKey,
+        cacheKey: `v1:metar:${normalizedKey}`,
+        lastAccessedAt: '2026-03-06T11:59:00.000Z',
+        lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+      });
+    }
+    const fetchStub = vi.fn();
+    vi.stubGlobal('fetch', fetchStub);
+    const originalGet = kv.get.bind(kv);
+    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
+      if (key === 'v2:hot:metar:K000') {
+        throw new Error('temporary KV read failure');
+      }
+      return originalGet(key, type);
+    });
+
+    await expect(
+      runScheduledCacheRefresh(
+        { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
+        new Date('2026-03-06T12:00:00.000Z')
+      )
+    ).rejects.toThrow('temporary KV read failure');
+
+    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '0' });
+    expect(fetchStub).not.toHaveBeenCalled();
+  });
+
+  it('keeps the prior cursor when eviction fails', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: '0' });
+    seedHotQueueEntry(kv, {
+      resource: 'metar',
+      normalizedKey: 'KDEN',
+      cacheKey: 'v1:metar:KDEN',
+      lastAccessedAt: '2026-02-27T12:00:00.000Z',
+      lastRefreshedAt: '2026-03-01T12:00:00.000Z'
+    });
+    kv.seed('v1:metar:KDEN', { cached: true });
+    const originalDelete = kv.delete.bind(kv);
+    vi.spyOn(kv, 'delete').mockImplementation(async (key) => {
+      if (key === 'v2:hot:metar:KDEN') {
+        throw new Error('temporary KV delete failure');
+      }
+      return originalDelete(key);
+    });
+
+    await expect(runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'))).rejects.toThrow(
+      'temporary KV delete failure'
+    );
+
+    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '0' });
+    expect(kv.has('v1:metar:KDEN')).toBe(true);
+  });
+
+  it('repeats a page from its prior cursor when checkpoint commit fails', async () => {
+    const kv = new MemoryKv();
+    for (let index = 0; index < 11; index++) {
+      const normalizedKey = `K${String(index).padStart(3, '0')}`;
+      seedHotQueueEntry(kv, {
+        resource: 'metar',
+        normalizedKey,
+        cacheKey: `v1:metar:${normalizedKey}`,
+        lastAccessedAt: '2026-03-06T11:59:00.000Z',
+        lastRefreshedAt: '2026-03-06T11:59:00.000Z'
+      });
+    }
+    const originalPut = kv.put.bind(kv);
+    const putSpy = vi.spyOn(kv, 'put').mockImplementation(async (key, value, options) => {
+      if (key === 'v2:control:hot-refresh-cursor:metar') {
+        throw new Error('temporary checkpoint write failure');
+      }
+      return originalPut(key, value, options);
+    });
+
+    await expect(
+      runScheduledCacheRefresh(
+        { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
+        new Date('2026-03-06T12:00:00.000Z')
+      )
+    ).rejects.toThrow('temporary checkpoint write failure');
+
+    putSpy.mockRestore();
+    const listSpy = vi.spyOn(kv, 'list');
+    await runScheduledCacheRefresh(
+      { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
+      new Date('2026-03-06T12:00:00.000Z')
+    );
+    expect(listSpy.mock.calls.find(([options]) => options?.prefix === 'v2:hot:metar:')?.[0]?.cursor).toBeUndefined();
+  });
+
   it('keeps scans bounded per resource and never exceeds the global scan cap', async () => {
     const kv = new MemoryKv();
     const listSpy = vi.spyOn(kv, 'list');

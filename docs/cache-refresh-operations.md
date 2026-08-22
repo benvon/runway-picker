@@ -13,9 +13,9 @@ This runbook covers day-2 operations for the scheduled hot-cache refresher in `w
 - `/api/airport-location` is deliberately not hot-refreshed. It is long-lived reference data and has its own normal cache policy, so it cannot be accidentally refreshed as a runway profile.
 - Scheduled runs:
   1. Scan bounded pages for each resource. The global scan cap is ten times `CACHE_REFRESH_MAX_ITEMS_PER_RUN`, split between resources; unused budget from a short page is available to the other resource without exceeding that cap.
-  2. Persist each next cursor immediately after a successful page read, or clear it after the resource scan wraps. A failed item refresh therefore cannot pin a scan at the same page.
-  3. Evict entries inactive longer than inactivity TTL (also purges cache payload key).
-  4. Sort due entries oldest-first within each resource and refresh them round-robin, up to `CACHE_REFRESH_MAX_ITEMS_PER_RUN`.
+  2. Load and validate every listed metadata record before any entry is processed.
+  3. Evict entries inactive longer than inactivity TTL (also purges cache payload key), then refresh due entries oldest-first within each resource and round-robin, up to `CACHE_REFRESH_MAX_ITEMS_PER_RUN`.
+  4. Persist each next cursor or clear it after the resource scan wraps. A metadata, eviction, or checkpoint failure leaves the prior cursor in place for retry; an individual refresh failure is recorded and does not pin the scan.
   5. Leave failed refreshes queued for later retries.
 - If a saved cursor is malformed or rejected by KV, the worker clears only that resource's cursor record, retries once from the beginning, and writes one `Scheduled cache refresh cursor checkpoint reset` warning. It does not delete hot entries or cache payloads during cursor recovery.
 

@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  commitHotCacheQueueCursor,
+  listHotCacheQueuePage,
+  loadHotCacheQueueEntries,
   parseCacheRefresherConfig,
-  readHotCacheQueuePage,
+  readHotCacheQueueCursor,
   readHotCacheQueueEntry,
+  recoverRejectedHotCacheQueueCursor,
   refreshIntervalSecondsForResource,
   touchHotCacheEntry,
   updateHotCacheEntryAfterRefresh,
@@ -337,7 +341,7 @@ describe('updateHotCacheEntryAfterRefresh', () => {
   });
 });
 
-describe('readHotCacheQueuePage', () => {
+describe('hot queue scan pages', () => {
   it('returns an empty completed page when KV does not support list', async () => {
     const env = createEnv({
       METAR_CACHE: {
@@ -346,8 +350,8 @@ describe('readHotCacheQueuePage', () => {
         delete: async () => {}
       }
     });
-    const result = await readHotCacheQueuePage(env, 'metar', 1);
-    expect(result).toEqual({ entries: [], scanned: 0, listComplete: true });
+    const result = await listHotCacheQueuePage(env, 'metar', undefined, 1);
+    expect(result).toEqual({ metadataKeys: [], scanned: 0, listComplete: true });
   });
 
   it('scans only the requested resource namespace so other resources and legacy entries cannot consume its budget', async () => {
@@ -364,7 +368,7 @@ describe('readHotCacheQueuePage', () => {
       }
     });
 
-    await readHotCacheQueuePage(env, 'airport', 1);
+    await listHotCacheQueuePage(env, 'airport', undefined, 1);
 
     expect(prefixes).toEqual(['v2:hot:airport:']);
   });
@@ -387,12 +391,13 @@ describe('readHotCacheQueuePage', () => {
       }
     });
 
-    const { entries: [entry] } = await readHotCacheQueuePage(env, 'airport', 1);
+    const page = await listHotCacheQueuePage(env, 'airport', undefined, 1);
+    const [entry] = await loadHotCacheQueueEntries(env, page);
 
     expect(entry?.cacheKey).toBe('v1:airport:KJFK');
   });
 
-  it('persists the next cursor after a successful incomplete page and clears it after wrap', async () => {
+  it('keeps page listing and metadata loading free of checkpoint writes', async () => {
     const allKeys = ['v2:hot:metar:KAAA', 'v2:hot:metar:KBBB'];
     const store = new Map<string, unknown>(
       allKeys.map((key) => [
@@ -430,15 +435,20 @@ describe('readHotCacheQueuePage', () => {
       }
     });
 
-    const first = await readHotCacheQueuePage(env, 'metar', 1);
-    expect(first.entries.map((entry) => entry.normalizedKey)).toEqual(['KAAA']);
+    store.set('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: '0' });
+    const first = await listHotCacheQueuePage(env, 'metar', '0', 1);
+    const firstEntries = await loadHotCacheQueueEntries(env, first);
+    expect(firstEntries.map((entry) => entry.normalizedKey)).toEqual(['KAAA']);
     expect(first.scanned).toBe(1);
     expect(first.listComplete).toBe(false);
+    expect(store.get('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '0' });
+
+    await commitHotCacheQueueCursor(env, 'metar', first);
     expect(store.get('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '1' });
 
-    const second = await readHotCacheQueuePage(env, 'metar', 1);
-    expect(second.entries.map((entry) => entry.normalizedKey)).toEqual(['KBBB']);
+    const second = await listHotCacheQueuePage(env, 'metar', first.nextCursor, 1);
     expect(second.listComplete).toBe(true);
+    await commitHotCacheQueueCursor(env, 'metar', second);
     expect(store.has('v2:control:hot-refresh-cursor:metar')).toBe(false);
   });
 
@@ -469,9 +479,10 @@ describe('readHotCacheQueuePage', () => {
       }
     });
 
-    const result = await readHotCacheQueuePage(env, 'metar', 2);
-    expect(result.entries).toHaveLength(1);
-    expect(result.entries[0]?.normalizedKey).toBe('KJFK');
+    const page = await listHotCacheQueuePage(env, 'metar', undefined, 2);
+    const result = await loadHotCacheQueueEntries(env, page);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.normalizedKey).toBe('KJFK');
   });
 
   it('bounds each resource page by its scan budget', async () => {
@@ -512,8 +523,8 @@ describe('readHotCacheQueuePage', () => {
     });
 
     // With maxScanEntries=3, only the first 3 keys should be fetched.
-    const result = await readHotCacheQueuePage(env, 'metar', 3);
-    expect(result.entries).toHaveLength(3);
+    const result = await listHotCacheQueuePage(env, 'metar', undefined, 3);
+    expect(result.metadataKeys).toHaveLength(3);
     // The list call should have been issued with limit=3, not the default 1000.
     expect(listCalls[0]).toBe(3);
     // Only one page call should have been made since 3 entries exhausted the cap.
@@ -538,7 +549,8 @@ describe('readHotCacheQueuePage', () => {
       }
     });
 
-    await readHotCacheQueuePage(env, 'airport', 1);
+    const cursor = await readHotCacheQueueCursor(env, 'airport');
+    await listHotCacheQueuePage(env, 'airport', cursor, 1);
 
     expect(listCursors).toEqual([undefined]);
     expect(store.has('v2:control:hot-refresh-cursor:airport')).toBe(false);
@@ -550,33 +562,24 @@ describe('readHotCacheQueuePage', () => {
     warning.mockRestore();
   });
 
-  it('recovers once from a rejected saved cursor without deleting hot-entry or payload data', async () => {
+  it('clears a rejected saved cursor without deleting hot-entry or payload data', async () => {
     const store = new Map<string, unknown>([
       ['v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'stale' }],
       ['v2:hot:metar:KJFK', { schemaVersion: 2, resource: 'metar', normalizedKey: 'KJFK', lastAccessedAt: '2026-03-06T11:00:00.000Z', lastRefreshedAt: '2026-03-06T10:00:00.000Z' }],
       ['v1:metar:KJFK', { cached: true }]
     ]);
-    const listCursors: Array<string | undefined> = [];
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const env = createEnv({
       METAR_CACHE: {
         get: async (key) => store.get(key) ?? null,
         put: async (key, value) => { store.set(key, JSON.parse(value) as unknown); },
-        list: async (options) => {
-          listCursors.push(options?.cursor);
-          if (options?.cursor === 'stale') {
-            throw new Error('invalid cursor');
-          }
-          return { keys: [{ name: 'v2:hot:metar:KJFK' }], list_complete: true };
-        },
+        list: async () => ({ keys: [{ name: 'v2:hot:metar:KJFK' }], list_complete: true }),
         delete: async (key) => { store.delete(key); }
       }
     });
 
-    const page = await readHotCacheQueuePage(env, 'metar', 1);
+    await recoverRejectedHotCacheQueueCursor(env, 'metar');
 
-    expect(page.entries.map((entry) => entry.normalizedKey)).toEqual(['KJFK']);
-    expect(listCursors).toEqual(['stale', undefined]);
     expect(store.has('v2:hot:metar:KJFK')).toBe(true);
     expect(store.has('v1:metar:KJFK')).toBe(true);
     expect(warning).toHaveBeenCalledWith(
