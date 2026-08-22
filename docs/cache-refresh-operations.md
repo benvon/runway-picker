@@ -114,7 +114,7 @@ npx wrangler kv key delete "v2:hot:metar:KJFK" \
 ### Queue growth without cleanup
 
 - Verify `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` is set and positive.
-- Sample `v2:hot:*` keys and validate `lastAccessedAt`/`lastRefreshedAt` fields.
+- Sample `v2:hot:*` keys and validate `lastAccessedAt` and scheduled failure fields.
 - Ensure deployment includes recent scheduler code and env vars.
 
 ## Cost guardrails

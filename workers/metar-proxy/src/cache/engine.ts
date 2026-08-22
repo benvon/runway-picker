@@ -48,6 +48,11 @@ export class CacheEngineError extends Error {
   }
 }
 
+export type CacheMaintenanceInspection =
+  | { kind: 'missing' }
+  | { kind: 'valid'; fetchedAt: string }
+  | { kind: 'expired' };
+
 function getRuntimeEdgeCache(): EdgeCacheLike | undefined {
   const runtime = globalThis as unknown as { caches?: { default?: EdgeCacheLike } };
   return runtime.caches?.default;
@@ -72,13 +77,30 @@ function parseIsoDate(value: unknown): Date | null {
   return parsed;
 }
 
-function extractFetchedAt<TData>(data: TData): Date | null {
-  if (!data || typeof data !== 'object') {
+function parseCanonicalTimestamp(value: unknown, now: Date): Date | null {
+  if (typeof value !== 'string') {
     return null;
   }
+  const parsed = parseIsoDate(value);
+  if (!parsed || parsed.toISOString() !== value || parsed.getTime() > now.getTime()) {
+    return null;
+  }
+  return parsed;
+}
 
-  const fetchedAt = (data as { fetchedAt?: unknown }).fetchedAt;
-  return parseIsoDate(fetchedAt);
+function hasValidCacheMeta(
+  meta: Partial<CacheEnvelope<unknown>['cacheMeta']> | undefined,
+  policy: CachePolicy,
+  now: Date
+): boolean {
+  const fetchedAt = parseCanonicalTimestamp(meta?.fetchedAt, now);
+  const expiresAt = parseIsoDate(meta?.expiresAt);
+  return Boolean(
+    fetchedAt &&
+    expiresAt &&
+    meta?.policyVersion === policy.policyVersion &&
+    meta?.source === 'upstream'
+  );
 }
 
 function hasCompatibleEnvelope<TInput, TUpstream, TData>(
@@ -125,7 +147,7 @@ function toCachedNegativeRecord<TInput, TUpstream, TData>(
   }
 
   const candidate = raw as Partial<NegativeCacheEnvelope>;
-  if (!hasCompatibleEnvelope(candidate, adapter, cacheKey)) {
+  if (!hasCompatibleEnvelope(candidate, adapter, cacheKey) || !hasValidCacheMeta(candidate.cacheMeta, adapter.policy, now)) {
     return null;
   }
 
@@ -155,7 +177,7 @@ function toCacheRecords<TInput, TUpstream, TData>(
   now: Date
 ): CacheRecords<TData> {
   return {
-    data: toCachedRecord(raw, adapter, cacheKey),
+    data: toCachedRecord(raw, adapter, cacheKey, now),
     negative: toCachedNegativeRecord(raw, adapter, cacheKey, input, now)
   };
 }
@@ -163,14 +185,15 @@ function toCacheRecords<TInput, TUpstream, TData>(
 function toCachedRecord<TInput, TUpstream, TData>(
   raw: unknown,
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
-  cacheKey: string
+  cacheKey: string,
+  now: Date
 ): CachedRecord<TData> | null {
   if (!raw || typeof raw !== 'object') {
     return null;
   }
 
   const candidate = raw as Partial<CacheEnvelope<TData>>;
-  if (!hasCompatibleEnvelope(candidate, adapter, cacheKey)) {
+  if (!hasCompatibleEnvelope(candidate, adapter, cacheKey) || !hasValidCacheMeta(candidate.cacheMeta, adapter.policy, now)) {
     return null;
   }
 
@@ -179,7 +202,7 @@ function toCachedRecord<TInput, TUpstream, TData>(
     return null;
   }
 
-  const trustedFetchedAt = parseIsoDate(candidate?.cacheMeta?.fetchedAt) ?? extractFetchedAt(data);
+  const trustedFetchedAt = parseCanonicalTimestamp(candidate.cacheMeta?.fetchedAt, now);
   const fetchedAt = trustedFetchedAt ?? new Date(0);
 
   const expiresAt =
@@ -243,7 +266,8 @@ function buildProvenance(
   now: Date,
   cacheKey: string,
   resource: string,
-  ttlSeconds: number
+  ttlSeconds: number,
+  maxPayloadAgeSeconds: number
 ): CacheProvenance {
   const ageSeconds = Math.max(0, Math.floor((now.getTime() - record.fetchedAt.getTime()) / 1000));
 
@@ -256,6 +280,7 @@ function buildProvenance(
     freshnessRemainingSeconds: remainingFreshnessSeconds(record.expiresAt, now, ttlSeconds),
     servedAt: now.toISOString(),
     ttlSeconds,
+    maxPayloadAgeSeconds,
     key: cacheKey,
     resource
   };
@@ -303,7 +328,12 @@ async function readEdgeCacheRecords<TInput, TUpstream, TData>(
   }
 
   const cachedResponse = await edgeCache.match(buildEdgeRequest(cacheKey));
-  const raw = cachedResponse ? await cachedResponse.json() : null;
+  let raw: unknown = null;
+  try {
+    raw = cachedResponse ? await cachedResponse.json() : null;
+  } catch {
+    await edgeCache.delete?.(buildEdgeRequest(cacheKey));
+  }
   return toCacheRecords(raw, adapter, cacheKey, input, clock());
 }
 
@@ -314,8 +344,12 @@ async function readKvCacheRecords<TInput, TUpstream, TData>(
   clock: () => Date,
   readKv: (cacheKey: string) => Promise<unknown>
 ): Promise<CacheRecords<TData>> {
-  const raw = await readKv(cacheKey);
-  return toCacheRecords(raw, adapter, cacheKey, input, clock());
+  try {
+    const raw = await readKv(cacheKey);
+    return toCacheRecords(raw, adapter, cacheKey, input, clock());
+  } catch {
+    return { data: null, negative: null };
+  }
 }
 
 function toEnvelope<TInput, TUpstream, TData>(
@@ -327,10 +361,8 @@ function toEnvelope<TInput, TUpstream, TData>(
 ): CacheEnvelope<TData> {
   const candidate = adapter.serialize(data, cacheKey, adapter.resource, upstream);
   const serializedData = candidate.data;
-  const fetchedAt = parseIsoDate(candidate?.cacheMeta?.fetchedAt) ?? extractFetchedAt(serializedData) ?? now;
-  const expiresAt =
-    parseIsoDate(candidate?.cacheMeta?.expiresAt) ??
-    new Date(fetchedAt.getTime() + adapter.policy.ttlSeconds * 1000);
+  const fetchedAt = now;
+  const expiresAt = new Date(fetchedAt.getTime() + adapter.policy.ttlSeconds * 1000);
 
   return {
     ...((candidate as unknown) as Record<string, unknown>),
@@ -405,7 +437,16 @@ function cacheResultFromRecord<TInput, TUpstream, TData>(
 ): CacheEngineResult<TData> {
   return {
     payload: record.data,
-    cache: buildProvenance(status, source, record, now, cacheKey, adapter.resource, adapter.policy.ttlSeconds)
+    cache: buildProvenance(
+      status,
+      source,
+      record,
+      now,
+      cacheKey,
+      adapter.resource,
+      adapter.policy.ttlSeconds,
+      adapter.policy.maxPayloadAgeSeconds
+    )
   };
 }
 
@@ -439,6 +480,36 @@ async function purgeInvalidPayloadCopies(
     cleanups.push(edgeCache.delete(buildEdgeRequest(cacheKey)));
   }
   await Promise.allSettled(cleanups);
+}
+
+/** Scheduler-only KV inspection. It shares the request-path validation and never repairs untrusted metadata. */
+export async function inspectCachedPayloadForMaintenance<TInput, TUpstream, TData>(params: {
+  adapter: CacheResourceAdapter<TInput, TUpstream, TData>;
+  input: TInput;
+  env: CacheEngineEnv;
+  now?: Date;
+}): Promise<CacheMaintenanceInspection> {
+  const cacheKey = buildCacheKey(params.adapter.resource, params.adapter.normalizeKey(params.input));
+  const now = params.now ?? new Date();
+  let raw: unknown;
+  try {
+    raw = await params.env.METAR_CACHE.get(cacheKey, 'json');
+  } catch (error) {
+    throw new CacheEngineError(error instanceof Error ? error.message : 'Cache payload inspection failed.', 503);
+  }
+  if (raw === null) {
+    return { kind: 'missing' };
+  }
+  const record = toCachedRecord(raw, params.adapter, cacheKey, now);
+  if (!record) {
+    await purgeInvalidPayloadCopies(params.env, undefined, cacheKey, true, false);
+    return { kind: 'missing' };
+  }
+  if (!isWithinPayloadAge(record, now, params.adapter.policy)) {
+    await purgeInvalidPayloadCopies(params.env, undefined, cacheKey, true, false);
+    return { kind: 'expired' };
+  }
+  return { kind: 'valid', fetchedAt: record.fetchedAt.toISOString() };
 }
 
 async function discardPayloadOutsideValidity<TData>(

@@ -1,4 +1,4 @@
-import { CacheEngineError, getOrRefreshCached } from './cache/engine';
+import { CacheEngineError, getOrRefreshCached, inspectCachedPayloadForMaintenance } from './cache/engine';
 import { provenanceAtResponseTime } from './cache/freshness';
 import {
   commitHotCacheQueueCursor,
@@ -358,10 +358,34 @@ function isInactive(lastAccessedAtMs: number, nowMs: number, inactivityTtlMs: nu
   return lastAccessedAtMs <= 0 || nowMs - lastAccessedAtMs > inactivityTtlMs;
 }
 
-function isRefreshDue(entry: HotCacheQueueEntry, nowMs: number, config: ReturnType<typeof parseCacheRefresherConfig>): boolean {
+async function isRefreshDue(
+  entry: HotCacheQueueEntry,
+  env: CacheEngineEnv,
+  now: Date,
+  config: ReturnType<typeof parseCacheRefresherConfig>
+): Promise<boolean> {
   const refreshIntervalMs = refreshIntervalSecondsForResource(entry.resource, config) * 1000;
-  const lastRefreshedAtMs = readIsoTimestamp(entry.lastRefreshedAt);
-  return lastRefreshedAtMs <= 0 || nowMs - lastRefreshedAtMs >= refreshIntervalMs;
+  if (entry.schemaVersion < 4) {
+    const legacyTimestamp = readIsoTimestamp(entry.lastRefreshedAt ?? '');
+    return legacyTimestamp <= 0 || now.getTime() - legacyTimestamp >= refreshIntervalMs;
+  }
+  const inspection = entry.resource === 'metar'
+    ? await inspectCachedPayloadForMaintenance({
+      adapter: METAR_ADAPTER,
+      input: { icao: entry.normalizedKey },
+      env,
+      now
+    })
+    : await inspectCachedPayloadForMaintenance({
+      adapter: AIRPORT_ADAPTER,
+      input: { icao: entry.normalizedKey },
+      env,
+      now
+    });
+  if (inspection.kind !== 'valid') {
+    return true;
+  }
+  return now.getTime() - readIsoTimestamp(inspection.fetchedAt) >= refreshIntervalMs;
 }
 
 function selectRoundRobinDueEntries(
@@ -370,17 +394,17 @@ function selectRoundRobinDueEntries(
 ): HotCacheQueueEntry[] {
   const remaining = {
     metar: [...dueEntries.metar].sort(
-      (left, right) => readIsoTimestamp(left.lastRefreshedAt) - readIsoTimestamp(right.lastRefreshedAt)
+      (left, right) => readIsoTimestamp(left.lastAccessedAt) - readIsoTimestamp(right.lastAccessedAt)
     ),
     airport: [...dueEntries.airport].sort(
-      (left, right) => readIsoTimestamp(left.lastRefreshedAt) - readIsoTimestamp(right.lastRefreshedAt)
+      (left, right) => readIsoTimestamp(left.lastAccessedAt) - readIsoTimestamp(right.lastAccessedAt)
     )
   };
   const queues = [remaining.metar, remaining.airport];
   const selected: HotCacheQueueEntry[] = [];
   let nextQueueIndex =
-    readIsoTimestamp(remaining.metar[0]?.lastRefreshedAt ?? '') <=
-    readIsoTimestamp(remaining.airport[0]?.lastRefreshedAt ?? '')
+    readIsoTimestamp(remaining.metar[0]?.lastAccessedAt ?? '') <=
+    readIsoTimestamp(remaining.airport[0]?.lastAccessedAt ?? '')
       ? 0
       : 1;
 
@@ -504,7 +528,11 @@ async function keepOrEvictQueueEntry(
 // Test-only export surface for targeted unit tests of scheduler helpers.
 export const __cacheRefreshHelpers = {
   isInactive,
-  isRefreshDue,
+  isRefreshDue: (entry: HotCacheQueueEntry, nowMs: number, config: ReturnType<typeof parseCacheRefresherConfig>) => {
+    const intervalMs = refreshIntervalSecondsForResource(entry.resource, config) * 1000;
+    const legacyTimestamp = readIsoTimestamp(entry.lastRefreshedAt ?? '');
+    return legacyTimestamp <= 0 || nowMs - legacyTimestamp >= intervalMs;
+  },
   keepOrEvictQueueEntry,
   selectRoundRobinDueEntries
 };
@@ -533,6 +561,45 @@ async function recordScheduledRefreshFailure(
   }
 }
 
+async function processScheduledRefreshEntry(
+  env: CacheEngineEnv,
+  entry: HotCacheQueueEntry,
+  inactivityTtlSeconds: number
+): Promise<boolean> {
+  let refreshedCache: CacheProvenance;
+  try {
+    refreshedCache = await refreshQueueEntry(entry, env);
+  } catch (error) {
+    await recordScheduledRefreshFailure(
+      env,
+      entry,
+      inactivityTtlSeconds,
+      'Scheduled cache refresh failed for hot cache queue entry.',
+      { error }
+    );
+    return true;
+  }
+  if (refreshedCache.status === 'stale_on_error') {
+    await recordScheduledRefreshFailure(
+      env,
+      entry,
+      inactivityTtlSeconds,
+      'Scheduled cache refresh fell back to stale data after an upstream failure.',
+      {}
+    );
+    return true;
+  }
+  if (refreshedCache.status !== 'upstream_refresh') {
+    return false;
+  }
+  try {
+    await updateHotCacheEntryAfterRefresh(env, entry, refreshedCache, inactivityTtlSeconds);
+  } catch (error) {
+    console.error('Scheduled cache refresh succeeded but hot cache metadata could not be updated.', { entry, error });
+  }
+  return true;
+}
+
 export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Date()): Promise<void> {
   const config = parseCacheRefresherConfig(env);
   if (!config.enabled) {
@@ -557,50 +624,19 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
       continue;
     }
 
-    if (isRefreshDue(effectiveEntry, nowMs, config)) {
+    if (await isRefreshDue(effectiveEntry, env, now, config)) {
       dueEntries[effectiveEntry.resource].push(effectiveEntry);
     }
   }
 
-  const toRefresh = selectRoundRobinDueEntries(dueEntries, config.maxItemsPerRun);
+  const candidateCount = dueEntries.metar.length + dueEntries.airport.length;
+  const toRefresh = selectRoundRobinDueEntries(dueEntries, candidateCount);
+  let attemptedRefreshes = 0;
   for (const entry of toRefresh) {
-    let refreshedCache: CacheProvenance;
-    try {
-      refreshedCache = await refreshQueueEntry(entry, env);
-    } catch (error) {
-      await recordScheduledRefreshFailure(
-        env,
-        entry,
-        config.inactivityTtlSeconds,
-        'Scheduled cache refresh failed for hot cache queue entry.',
-        { error }
-      );
-      continue;
+    if (attemptedRefreshes >= config.maxItemsPerRun) {
+      break;
     }
-
-    if (refreshedCache.status === 'stale_on_error') {
-      await recordScheduledRefreshFailure(
-        env,
-        entry,
-        config.inactivityTtlSeconds,
-        'Scheduled cache refresh fell back to stale data after an upstream failure.',
-        {}
-      );
-      continue;
-    }
-
-    if (refreshedCache.status !== 'upstream_refresh') {
-      continue;
-    }
-
-    try {
-      await updateHotCacheEntryAfterRefresh(env, entry, refreshedCache, config.inactivityTtlSeconds);
-    } catch (error) {
-      console.error('Scheduled cache refresh succeeded but hot cache metadata could not be updated.', {
-        entry,
-        error
-      });
-    }
+    attemptedRefreshes += Number(await processScheduledRefreshEntry(env, entry, config.inactivityTtlSeconds));
   }
 
   await Promise.all([

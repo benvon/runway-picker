@@ -8,7 +8,8 @@ export interface HotCacheEntry {
   resource: HotCacheResource;
   normalizedKey: string;
   lastAccessedAt: string;
-  lastRefreshedAt: string;
+  /** Legacy V2/V3 field; never written by the current queue schema. */
+  lastRefreshedAt?: string;
   /** Consecutive scheduled refresh failures; absent V2 metadata is treated as zero. */
   consecutiveRefreshFailures?: number;
 }
@@ -34,8 +35,8 @@ export interface CacheRefresherConfig {
   maxItemsPerRun: number;
 }
 
-const HOT_QUEUE_SCHEMA_VERSION = 3;
-const LEGACY_HOT_QUEUE_SCHEMA_VERSION = 2;
+const HOT_QUEUE_SCHEMA_VERSION = 4;
+const LEGACY_HOT_QUEUE_SCHEMA_VERSIONS = new Set([2, 3]);
 const HOT_QUEUE_KEY_PREFIX = 'v2:hot:';
 const HOT_QUEUE_CURSOR_SCHEMA_VERSION = 1;
 const HOT_QUEUE_CURSOR_KEY_PREFIX = 'v2:control:hot-refresh-cursor:';
@@ -98,13 +99,13 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
 }
 
 function hasValidHotCacheIdentity(entry: Partial<HotCacheEntry>, metadataKey: string): boolean {
-  if (entry.schemaVersion !== HOT_QUEUE_SCHEMA_VERSION && entry.schemaVersion !== LEGACY_HOT_QUEUE_SCHEMA_VERSION) {
+  if (entry.schemaVersion !== HOT_QUEUE_SCHEMA_VERSION && !LEGACY_HOT_QUEUE_SCHEMA_VERSIONS.has(entry.schemaVersion ?? -1)) {
     return false;
   }
   if (!isHotResource(entry.resource) || typeof entry.normalizedKey !== 'string' || entry.normalizedKey.length === 0) {
     return false;
   }
-  if (!parseDate(entry.lastAccessedAt) || !parseDate(entry.lastRefreshedAt)) {
+  if (!parseDate(entry.lastAccessedAt)) {
     return false;
   }
   return metadataKey === hotQueueKey(entry.resource, entry.normalizedKey);
@@ -126,7 +127,9 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
   }
   const validatedEntry = entry as HotCacheEntry;
   const lastAccessedAt = validatedEntry.lastAccessedAt;
-  const lastRefreshedAt = validatedEntry.lastRefreshedAt;
+  if (validatedEntry.schemaVersion !== HOT_QUEUE_SCHEMA_VERSION && !parseDate(validatedEntry.lastRefreshedAt)) {
+    return null;
+  }
 
   const consecutiveRefreshFailures = readConsecutiveRefreshFailures(validatedEntry);
   if (consecutiveRefreshFailures === null) {
@@ -139,7 +142,6 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
     normalizedKey: validatedEntry.normalizedKey,
     cacheKey: buildCacheKey(validatedEntry.resource, validatedEntry.normalizedKey),
     lastAccessedAt,
-    lastRefreshedAt,
     consecutiveRefreshFailures,
     metadataKey
   };
@@ -354,7 +356,6 @@ export async function touchHotCacheEntry(params: {
       resource: existing.resource,
       normalizedKey: existing.normalizedKey,
       lastAccessedAt: params.lastAccessedAt,
-      lastRefreshedAt: existing.lastRefreshedAt,
       consecutiveRefreshFailures: existing.consecutiveRefreshFailures
     }
     : {
@@ -362,7 +363,6 @@ export async function touchHotCacheEntry(params: {
       resource: params.resource,
       normalizedKey: params.normalizedKey,
       lastAccessedAt: params.lastAccessedAt,
-      lastRefreshedAt: params.cache.fetchedAt,
       consecutiveRefreshFailures: 0
     };
 
@@ -379,6 +379,7 @@ export async function updateHotCacheEntryAfterRefresh(
   cache: CacheProvenance,
   expirationTtl?: number
 ): Promise<void> {
+  void cache;
   // Preserve the most recent lastAccessedAt in case it was updated concurrently by touchHotCacheEntry.
   let lastAccessedAt = entry.lastAccessedAt;
 
@@ -399,7 +400,6 @@ export async function updateHotCacheEntryAfterRefresh(
     resource: entry.resource,
     normalizedKey: entry.normalizedKey,
     lastAccessedAt,
-    lastRefreshedAt: cache.fetchedAt,
     consecutiveRefreshFailures: 0
   };
 
@@ -443,7 +443,6 @@ export async function recordHotCacheRefreshFailure(
     resource: existing.resource,
     normalizedKey: existing.normalizedKey,
     lastAccessedAt: existing.lastAccessedAt,
-    lastRefreshedAt: existing.lastRefreshedAt,
     consecutiveRefreshFailures
   };
   await env.METAR_CACHE.put(

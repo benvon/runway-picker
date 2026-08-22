@@ -92,6 +92,7 @@ function fakeProvenance(key: string, fetchedAt: string): CacheProvenance {
     freshnessRemainingSeconds: 1800,
     servedAt: fetchedAt,
     ttlSeconds: 1800,
+    maxPayloadAgeSeconds: 5400,
     key,
     resource: 'metar'
   };
@@ -194,7 +195,6 @@ describe('touchHotCacheEntry', () => {
 
     expect(store.get(metadataKey)).toMatchObject({
       lastAccessedAt: '2026-03-06T12:05:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:00:00.000Z',
       consecutiveRefreshFailures: 2
     });
   });
@@ -412,7 +412,7 @@ describe('recordHotCacheRefreshFailure', () => {
       consecutiveRefreshFailures: 1,
       dropped: false
     });
-    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 3, consecutiveRefreshFailures: 1 });
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 4, consecutiveRefreshFailures: 1 });
 
     await updateHotCacheEntryAfterRefresh(
       env,
@@ -420,7 +420,7 @@ describe('recordHotCacheRefreshFailure', () => {
       fakeProvenance(payloadKey, '2026-03-06T12:00:00.000Z'),
       432000
     );
-    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 3, consecutiveRefreshFailures: 0 });
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 4, consecutiveRefreshFailures: 0 });
 
     await recordHotCacheRefreshFailure(env, entry, 432000);
     await recordHotCacheRefreshFailure(env, entry, 432000);

@@ -31,6 +31,7 @@ Successful API responses include a `cache` object with:
 - `ageSeconds`
 - `fetchedAt`
 - `expiresAt`
+- `maxPayloadAgeSeconds` (the hard validity horizon for the resource)
 - `freshnessRemainingSeconds` (whole seconds remaining, capped to the resource policy TTL)
 - `servedAt`
 - `ttlSeconds`
@@ -51,6 +52,11 @@ This is independent from its 30-minute fresh TTL and stale-on-error behavior: at
 90 minutes the Worker fails closed, removes payload copies from KV and edge cache
 when possible, and never returns stale weather. Hot-queue metadata is demand state,
 not payload state, and remains available for a later scheduled recovery attempt.
+
+The cache engine, not resource adapters, writes authoritative envelope metadata.
+On every edge or KV read it validates the envelope identity, source, policy version,
+canonical timestamps, and the configured validity horizon. Invalid or malformed copies
+are treated as misses and cleaned up best-effort without serving their data.
 
 ## Adapter model
 
@@ -84,11 +90,11 @@ Current adapters:
 
 The hot-refresh queue is only for resources whose complete refresh input can be reconstructed from a normalized ICAO key. Resource variants with different payload contracts must be modeled as distinct resources, not query-mode flags on a shared cache key.
 
-Hot metadata uses a versioned namespace (`v2:hot:*`) and stores only resource
-plus normalized key. The scheduler derives the payload key from that canonical
-identity, rather than trusting a separately persisted cache key. Older queue
-namespaces are deliberately not scanned and expire through their existing KV
-inactivity TTL.
+Hot metadata uses a versioned namespace (`v2:hot:*`) and stores only resource,
+normalized key, demand time, and scheduled failure state. It never stores a payload
+refresh timestamp: scheduler due state is derived from the validated payload envelope.
+Older queue records are read lazily and rewritten to the current schema on their next
+metadata update.
 
 ## Adding a new resource
 

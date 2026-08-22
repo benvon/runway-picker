@@ -87,6 +87,7 @@ export interface CacheProvenance {
   freshnessRemainingSeconds: number;
   servedAt: string;
   ttlSeconds: number;
+  maxPayloadAgeSeconds: number;
   key: string;
   resource: string;
 }
