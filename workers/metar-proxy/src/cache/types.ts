@@ -139,5 +139,7 @@ export interface CacheEngineInput<TInput, TUpstream, TData> {
   request: Request;
   env: CacheEngineEnv;
   edgeCache?: EdgeCacheLike;
+  /** Injectable clock for cache-operation timing tests. */
+  clock?: () => Date;
   now?: Date;
 }

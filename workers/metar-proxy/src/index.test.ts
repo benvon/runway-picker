@@ -476,6 +476,55 @@ describe('metar worker', () => {
     });
   });
 
+  it('does not emit cache lifetime after a delayed KV read passes record expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-03T12:00:00.000Z'));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('provider unavailable')));
+    const kv = new MemoryKv();
+    const fetchedAt = new Date('2026-03-03T11:30:05.000Z');
+    kv.seed('v1:metar:KMCI', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KMCI',
+      data: {
+        icao: 'KMCI',
+        metarRaw: 'METAR KMCI 021953Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: {
+          raw: '11010KT',
+          directionType: 'fixed',
+          directionDegTrue: 110,
+          directionVariation: null,
+          speedKt: 10,
+          gustKt: null
+        },
+        source: 'aviationweather',
+        fetchedAt: fetchedAt.toISOString(),
+        observedAt: fetchedAt.toISOString()
+      },
+      cacheMeta: {
+        fetchedAt: fetchedAt.toISOString(),
+        expiresAt: '2026-03-03T12:00:05.000Z',
+        policyVersion: 'metar-v2',
+        source: 'upstream'
+      }
+    });
+    const get = kv.get.bind(kv);
+    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
+      vi.setSystemTime(new Date('2026-03-03T12:00:06.000Z'));
+      return get(key, type);
+    });
+
+    const response = await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), {
+      METAR_CACHE: kv
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    await expect(response.json()).resolves.toMatchObject({
+      cache: { status: 'stale_on_error', freshnessRemainingSeconds: 0 }
+    });
+  });
+
   it('returns variable wind with non-zero speed using structured upstream fields', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KARR', { wdir: 'VRB', wspd: 3 })])));
 

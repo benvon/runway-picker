@@ -1,4 +1,5 @@
 import { CacheEngineError, getOrRefreshCached } from './cache/engine';
+import { provenanceAtResponseTime } from './cache/freshness';
 import {
   deleteHotCacheEntryAndPayload,
   listHotCacheQueueEntries,
@@ -118,15 +119,20 @@ function shouldIncludeDebug(env: CacheEngineEnv): boolean {
 }
 
 function buildSuccessCacheControl(cache: CacheProvenance | undefined): string {
-  if (!cache || cache.freshnessRemainingSeconds <= 0) {
+  if (!cache) {
     return 'no-store';
   }
 
-  if (cache.status === 'stale_while_refresh' || cache.status === 'stale_on_error') {
+  const responseCache = provenanceAtResponseTime(cache);
+  if (
+    responseCache.freshnessRemainingSeconds <= 0 ||
+    responseCache.status === 'stale_while_refresh' ||
+    responseCache.status === 'stale_on_error'
+  ) {
     return 'no-store';
   }
 
-  const sharedMaxAge = cache.freshnessRemainingSeconds;
+  const sharedMaxAge = responseCache.freshnessRemainingSeconds;
   return `public, max-age=${Math.min(60, sharedMaxAge)}, s-maxage=${sharedMaxAge}`;
 }
 
@@ -158,9 +164,14 @@ function withApiHeaders(status: number, options: ResponseOptions): Headers {
 }
 
 function buildJsonResponse(payload: unknown, status: number, options: ResponseOptions): Response {
-  return Response.json(payload, {
+  const responseCache = options.cache ? provenanceAtResponseTime(options.cache) : undefined;
+  const responsePayload = responseCache && payload && typeof payload === 'object'
+    ? { ...(payload as Record<string, unknown>), cache: responseCache }
+    : payload;
+
+  return Response.json(responsePayload, {
     status,
-    headers: withApiHeaders(status, options)
+    headers: withApiHeaders(status, { ...options, cache: responseCache })
   });
 }
 

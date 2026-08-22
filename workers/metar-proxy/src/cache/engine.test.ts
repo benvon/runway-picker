@@ -294,6 +294,73 @@ describe('cache engine', () => {
     expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
   });
 
+  it('rechecks freshness after a delayed KV read before promoting a cache record', async () => {
+    let now = new Date('2026-03-03T12:00:00.000Z');
+    const adapter = buildAdapter({
+      fetchUpstream: vi.fn().mockResolvedValue('refreshed-value'),
+      validate: (value) => ({ value, fetchedAt: now.toISOString() })
+    });
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'near-expiry-value', '2026-03-03T11:59:35.000Z', 30)
+    );
+    const get = kv.get.bind(kv);
+    vi.spyOn(kv, 'get').mockImplementation(async (key) => {
+      now = new Date('2026-03-03T12:00:06.000Z');
+      return get(key);
+    });
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      clock: () => now
+    });
+
+    expect(result.payload.value).toBe('refreshed-value');
+    expect(result.cache.status).toBe('upstream_refresh');
+    const promoted = await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Aalpha'));
+    expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=30, s-maxage=30');
+  });
+
+  it('does not return a KV hit that expires while edge promotion is pending', async () => {
+    const adapter = buildAdapter({ fetchUpstream: vi.fn().mockRejectedValue(new Error('upstream unavailable')) });
+    const kv = new MemoryKv();
+    let now = new Date('2026-03-03T12:00:00.000Z');
+    let promoted: Response | undefined;
+    const edge: EdgeCacheLike = {
+      match: async () => undefined,
+      put: async (_request, response) => {
+        promoted = response.clone();
+        now = new Date('2026-03-03T12:00:06.000Z');
+      }
+    };
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'near-expiry-value', '2026-03-03T11:59:35.000Z', 30)
+    );
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      clock: () => now
+    });
+
+    expect(result.cache.status).toBe('stale_on_error');
+    expect(result.cache.freshnessRemainingSeconds).toBe(0);
+    expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
+    expect(Date.parse(promoted?.headers.get('Date') ?? '') + 5_000).toBeLessThanOrEqual(
+      Date.parse('2026-03-03T12:00:05.000Z')
+    );
+  });
+
   it('clamps sub-second and future cached expiries without extending edge-cache lifetime', async () => {
     const adapter = buildAdapter({ fetchUpstream: vi.fn().mockResolvedValue('not-used') });
     const now = new Date('2026-03-03T12:00:00.000Z');
