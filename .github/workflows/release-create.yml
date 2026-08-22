@@ -77,6 +77,9 @@ jobs:
         with:
           github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
           script: |
+            const { resolveTagCommitSha } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
             const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
             const compareTags = (left, right) => {
               const leftParts = semverPattern.exec(left).slice(1).map(Number);
@@ -87,6 +90,27 @@ jobs:
                 }
               }
               return 0;
+            };
+            const resolveReleaseTagCommitSha = async (tag) => {
+              let ref;
+              try {
+                ({ data: ref } = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`
+                }));
+              } catch (error) {
+                throw new Error(`Unable to resolve release tag ${tag}.`, { cause: error });
+              }
+
+              return resolveTagCommitSha(ref.object, async (tagSha) => {
+                const { data } = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: tagSha
+                });
+                return data;
+              });
             };
 
             const releases = await github.paginate(github.rest.repos.listReleases, {
@@ -101,9 +125,15 @@ jobs:
               .map((release) => release.tag_name)
               .sort(compareTags)
               .at(-1) ?? '';
-            const releaseTagAtHead = stableReleases.find(
-              (release) => release.target_commitish === process.env.HEAD_SHA
-            )?.tag_name ?? '';
+            const stableReleasesWithTagShas = await Promise.all(
+              stableReleases.map(async (release) => ({
+                release,
+                tagSha: await resolveReleaseTagCommitSha(release.tag_name)
+              }))
+            );
+            const releaseTagAtHead = stableReleasesWithTagShas.find(
+              ({ tagSha }) => tagSha === process.env.HEAD_SHA
+            )?.release.tag_name ?? '';
 
             core.setOutput('latest_tag', latestTag);
             core.setOutput('release_tag_at_head', releaseTagAtHead);
@@ -180,7 +210,6 @@ jobs:
                 });
                 release = {
                   tagName: data.tag_name,
-                  targetCommitish: data.target_commitish,
                   draft: data.draft,
                   prerelease: data.prerelease
                 };
@@ -365,7 +394,7 @@ jobs:
           RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: |
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          tag_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
           head_sha="$(git rev-parse HEAD)"
           if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then
             echo 'Release tag does not resolve to the CI-gated main commit.'
@@ -410,6 +439,9 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
+            const { resolveTagCommitSha } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
             const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
             const compareTags = (left, right) => {
               const leftParts = semverPattern.exec(left).slice(1).map(Number);
@@ -420,6 +452,27 @@ jobs:
                 }
               }
               return 0;
+            };
+            const resolveReleaseTagCommitSha = async (tag) => {
+              let ref;
+              try {
+                ({ data: ref } = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`
+                }));
+              } catch (error) {
+                throw new Error(`Unable to resolve release tag ${tag}.`, { cause: error });
+              }
+
+              return resolveTagCommitSha(ref.object, async (tagSha) => {
+                const { data } = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: tagSha
+                });
+                return data;
+              });
             };
             const [{ data: main }, { data: release }, releases] = await Promise.all([
               github.rest.repos.getBranch({
@@ -438,6 +491,7 @@ jobs:
                 per_page: 100
               })
             ]);
+            const tagSha = await resolveReleaseTagCommitSha(process.env.RELEASE_TAG);
             const latestStableTag = releases
               .filter((candidate) => !candidate.draft && !candidate.prerelease && semverPattern.test(candidate.tag_name))
               .map((candidate) => candidate.tag_name)
@@ -450,7 +504,7 @@ jobs:
             if (
               latestStableTag !== process.env.RELEASE_TAG ||
               release.tag_name !== process.env.RELEASE_TAG ||
-              release.target_commitish !== process.env.RELEASE_SHA ||
+              tagSha !== process.env.RELEASE_SHA ||
               release.draft ||
               release.prerelease
             ) {
@@ -521,7 +575,7 @@ jobs:
           RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: |
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          tag_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
           head_sha="$(git rev-parse HEAD)"
           if [ "$tag_sha" != "$RELEASE_SHA" ] || [ "$head_sha" != "$RELEASE_SHA" ]; then
             echo 'Release tag does not resolve to the CI-gated main commit.'
@@ -557,6 +611,9 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
+            const { resolveTagCommitSha } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release-state.js`
+            );
             const semverPattern = /^v(\d+)\.(\d+)\.(\d+)$/;
             const compareTags = (left, right) => {
               const leftParts = semverPattern.exec(left).slice(1).map(Number);
@@ -567,6 +624,27 @@ jobs:
                 }
               }
               return 0;
+            };
+            const resolveReleaseTagCommitSha = async (tag) => {
+              let ref;
+              try {
+                ({ data: ref } = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`
+                }));
+              } catch (error) {
+                throw new Error(`Unable to resolve release tag ${tag}.`, { cause: error });
+              }
+
+              return resolveTagCommitSha(ref.object, async (tagSha) => {
+                const { data } = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: tagSha
+                });
+                return data;
+              });
             };
             const [{ data: main }, { data: release }, releases] = await Promise.all([
               github.rest.repos.getBranch({
@@ -585,6 +663,7 @@ jobs:
                 per_page: 100
               })
             ]);
+            const tagSha = await resolveReleaseTagCommitSha(process.env.RELEASE_TAG);
             const latestStableTag = releases
               .filter((candidate) => !candidate.draft && !candidate.prerelease && semverPattern.test(candidate.tag_name))
               .map((candidate) => candidate.tag_name)
@@ -597,7 +676,7 @@ jobs:
             if (
               latestStableTag !== process.env.RELEASE_TAG ||
               release.tag_name !== process.env.RELEASE_TAG ||
-              release.target_commitish !== process.env.RELEASE_SHA ||
+              tagSha !== process.env.RELEASE_SHA ||
               release.draft ||
               release.prerelease
             ) {

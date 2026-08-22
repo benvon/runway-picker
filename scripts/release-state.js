@@ -32,7 +32,49 @@ export function assertCurrentProtectedMainTarget(state) {
 }
 
 /**
- * @typedef {{tagName: string, targetCommitish: string, draft: boolean, prerelease: boolean}} ExistingRelease
+ * Resolve a lightweight or annotated Git tag object to its immutable commit
+ * target. Release target_commitish is deliberately not considered here: it is
+ * creation metadata and may be a branch name.
+ *
+ * @param {{type: string, sha: string}} object
+ * @param {(tagSha: string) => Promise<{object: {type: string, sha: string}}> } getAnnotatedTag
+ */
+export async function resolveTagCommitSha(object, getAnnotatedTag) {
+  const visitedTagObjects = new Set();
+  let currentObject = object;
+
+  while (currentObject.type === 'tag') {
+    if (!SHA_PATTERN.test(currentObject.sha)) {
+      throw new Error('Annotated tag object must contain a full lowercase Git SHA.');
+    }
+
+    if (visitedTagObjects.has(currentObject.sha)) {
+      throw new Error('Annotated tag object graph contains a cycle.');
+    }
+    visitedTagObjects.add(currentObject.sha);
+
+    let annotatedTag;
+    try {
+      annotatedTag = await getAnnotatedTag(currentObject.sha);
+    } catch (error) {
+      throw new Error(`Unable to resolve annotated tag object ${currentObject.sha}.`, { cause: error });
+    }
+
+    if (!annotatedTag?.object) {
+      throw new Error(`Annotated tag object ${currentObject.sha} has no target object.`);
+    }
+    currentObject = annotatedTag.object;
+  }
+
+  if (currentObject.type !== 'commit' || !SHA_PATTERN.test(currentObject.sha)) {
+    throw new Error('Release tag must resolve to a full lowercase Git commit SHA.');
+  }
+
+  return currentObject.sha;
+}
+
+/**
+ * @typedef {{tagName: string, draft: boolean, prerelease: boolean, targetCommitish?: string}} ExistingRelease
  */
 
 /**
@@ -81,7 +123,6 @@ export function reconcileReleaseState(state) {
 
     if (
       state.release.tagName !== state.nextTag ||
-      state.release.targetCommitish !== state.targetSha ||
       state.release.draft ||
       state.release.prerelease
     ) {

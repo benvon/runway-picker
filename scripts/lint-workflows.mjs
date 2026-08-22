@@ -180,8 +180,11 @@ for (const file of files) {
     if (
       !/reconcileReleaseState/.test(content) ||
       !/assertCurrentProtectedMainTarget/.test(content) ||
+      !/resolveTagCommitSha/.test(content) ||
+      !/github\.rest\.git\.getRef/.test(content) ||
+      !/github\.rest\.git\.getTag/.test(content) ||
       !/git', \['rev-list', '-n', '1', `refs\/tags\/\$\{nextTag\}`\]/.test(content) ||
-      !/targetCommitish: data\.target_commitish/.test(content)
+      !/tagSha !== process\.env\.RELEASE_SHA/.test(content)
     ) {
       errors.push(`${filePath}: release reconciliation must preserve exact-SHA collision checks`);
     }
