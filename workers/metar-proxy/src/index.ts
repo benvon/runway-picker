@@ -350,12 +350,11 @@ function selectRoundRobinDueEntries(
   maxItems: number
 ): HotCacheQueueEntry[] {
   const remaining = {
-    metar: [...dueEntries.metar].sort(
-      (left, right) => readIsoTimestamp(left.lastAccessedAt) - readIsoTimestamp(right.lastAccessedAt)
-    ),
-    airport: [...dueEntries.airport].sort(
-      (left, right) => readIsoTimestamp(left.lastAccessedAt) - readIsoTimestamp(right.lastAccessedAt)
-    )
+    // The coordinator already returns each resource in circular continuation
+    // order. Re-sorting here would move the wrapped prefix back to the front
+    // and could repeatedly spend the bounded attempt budget on old entries.
+    metar: [...dueEntries.metar],
+    airport: [...dueEntries.airport]
   };
   const queues = [remaining.metar, remaining.airport];
   const selected: HotCacheQueueEntry[] = [];

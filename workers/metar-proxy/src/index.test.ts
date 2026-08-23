@@ -321,7 +321,7 @@ describe('cache refresh helpers', () => {
     expect(__cacheRefreshHelpers.isRefreshDue(invalidTimestamp, nowMs, config)).toBe(true);
   });
 
-  it('selects due work oldest-first within each resource and round-robins between resources', () => {
+  it('preserves coordinator order within each resource while round-robining between resources', () => {
     const entry = (resource: 'metar' | 'airport', normalizedKey: string, lastRefreshedAt: string): HotCacheQueueEntry => ({
       schemaVersion: 2,
       resource,
@@ -346,6 +346,27 @@ describe('cache refresh helpers', () => {
       'metar:KOLD',
       'airport:KORD'
     ]);
+  });
+
+  it('does not move a wrapped coordinator prefix ahead of the continuation position', () => {
+    const entry = (normalizedKey: string, lastAccessedAt: string): HotCacheQueueEntry => ({
+      schemaVersion: 5,
+      resource: 'metar',
+      normalizedKey,
+      cacheKey: `v1:metar:${normalizedKey}`,
+      lastAccessedAt,
+      metadataKey: `scheduler:metar:${normalizedKey}`
+    });
+
+    const selected = __cacheRefreshHelpers.selectRoundRobinDueEntries({
+      metar: [
+        entry('KAFTER', '2026-03-07T12:00:00.000Z'),
+        entry('KWRAPPED', '2026-03-07T10:00:00.000Z')
+      ],
+      airport: []
+    }, 2);
+
+    expect(selected.map((item) => item.normalizedKey)).toEqual(['KAFTER', 'KWRAPPED']);
   });
 
   it('keeps active entries and evicts inactive entries in keepOrEvictQueueEntry', async () => {
