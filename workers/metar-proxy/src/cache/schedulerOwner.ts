@@ -98,6 +98,7 @@ class SchedulerState {
   }
   private cleanSql(now: number): void {
     this.rows('DELETE FROM scheduler_demands WHERE expires_at_ms <= ?', now);
+    this.rows('DELETE FROM scheduler_demand_versions WHERE NOT EXISTS (SELECT 1 FROM scheduler_demands WHERE scheduler_demands.resource = scheduler_demand_versions.resource AND scheduler_demands.normalized_key = scheduler_demand_versions.normalized_key)');
     this.rows('DELETE FROM scheduler_run_items WHERE run_id IN (SELECT id FROM scheduler_runs WHERE status = ? AND completed_at_ms <= ?)', 'completed', now - RUN_RETENTION_MS);
     this.rows('DELETE FROM scheduler_run_progress WHERE run_id IN (SELECT id FROM scheduler_runs WHERE status = ? AND completed_at_ms <= ?)', 'completed', now - RUN_RETENTION_MS);
     this.rows('DELETE FROM scheduler_run_items WHERE run_id IN (SELECT id FROM scheduler_runs WHERE status = ? AND expires_at_ms <= ?)', 'active', now);
