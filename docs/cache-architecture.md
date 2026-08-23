@@ -109,7 +109,8 @@ A cron runs every 15 minutes. It obtains the named scheduler lease from
 6. renews its token-bound scheduler lease after each processed entry, commits
    cursor movement and typed outcomes atomically, then releases ownership; and
 7. asks the Durable Object to process pending demand removals. The coordinator
-   serializes the KV deletion with all later client demand writes.
+   serializes the full scheduler protocol, including KV demand deletion, with
+   later client demand writes.
 
 The initial lease is 300 seconds, which covers the default maximum of 25
 sequential ten-second attempts. Each processed entry renews a 60-second lease
@@ -121,8 +122,11 @@ upstream attempt, including METAR station validation, receives the same
 ## Failure and recovery semantics
 
 An actual upstream refresh resets that entry's failure count. A stale-on-error
-result or thrown upstream failure increments it. Client accesses and cache hits
-are neutral and never change the count.
+result or a failure after a provider attempt increments it. Client accesses and
+cache hits are neutral and never change the count. Cache reads/writes,
+single-flight coordination, and other scheduler infrastructure failures abort
+the run instead: they do not increment a provider-failure count or advance its
+cursors.
 
 After three consecutive upstream failures, the Durable Object persists a
 pending-dequeue intent while retaining the failure state. The coordinator itself

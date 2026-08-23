@@ -407,10 +407,31 @@ async function handleSchedulerRequest(
 }
 
 export class CacheSingleFlightCoordinator {
+  // Scheduler state is shared by demand touches, run commits, and dequeues.
+  // Unlike Durable Object storage, the hot-demand projection lives in external
+  // KV and opens the input gate while awaited. Serialize the scheduler protocol
+  // explicitly so a later request cannot overwrite a transition in progress.
+  private schedulerRequestTail: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly state: DurableObjectStateLike,
     private readonly env?: Pick<CacheEngineEnv, 'METAR_CACHE'>
   ) {}
+
+  private async runSerializedSchedulerRequest(operation: () => Promise<Response>): Promise<Response> {
+    const previous = this.schedulerRequestTail;
+    let release: (() => void) | undefined;
+    this.schedulerRequestTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+    }
+  }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -428,7 +449,9 @@ export class CacheSingleFlightCoordinator {
     }
 
     if (url.pathname.startsWith('/scheduler/')) {
-      return handleSchedulerRequest(request, this.state.storage, url.pathname, this.env?.METAR_CACHE);
+      return this.runSerializedSchedulerRequest(() =>
+        handleSchedulerRequest(request, this.state.storage, url.pathname, this.env?.METAR_CACHE)
+      );
     }
 
     return Response.json({ error: 'Not found.' }, { status: 404 });

@@ -1,4 +1,9 @@
-import { CacheEngineError, getOrRefreshCached, inspectCachedPayloadForMaintenance } from './cache/engine';
+import {
+  CacheEngineError,
+  getOrRefreshCached,
+  inspectCachedPayloadForMaintenance,
+  isUpstreamAttemptError
+} from './cache/engine';
 import { provenanceAtResponseTime } from './cache/freshness';
 import {
   deleteHotCacheEntryAndPayload,
@@ -565,9 +570,12 @@ async function processScheduledRefreshEntry(
   let refreshedCache: CacheProvenance;
   try {
     refreshedCache = await refreshQueueEntry(entry, env);
-  } catch {
-    console.error('Scheduled cache refresh upstream attempt failed.', { resource: entry.resource });
-    return 'upstream_failed';
+  } catch (error) {
+    if (isUpstreamAttemptError(error)) {
+      console.error('Scheduled cache refresh upstream attempt failed.', { resource: entry.resource });
+      return 'upstream_failed';
+    }
+    throw error;
   }
   if (refreshedCache.status === 'stale_on_error') {
     console.error('Scheduled cache refresh upstream attempt fell back to stale data.', { resource: entry.resource });

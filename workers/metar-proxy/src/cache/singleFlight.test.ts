@@ -36,6 +36,7 @@ class MemoryStorage {
 
 class MemoryKv {
   private readonly values = new Map<string, unknown>();
+  beforeDelete: ((key: string) => Promise<void>) | undefined;
 
   async get(key: string, type: 'json' | 'text'): Promise<unknown> {
     const value = this.values.get(key) ?? null;
@@ -48,6 +49,7 @@ class MemoryKv {
   }
 
   async delete(key: string): Promise<void> {
+    await this.beforeDelete?.(key);
     this.values.delete(key);
   }
 
@@ -58,6 +60,7 @@ class MemoryKv {
 
 class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
   private readonly storage = new MemoryStorage();
+  private coordinator: CacheSingleFlightCoordinator | undefined;
 
   constructor(private readonly cache?: MemoryKv) {}
 
@@ -67,7 +70,7 @@ class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
 
   get(_id: unknown): { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> } {
     void _id;
-    const coordinator = new CacheSingleFlightCoordinator(
+    this.coordinator ??= new CacheSingleFlightCoordinator(
       { storage: this.storage },
       this.cache ? { METAR_CACHE: this.cache } : undefined
     );
@@ -81,7 +84,7 @@ class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
                 headers: init?.headers,
                 body: init?.body
               });
-        return coordinator.fetch(request);
+        return this.coordinator?.fetch(request) ?? Promise.reject(new Error('Coordinator unavailable.'));
       }
     };
   }
@@ -258,8 +261,8 @@ describe('scheduler coordinator protocol', () => {
     const cache = new MemoryKv();
     const namespace = new InMemoryCoordinatorNamespace(cache);
     const identity = 'v2:hot:metar:KORD';
-    const oldAccess = '2026-03-06T12:00:00.000Z';
-    const newAccess = '2026-03-06T12:05:00.000Z';
+    const oldAccess = new Date().toISOString();
+    const newAccess = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
     await expect(recordSchedulerDemand(namespace, {
       resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: oldAccess, expirationTtl: 3600
@@ -282,6 +285,46 @@ describe('scheduler coordinator protocol', () => {
     await expect(commitSchedulerRun(namespace, {
       runId: afterReenqueue?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: []
     })).resolves.toEqual({ dequeueIdentities: [] });
+  });
+
+  it('serializes a pending dequeue with a concurrent demand touch', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:metar:KORD';
+    const oldAccess = new Date().toISOString();
+    const newAccess = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    let startDelete: (() => void) | undefined;
+    const deleteStarted = new Promise<void>((resolve) => { startDelete = resolve; });
+    let finishDelete: (() => void) | undefined;
+    const deleteMayFinish = new Promise<void>((resolve) => { finishDelete = resolve; });
+    cache.beforeDelete = async (key) => {
+      if (key === identity) {
+        startDelete?.();
+        await deleteMayFinish;
+      }
+    };
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: oldAccess, expirationTtl: 3600
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess }]
+      });
+    }
+
+    const dequeue = processSchedulerDequeues(namespace);
+    await deleteStarted;
+    const touch = recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: newAccess, expirationTtl: 3600
+    });
+    finishDelete?.();
+
+    await expect(dequeue).resolves.toBe(true);
+    await expect(touch).resolves.toBe(true);
+    expect(cache.read<{ lastAccessedAt: string }>(identity)).toMatchObject({ lastAccessedAt: newAccess });
   });
 
   it('preserves ordinary failure history when a client refreshes demand', async () => {

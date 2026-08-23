@@ -48,6 +48,24 @@ export class CacheEngineError extends Error {
   }
 }
 
+// The scheduler must distinguish a provider failure from a failure in its own
+// cache/coordination path. Keep that classification private to this module so
+// API callers continue to receive the adapter's original error.
+const upstreamAttemptErrors = new WeakSet<object>();
+
+function markUpstreamAttemptError(error: unknown): Error {
+  const normalized = error instanceof Error
+    ? error
+    : new CacheEngineError('Unexpected cache refresh failure.', 500);
+  upstreamAttemptErrors.add(normalized);
+  return normalized;
+}
+
+/** True only when the provider fetch or provider-payload validation was attempted. */
+export function isUpstreamAttemptError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && upstreamAttemptErrors.has(error);
+}
+
 export type CacheMaintenanceInspection =
   | { kind: 'missing' }
   | { kind: 'valid'; fetchedAt: string }
@@ -678,8 +696,14 @@ async function refreshFromUpstream<TInput, TUpstream, TData>(
   edgeCache: EdgeCacheLike | undefined,
   clock: () => Date
 ): Promise<CacheEngineResult<TData>> {
-  const upstreamPayload = await adapter.fetchUpstream(input, context);
-  const validatedData = await adapter.validate(upstreamPayload, input, context);
+  let upstreamPayload: TUpstream;
+  let validatedData: TData;
+  try {
+    upstreamPayload = await adapter.fetchUpstream(input, context);
+    validatedData = await adapter.validate(upstreamPayload, input, context);
+  } catch (error) {
+    throw markUpstreamAttemptError(error);
+  }
   const envelope = toEnvelope(adapter, validatedData, cacheKey, clock(), upstreamPayload);
   const retentionTtl = Math.min(
     adapter.policy.maxPayloadAgeSeconds,
@@ -716,6 +740,12 @@ async function refreshAsLeader<TInput, TUpstream, TData>(
   try {
     return await refreshFromUpstream(adapter, cacheKey, input, context, env, edgeCache, clock);
   } catch (error) {
+    // KV writes, coordinator timeouts, and other cache-path failures must
+    // propagate. A scheduler run will abort rather than treating them as a
+    // provider failure and eventually removing active demand.
+    if (!isUpstreamAttemptError(error)) {
+      throw error;
+    }
     const negativeEnvelope = toNegativeEnvelope(adapter, error, cacheKey, clock());
     if (negativeEnvelope) {
       await Promise.allSettled([

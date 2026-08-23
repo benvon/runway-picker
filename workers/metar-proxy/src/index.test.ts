@@ -26,12 +26,14 @@ const schedulerCoordinators = new WeakMap<object, CacheEngineEnv['CACHE_COORDINA
 
 function schedulerCoordinator(env: CacheEngineEnv): NonNullable<CacheEngineEnv['CACHE_COORDINATOR']> {
   const storage = new CoordinatorStorage();
+  let coordinator: CacheSingleFlightCoordinator | undefined;
   return {
     idFromName: (name: string) => name,
     get: () => ({
       fetch: async (input, init) => {
         const request = input instanceof Request ? input : new Request(input.toString(), init);
-        return new CacheSingleFlightCoordinator({ storage }, env).fetch(request);
+        coordinator ??= new CacheSingleFlightCoordinator({ storage }, env);
+        return coordinator.fetch(request);
       }
     })
   };
@@ -2057,6 +2059,7 @@ describe('airport worker', () => {
   });
 
   it('scheduled refresh does not evict entry that was recently accessed concurrently', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
     const kv = new MemoryKv();
     // Entry appears inactive in the initial snapshot (lastAccessedAt > inactivity TTL ago)…
     kv.seed('v2:hot:metar:KORD', {
@@ -2093,6 +2096,43 @@ describe('airport worker', () => {
 
     expect(kv.has('v2:hot:metar:KORD')).toBe(true);
     expect(kv.has('v1:metar:KORD')).toBe(true);
+  });
+
+  it('aborts the scheduler run without advancing its cursor when the cache path fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const kv = new MemoryKv();
+    for (let index = 0; index < 21; index += 1) {
+      const normalizedKey = `K${String(index).padStart(3, '0')}`;
+      seedHotQueueEntry(kv, {
+        resource: 'metar',
+        normalizedKey,
+        cacheKey: `v1:metar:${normalizedKey}`,
+        lastAccessedAt: '2026-03-06T11:50:00.000Z',
+        lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+      });
+    }
+    const now = new Date('2026-03-06T12:00:00.000Z');
+
+    await runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now);
+
+    const originalGet = kv.get.bind(kv);
+    const getSpy = vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
+      if (key === 'v1:metar:K020') {
+        throw new Error('temporary payload read failure');
+      }
+      return originalGet(key, type);
+    });
+
+    await expect(
+      runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now)
+    ).rejects.toThrow('temporary payload read failure');
+
+    getSpy.mockRestore();
+    const listSpy = vi.spyOn(kv, 'list');
+    await runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now);
+    expect(listSpy.mock.calls.find(([options]) => options?.prefix === 'v2:hot:metar:')?.[0]?.cursor).toBe('20');
+    consoleErrorSpy.mockRestore();
   });
 
   it('scheduled refresh skips eviction when entry was already deleted before the re-read', async () => {

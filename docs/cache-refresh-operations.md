@@ -45,11 +45,12 @@ making another tuning change. Changes require a Worker deployment.
   without committing progress.
 - A cache hit or contention result is neutral. A true upstream refresh clears
   that entry's failure count; stale-on-error and failed upstream work increment
-  it.
+  it. Cache/KV and coordinator failures abort the run without incrementing the
+  count or advancing its cursor.
 - On the third consecutive failure, the demand record is queued for removal.
   Its payload remains under normal cache policy. The coordinator performs the
   KV deletion itself, retains the removal intent until KV confirms it, and
-  serializes a later client re-enqueue ahead of any stale removal attempt.
+  serializes the deletion transition with later client re-enqueues.
   A transient delete failure is retried rather than resetting the count.
 - Invalid JSON or malformed demand metadata is removed/skipped. A genuine KV
   list/read failure stops the run and leaves the prior cursor in place.
