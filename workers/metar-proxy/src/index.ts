@@ -17,9 +17,11 @@ import {
 import { getAdapterOrThrow } from './cache/registry';
 import {
   abortSchedulerRun,
+  acknowledgeSchedulerDequeues,
   beginSchedulerRun,
   CacheSingleFlightCoordinator,
   commitSchedulerRun,
+  renewSchedulerRun,
   type SchedulerMaintenanceOutcome
 } from './cache/singleFlight';
 import type { CacheEngineEnv, CacheProvenance } from './cache/types';
@@ -586,7 +588,9 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
   if (!env.METAR_CACHE.list) {
     return;
   }
-  const lease = await beginSchedulerRun(env.CACHE_COORDINATOR, 60);
+  // A bounded 300-second run lease covers the default 25 sequential 10-second
+  // upstream attempts, while each attempt remains strictly shorter than the lease.
+  const lease = await beginSchedulerRun(env.CACHE_COORDINATOR, 300);
   if (!lease) {
     console.error('Scheduled cache refresh coordinator unavailable or busy.');
     return;
@@ -623,6 +627,9 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
     const outcome = await processScheduledRefreshEntry(env, entry);
     outcomes.push({ identity: entry.metadataKey, outcome, lastAccessedAt: entry.lastAccessedAt });
     if (outcome !== 'neutral') attemptedRefreshes += 1;
+    if (!(await renewSchedulerRun(env.CACHE_COORDINATOR, lease.runId, 60))) {
+      throw new Error('Scheduled cache refresh coordinator lease renewal failed.');
+    }
   }
   const committed = await commitSchedulerRun(env.CACHE_COORDINATOR, {
     runId: lease.runId,
@@ -634,9 +641,18 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
     inactivityTtlSeconds: config.inactivityTtlSeconds
   });
   if (!committed) throw new Error('Scheduled cache refresh coordinator commit failed.');
+  const acknowledgedDequeues: string[] = [];
   for (const identity of committed.dequeueIdentities) {
-    if (env.METAR_CACHE.delete) await env.METAR_CACHE.delete(identity);
+    try {
+      if (env.METAR_CACHE.delete) {
+        await env.METAR_CACHE.delete(identity);
+        acknowledgedDequeues.push(identity);
+      }
+    } catch (error) {
+      console.error('Scheduled cache refresh demand deletion will retry.', { error });
+    }
   }
+  if (acknowledgedDequeues.length > 0) await acknowledgeSchedulerDequeues(env.CACHE_COORDINATOR, lease.runId, acknowledgedDequeues);
   if (env.METAR_CACHE.delete) {
     await Promise.allSettled([
       env.METAR_CACHE.delete('v2:control:hot-refresh-cursor:metar'),

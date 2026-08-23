@@ -3,8 +3,10 @@ import {
   CacheSingleFlightCoordinator,
   acquireSingleFlightLease,
   abortSchedulerRun,
+  acknowledgeSchedulerDequeues,
   beginSchedulerRun,
   commitSchedulerRun,
+  renewSchedulerRun,
   releaseSingleFlightLease
 } from './singleFlight';
 import type { DurableObjectNamespaceLike } from './types';
@@ -201,12 +203,55 @@ describe('scheduler coordinator protocol', () => {
     }
   });
 
+  it('retains a pending dequeue until the worker acknowledges successful KV deletion', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const identity = 'v2:hot:metar:KORD';
+    let thirdRunId = '';
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      thirdRunId = lease?.runId ?? '';
+      await commitSchedulerRun(namespace, {
+        runId: thirdRunId, cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: new Date().toISOString() }]
+      });
+    }
+    const retryLease = await beginSchedulerRun(namespace, 30);
+    const retry = await commitSchedulerRun(namespace, { runId: retryLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: [] });
+    expect(retry?.dequeueIdentities).toContain(identity);
+    await expect(acknowledgeSchedulerDequeues(namespace, retryLease?.runId ?? '', [identity])).resolves.toBe(true);
+    const afterAck = await beginSchedulerRun(namespace, 30);
+    expect(afterAck).not.toBeNull();
+    await expect(commitSchedulerRun(namespace, { runId: afterAck?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: [] })).resolves.toEqual({ dequeueIdentities: [] });
+    void thirdRunId;
+  });
+
   it('abort releases a run without committing cursor or outcome state', async () => {
     const namespace = new InMemoryCoordinatorNamespace();
     const lease = await beginSchedulerRun(namespace, 30);
     await abortSchedulerRun(namespace, lease?.runId ?? '');
     const next = await beginSchedulerRun(namespace, 30);
     expect(next?.cursors).toEqual({});
+  });
+
+  it('renews only the active run token and rejects renewal after abort', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const lease = await beginSchedulerRun(namespace, 1);
+    await expect(renewSchedulerRun(namespace, lease?.runId ?? '', 30)).resolves.toBe(true);
+    await expect(renewSchedulerRun(namespace, 'wrong-token', 30)).resolves.toBe(false);
+    await abortSchedulerRun(namespace, lease?.runId ?? '');
+    await expect(renewSchedulerRun(namespace, lease?.runId ?? '', 30)).resolves.toBe(false);
+  });
+
+  it('keeps a sequential seven-attempt run eligible to commit after repeated renewals', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const lease = await beginSchedulerRun(namespace, 1);
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      await expect(renewSchedulerRun(namespace, lease?.runId ?? '', 1)).resolves.toBe(true);
+    }
+    await expect(commitSchedulerRun(namespace, {
+      runId: lease?.runId ?? '', cursors: { metar: 'after-seven' }, inactivityTtlSeconds: 60,
+      outcomes: Array.from({ length: 7 }, (_, attempt) => ({ identity: `v2:hot:metar:K${attempt}`, outcome: 'upstream_failed' as const, lastAccessedAt: new Date().toISOString() }))
+    })).resolves.toEqual({ dequeueIdentities: [] });
   });
 
   it('fails closed when the scheduler coordinator binding is unavailable', async () => {

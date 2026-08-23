@@ -128,8 +128,9 @@ function buildStationInfoUrl(icao: string): string {
   return url.toString();
 }
 
-async function stationExistsForIcao(icao: string): Promise<boolean> {
+async function stationExistsForIcao(icao: string, signal?: AbortSignal): Promise<boolean> {
   const response = await fetch(buildStationInfoUrl(icao), {
+    signal,
     headers: {
       'User-Agent': USER_AGENT,
       Accept: 'application/json'
@@ -632,11 +633,11 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
       throw new MetarWorkerError('METAR provider returned an invalid payload.', 502, 'PROVIDER_PAYLOAD_INVALID');
     }
   },
-  validate: async (upstream, input) => {
+  validate: async (upstream, input, ctx) => {
     const icao = normalizeIcao(input.icao);
     const report = toMetarReport(upstream);
     if (!report) {
-      const stationExists = await stationExistsForIcao(icao);
+      const stationExists = await stationExistsForIcao(icao, ctx.signal);
       if (!stationExists) {
         throw new MetarWorkerError(`ICAO code ${icao} was not found. Check the code and try again.`, 404, 'ICAO_NOT_FOUND');
       }

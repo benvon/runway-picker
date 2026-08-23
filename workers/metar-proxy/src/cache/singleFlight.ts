@@ -47,6 +47,7 @@ interface SchedulerState {
   schemaVersion: 1;
   cursors: Partial<Record<SchedulerResource, string>>;
   failures: Record<string, SchedulerFailureRecord>;
+  pendingDequeues: Record<string, true>;
   activeRun?: SchedulerRunRecord;
   completedRuns: Record<string, string[]>;
 }
@@ -59,6 +60,8 @@ interface CommitRunBody {
   inactivityTtlSeconds: number;
 }
 interface AbortRunBody { runId: string; }
+interface RenewRunBody { runId: string; holdSeconds: number; }
+interface AcknowledgeDequeueBody { runId: string; identities: string[]; }
 
 export interface SchedulerRunLease {
   runId: string;
@@ -157,11 +160,11 @@ async function handleRelease(
 
 function readSchedulerState(raw: unknown): SchedulerState {
   if (!raw || typeof raw !== 'object') {
-    return { schemaVersion: 1, cursors: {}, failures: {}, completedRuns: {} };
+    return { schemaVersion: 1, cursors: {}, failures: {}, pendingDequeues: {}, completedRuns: {} };
   }
   const candidate = raw as Partial<SchedulerState>;
   if (candidate.schemaVersion !== 1 || !candidate.cursors || !candidate.failures || !candidate.completedRuns) {
-    return { schemaVersion: 1, cursors: {}, failures: {}, completedRuns: {} };
+    return { schemaVersion: 1, cursors: {}, failures: {}, pendingDequeues: {}, completedRuns: {} };
   }
   const cursors: Partial<Record<SchedulerResource, string>> = {};
   for (const resource of ['metar', 'airport'] as const) {
@@ -174,6 +177,7 @@ function readSchedulerState(raw: unknown): SchedulerState {
     schemaVersion: 1,
     cursors,
     failures: candidate.failures,
+    pendingDequeues: candidate.pendingDequeues ?? {},
     completedRuns: candidate.completedRuns,
     activeRun: candidate.activeRun
   };
@@ -212,6 +216,25 @@ async function handleSchedulerRequest(request: Request, storage: DurableObjectSt
     }
     return new Response(null, { status: 204 });
   }
+  if (pathname === '/scheduler/renew') {
+    const holdSeconds = readHoldSeconds(raw);
+    if (state.activeRun?.id !== runId || !Number.isFinite(holdSeconds)) return Response.json({ error: 'Run is not active.' }, { status: 409 });
+    state.activeRun.expiresAtMs = now + Math.max(1, holdSeconds) * 1000;
+    await storage.put(SCHEDULER_STATE_KEY, state);
+    return new Response(null, { status: 204 });
+  }
+  if (pathname === '/scheduler/ack-dequeues') {
+    const body = raw as Partial<AcknowledgeDequeueBody>;
+    if (!state.completedRuns[runId] || !Array.isArray(body.identities)) return Response.json({ error: 'Run is not committed.' }, { status: 409 });
+    for (const identity of body.identities) {
+      if (typeof identity === 'string' && state.pendingDequeues[identity]) {
+        delete state.pendingDequeues[identity];
+        delete state.failures[identity];
+      }
+    }
+    await storage.put(SCHEDULER_STATE_KEY, state);
+    return new Response(null, { status: 204 });
+  }
   if (pathname !== '/scheduler/commit') return Response.json({ error: 'Not found.' }, { status: 404 });
   const alreadyCommitted = state.completedRuns[runId];
   if (alreadyCommitted) return Response.json({ dequeueIdentities: alreadyCommitted } satisfies SchedulerCommitResult);
@@ -224,7 +247,7 @@ async function handleSchedulerRequest(request: Request, storage: DurableObjectSt
     const cursor = body.cursors[resource];
     if (typeof cursor === 'string' && cursor.length > 0) cursors[resource] = cursor;
   }
-  const dequeueIdentities: string[] = [];
+  const dequeueIdentities = Object.keys(state.pendingDequeues);
   for (const outcome of body.outcomes) {
     if (!outcome || typeof outcome.identity !== 'string' || !outcome.identity || typeof outcome.lastAccessedAt !== 'string') continue;
     if (outcome.outcome === 'refreshed') {
@@ -232,8 +255,9 @@ async function handleSchedulerRequest(request: Request, storage: DurableObjectSt
     } else if (outcome.outcome === 'upstream_failed') {
       const next = (state.failures[outcome.identity]?.consecutiveFailures ?? 0) + 1;
       if (next >= 3) {
-        delete state.failures[outcome.identity];
-        dequeueIdentities.push(outcome.identity);
+        state.failures[outcome.identity] = { consecutiveFailures: next, lastAccessedAt: outcome.lastAccessedAt };
+        state.pendingDequeues[outcome.identity] = true;
+        if (!dequeueIdentities.includes(outcome.identity)) dequeueIdentities.push(outcome.identity);
       } else {
         state.failures[outcome.identity] = { consecutiveFailures: next, lastAccessedAt: outcome.lastAccessedAt };
       }
@@ -313,6 +337,28 @@ export async function commitSchedulerRun(namespace: DurableObjectNamespaceLike |
 
 export async function abortSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string): Promise<void> {
   await schedulerRequest(namespace, '/scheduler/abort', { runId } satisfies AbortRunBody);
+}
+
+export async function renewSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string, holdSeconds: number): Promise<boolean> {
+  const stub = schedulerStub(namespace);
+  if (!stub) return false;
+  try {
+    const response = await stub.fetch('https://cache-coordinator.internal/scheduler/renew', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId, holdSeconds } satisfies RenewRunBody)
+    });
+    return response.ok;
+  } catch { return false; }
+}
+
+export async function acknowledgeSchedulerDequeues(namespace: DurableObjectNamespaceLike | undefined, runId: string, identities: string[]): Promise<boolean> {
+  const stub = schedulerStub(namespace);
+  if (!stub) return false;
+  try {
+    const response = await stub.fetch('https://cache-coordinator.internal/scheduler/ack-dequeues', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId, identities } satisfies AcknowledgeDequeueBody)
+    });
+    return response.ok;
+  } catch { return false; }
 }
 
 export async function acquireSingleFlightLease(

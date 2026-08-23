@@ -293,8 +293,19 @@ export async function loadHotCacheQueueEntries(
 ): Promise<HotCacheQueueEntry[]> {
   const parsedEntries = await Promise.all(
     page.metadataKeys.map(async (metadataKey) => {
-      const raw = await env.METAR_CACHE.get(metadataKey, 'json');
-      return parseHotCacheEntry(raw, metadataKey);
+      const text = await env.METAR_CACHE.get(metadataKey, 'text');
+      if (text === null) return null;
+      let raw: unknown;
+      try {
+        raw = typeof text === 'string' ? JSON.parse(text) : text;
+      } catch {
+        if (env.METAR_CACHE.delete) await env.METAR_CACHE.delete(metadataKey);
+        console.warn('Malformed hot cache demand entry removed.', { resource: metadataKey.split(':')[2] });
+        return null;
+      }
+      const entry = parseHotCacheEntry(raw, metadataKey);
+      if (!entry && env.METAR_CACHE.delete) await env.METAR_CACHE.delete(metadataKey);
+      return entry;
     })
   );
 
@@ -322,8 +333,15 @@ export async function readHotCacheQueueEntry(
   env: CacheEngineEnv,
   metadataKey: string
 ): Promise<HotCacheQueueEntry | null> {
-  const raw = await env.METAR_CACHE.get(metadataKey, 'json');
-  return parseHotCacheEntry(raw, metadataKey);
+  const text = await env.METAR_CACHE.get(metadataKey, 'text');
+  if (text === null) return null;
+  try {
+    const raw = typeof text === 'string' ? JSON.parse(text) : text;
+    return parseHotCacheEntry(raw, metadataKey);
+  } catch {
+    if (env.METAR_CACHE.delete) await env.METAR_CACHE.delete(metadataKey);
+    return null;
+  }
 }
 
 export async function touchHotCacheEntry(params: {
