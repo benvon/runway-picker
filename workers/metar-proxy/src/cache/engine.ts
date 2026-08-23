@@ -107,16 +107,31 @@ function parseCanonicalTimestamp(value: unknown, now: Date): Date | null {
   return parsed;
 }
 
+function hasBoundedCanonicalExpiry(
+  value: unknown,
+  fetchedAt: Date,
+  expiresAt: Date | null,
+  ttlSeconds: number
+): boolean {
+  return Boolean(
+    expiresAt &&
+    expiresAt.toISOString() === value &&
+    expiresAt.getTime() >= fetchedAt.getTime() &&
+    expiresAt.getTime() <= fetchedAt.getTime() + ttlSeconds * 1000
+  );
+}
+
 function hasValidCacheMeta(
   meta: Partial<CacheEnvelope<unknown>['cacheMeta']> | undefined,
   policy: CachePolicy,
-  now: Date
+  now: Date,
+  ttlSeconds = policy.ttlSeconds
 ): boolean {
   const fetchedAt = parseCanonicalTimestamp(meta?.fetchedAt, now);
   const expiresAt = parseIsoDate(meta?.expiresAt);
   return Boolean(
     fetchedAt &&
-    expiresAt &&
+    hasBoundedCanonicalExpiry(meta?.expiresAt, fetchedAt, expiresAt, ttlSeconds) &&
     meta?.policyVersion === policy.policyVersion &&
     meta?.source === 'upstream'
   );
@@ -155,7 +170,7 @@ function hasValidNegativeCacheMeta(
   policy: CachePolicy,
   now: Date
 ): boolean {
-  if (!hasValidCacheMeta(meta, policy, now)) {
+  if (!hasValidCacheMeta(meta, policy, now, policy.negativeCacheTtlSeconds)) {
     return false;
   }
   const fetchedAt = parseCanonicalTimestamp(meta?.fetchedAt, now);

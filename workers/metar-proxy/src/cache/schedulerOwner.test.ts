@@ -19,8 +19,15 @@ class Storage {
 }
 
 class SqlStorage extends Storage {
-  readonly execMock = vi.fn((...args: unknown[]): Array<Record<string, unknown>> => { void args; return []; });
-  readonly sql = { exec: <T = Record<string, unknown>>(...args: unknown[]): Iterable<T> => this.execMock(...args) as T[] };
+  private readonly handler: (query: string, ...bindings: unknown[]) => Array<Record<string, unknown>>;
+  readonly execMock = vi.fn((query: string, ...bindings: unknown[]): Array<Record<string, unknown>> => this.handler(query, ...bindings));
+  readonly sql = { exec: <T = Record<string, unknown>>(query: string, ...bindings: unknown[]): Iterable<T> => this.execMock(query, ...bindings) as T[] };
+
+  constructor(handler: (query: string, ...bindings: unknown[]) => Array<Record<string, unknown>> = () => []) {
+    super();
+    this.handler = handler;
+  }
+
   transactionSync<T>(closure: () => T): T { return closure(); }
 }
 
@@ -112,6 +119,41 @@ describe('owned scheduler demand lifecycle', () => {
 
     expect(transactionSpy).toHaveBeenCalledTimes(1);
     expect(storage.execMock).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO scheduler_demands'), 'metar', 'KORD', expect.any(String), expect.any(Number), 0, 0);
+  });
+
+  it('does not duplicate a touched candidate when SQL selection wraps its progress cursor', async () => {
+    const inserted = new Set<string>();
+    const storage = new SqlStorage((query, ...bindings) => {
+      if (query.includes('FROM scheduler_progress')) {
+        return [{ last_accessed_at: '2026-03-06T12:00:00.000Z', normalized_key: 'KJFK' }];
+      }
+      if (query.includes('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands')) {
+        if (bindings[0] !== 'metar') return [];
+        expect(query).toContain('ORDER BY CASE WHEN');
+        return [
+          { resource: 'metar', normalized_key: 'KORD', last_accessed_at: '2026-03-06T12:00:01.000Z' },
+          { resource: 'metar', normalized_key: 'KJFK', last_accessed_at: '2026-03-06T12:00:00.000Z' }
+        ];
+      }
+      if (query.includes('INSERT INTO scheduler_run_items')) {
+        const key = `${bindings[1]}:${bindings[2]}`;
+        if (inserted.has(key)) throw new Error('UNIQUE constraint failed: scheduler_run_items');
+        inserted.add(key);
+      }
+      return [];
+    });
+    const coordinator = new OwnedSchedulerCoordinator({ storage });
+
+    const response = await coordinatorRequest(coordinator, '/scheduler/v2/begin', { holdSeconds: 30, maxCandidates: 4 });
+
+    await expect(response.json()).resolves.toMatchObject({
+      acquired: true,
+      candidates: [
+        { resource: 'metar', normalizedKey: 'KORD' },
+        { resource: 'metar', normalizedKey: 'KJFK' }
+      ]
+    });
+    expect(inserted).toEqual(new Set(['metar:KORD', 'metar:KJFK']));
   });
 
   it('returns inactive-run responses without mutating demand state', async () => {

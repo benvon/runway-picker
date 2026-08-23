@@ -393,15 +393,15 @@ describe('cache engine', () => {
     );
   });
 
-  it('clamps sub-second and future cached expiries without extending edge-cache lifetime', async () => {
+  it('clamps sub-second expiries and rejects future positive expiries beyond the policy TTL', async () => {
     const adapter = buildAdapter({ fetchUpstream: vi.fn().mockResolvedValue('not-used') });
     const now = new Date('2026-03-03T12:00:00.000Z');
     const edge = new MemoryEdgeCache();
     const kv = new MemoryKv();
     kv.seed('v1:demo:alpha', {
-      ...buildEnvelope('v1:demo:alpha', 'sub-second', '2026-03-03T11:59:30.000Z'),
+      ...buildEnvelope('v1:demo:alpha', 'sub-second', '2026-03-03T11:59:31.000Z'),
       cacheMeta: {
-        fetchedAt: '2026-03-03T11:59:30.000Z',
+        fetchedAt: '2026-03-03T11:59:31.000Z',
         expiresAt: '2026-03-03T12:00:00.999Z',
         policyVersion: 'demo-v1',
         source: 'upstream'
@@ -439,7 +439,9 @@ describe('cache engine', () => {
       now
     });
 
-    expect(future.cache.freshnessRemainingSeconds).toBe(30);
+    expect(future.cache.status).toBe('upstream_refresh');
+    expect(future.payload.value).toBe('not-used');
+    expect(adapter.fetchUpstream).toHaveBeenCalledTimes(1);
     const promoted = await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Abravo'));
     expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=30, s-maxage=30');
   });

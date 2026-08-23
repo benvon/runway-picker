@@ -123,8 +123,9 @@ class SchedulerState {
       const select = (kind: OwnedSchedulerResource, limit: number, offset = 0): OwnedSchedulerCandidate[] => {
         const progress = this.rows<{ last_accessed_at: string; normalized_key: string }>('SELECT last_accessed_at, normalized_key FROM scheduler_progress WHERE resource = ? LIMIT 1', kind)[0];
         const total = limit + offset;
-        const after = progress ? this.rows<DemandRow>('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands WHERE resource = ? AND suppressed_at_ms IS NULL AND (last_accessed_at > ? OR (last_accessed_at = ? AND normalized_key > ?)) ORDER BY last_accessed_at ASC, normalized_key ASC LIMIT ?', kind, progress.last_accessed_at, progress.last_accessed_at, progress.normalized_key, total) : [];
-        const rows = after.length >= total ? after : after.concat(this.rows<DemandRow>('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands WHERE resource = ? AND suppressed_at_ms IS NULL ORDER BY last_accessed_at ASC, normalized_key ASC LIMIT ?', kind, total - after.length));
+        const rows = progress
+          ? this.rows<DemandRow>('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands WHERE resource = ? AND suppressed_at_ms IS NULL ORDER BY CASE WHEN last_accessed_at > ? OR (last_accessed_at = ? AND normalized_key > ?) THEN 0 ELSE 1 END ASC, last_accessed_at ASC, normalized_key ASC LIMIT ?', kind, progress.last_accessed_at, progress.last_accessed_at, progress.normalized_key, total)
+          : this.rows<DemandRow>('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands WHERE resource = ? AND suppressed_at_ms IS NULL ORDER BY last_accessed_at ASC, normalized_key ASC LIMIT ?', kind, total);
         return rows.slice(offset).map((row) => ({ resource: row.resource as OwnedSchedulerResource, normalizedKey: row.normalized_key, lastAccessedAt: row.last_accessed_at }));
       };
       const metar = select('metar', metarLimit); const airport = select('airport', airportLimit); const remaining = max - metar.length - airport.length;
