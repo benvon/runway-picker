@@ -27,21 +27,23 @@ interface Demand {
   resource: OwnedSchedulerResource;
   normalizedKey: string;
   lastAccessedAt: string;
+  demandVersion: number;
   expiresAtMs: number;
   failures: number;
   suppressedAtMs?: number;
 }
+interface StoredCandidate extends OwnedSchedulerCandidate { demandVersion: number; }
 interface Run {
   expiresAtMs: number;
   status: 'active' | 'completed';
-  candidates: OwnedSchedulerCandidate[];
+  candidates: StoredCandidate[];
   applied: Record<string, true>;
   completedAtMs?: number;
 }
 interface FallbackState { schemaVersion: 1; demands: Record<string, Demand>; runs: Record<string, Run>; progress: Partial<Record<OwnedSchedulerResource, OwnedSchedulerCandidate>>; }
-interface DemandRow { resource: string; normalized_key: string; last_accessed_at: string; }
+interface DemandRow { resource: string; normalized_key: string; last_accessed_at: string; demand_version: number; }
 interface RunRow { expires_at_ms: number; status: string; }
-interface ItemRow { applied: number; }
+interface ItemRow { applied: number; demand_version: number; }
 
 const OBJECT_NAME = '__cache-refresh-scheduler-v1__';
 const FALLBACK_KEY = 'owned-scheduler-test-fallback';
@@ -73,8 +75,14 @@ class SchedulerState {
     const sql = this.sql;
     if (!sql) return;
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_demands (resource TEXT NOT NULL, normalized_key TEXT NOT NULL, last_accessed_at TEXT NOT NULL, expires_at_ms INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0, suppressed_at_ms INTEGER, PRIMARY KEY(resource, normalized_key))');
+    // This version changes only when a foreground upstream refresh reactivates
+    // the demand; neutral cache-hit touches must not discard real failures.
+    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_demand_versions (resource TEXT NOT NULL, normalized_key TEXT NOT NULL, demand_version INTEGER NOT NULL, PRIMARY KEY(resource, normalized_key))');
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_runs (id TEXT PRIMARY KEY, expires_at_ms INTEGER NOT NULL, status TEXT NOT NULL, completed_at_ms INTEGER)');
-    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_run_items (run_id TEXT NOT NULL, resource TEXT NOT NULL, normalized_key TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, resource, normalized_key))');
+    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_run_items (run_id TEXT NOT NULL, resource TEXT NOT NULL, normalized_key TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, demand_version INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, resource, normalized_key))');
+    if (!this.rows<{ name: string }>('PRAGMA table_info(scheduler_run_items)').some((column) => column.name === 'demand_version')) {
+      sql.exec('ALTER TABLE scheduler_run_items ADD COLUMN demand_version INTEGER NOT NULL DEFAULT 0');
+    }
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_run_progress (run_id TEXT NOT NULL, resource TEXT NOT NULL, last_accessed_at TEXT NOT NULL, normalized_key TEXT NOT NULL, PRIMARY KEY(run_id, resource))');
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_progress (resource TEXT PRIMARY KEY, last_accessed_at TEXT NOT NULL, normalized_key TEXT NOT NULL)');
     sql.exec('CREATE INDEX IF NOT EXISTS scheduler_demand_candidates ON scheduler_demands(resource, suppressed_at_ms, last_accessed_at)');
@@ -103,13 +111,14 @@ class SchedulerState {
     if (this.sql) {
       this.transaction(() => {
         this.setup();
+        this.rows('INSERT INTO scheduler_demand_versions(resource, normalized_key, demand_version) VALUES (?, ?, CASE WHEN ? THEN 1 ELSE 0 END) ON CONFLICT(resource, normalized_key) DO UPDATE SET demand_version = demand_version + CASE WHEN ? THEN 1 ELSE 0 END', entry.resource, entry.normalizedKey, reactivated ? 1 : 0, reactivated ? 1 : 0);
         this.rows('INSERT INTO scheduler_demands(resource, normalized_key, last_accessed_at, expires_at_ms) VALUES (?, ?, ?, ?) ON CONFLICT(resource, normalized_key) DO UPDATE SET last_accessed_at = excluded.last_accessed_at, expires_at_ms = excluded.expires_at_ms, failures = CASE WHEN ? THEN 0 ELSE failures END, suppressed_at_ms = CASE WHEN ? THEN NULL ELSE suppressed_at_ms END', entry.resource, entry.normalizedKey, lastAccessedAt, expiresAtMs, reactivated ? 1 : 0, reactivated ? 1 : 0);
       });
       return;
     }
     const state = await this.fallback(); this.cleanFallback(state, now);
     const previous = state.demands[identity(entry)];
-    state.demands[identity(entry)] = { ...entry, lastAccessedAt, expiresAtMs, failures: reactivated ? 0 : previous?.failures ?? 0, suppressedAtMs: reactivated ? undefined : previous?.suppressedAtMs };
+    state.demands[identity(entry)] = { ...entry, lastAccessedAt, demandVersion: (previous?.demandVersion ?? 0) + (reactivated ? 1 : 0), expiresAtMs, failures: reactivated ? 0 : previous?.failures ?? 0, suppressedAtMs: reactivated ? undefined : previous?.suppressedAtMs };
     await this.save(state);
   }
   // The transaction deliberately contains selection, claim, and run-item
@@ -120,29 +129,29 @@ class SchedulerState {
       return this.transaction(() => {
       this.setup(); this.cleanSql(now);
       if (this.rows<RunRow>('SELECT expires_at_ms, status FROM scheduler_runs WHERE status = ? AND expires_at_ms > ? LIMIT 1', 'active', now).length) return null;
-      const select = (kind: OwnedSchedulerResource, limit: number, offset = 0): OwnedSchedulerCandidate[] => {
+      const select = (kind: OwnedSchedulerResource, limit: number, offset = 0): StoredCandidate[] => {
         const progress = this.rows<{ last_accessed_at: string; normalized_key: string }>('SELECT last_accessed_at, normalized_key FROM scheduler_progress WHERE resource = ? LIMIT 1', kind)[0];
         const total = limit + offset;
         const rows = progress
-          ? this.rows<DemandRow>('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands WHERE resource = ? AND suppressed_at_ms IS NULL ORDER BY CASE WHEN last_accessed_at > ? OR (last_accessed_at = ? AND normalized_key > ?) THEN 0 ELSE 1 END ASC, last_accessed_at ASC, normalized_key ASC LIMIT ?', kind, progress.last_accessed_at, progress.last_accessed_at, progress.normalized_key, total)
-          : this.rows<DemandRow>('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands WHERE resource = ? AND suppressed_at_ms IS NULL ORDER BY last_accessed_at ASC, normalized_key ASC LIMIT ?', kind, total);
-        return rows.slice(offset).map((row) => ({ resource: row.resource as OwnedSchedulerResource, normalizedKey: row.normalized_key, lastAccessedAt: row.last_accessed_at }));
+          ? this.rows<DemandRow>('SELECT demands.resource, demands.normalized_key, demands.last_accessed_at, COALESCE(versions.demand_version, 0) AS demand_version FROM scheduler_demands AS demands LEFT JOIN scheduler_demand_versions AS versions ON versions.resource = demands.resource AND versions.normalized_key = demands.normalized_key WHERE demands.resource = ? AND demands.suppressed_at_ms IS NULL ORDER BY CASE WHEN demands.last_accessed_at > ? OR (demands.last_accessed_at = ? AND demands.normalized_key > ?) THEN 0 ELSE 1 END ASC, demands.last_accessed_at ASC, demands.normalized_key ASC LIMIT ?', kind, progress.last_accessed_at, progress.last_accessed_at, progress.normalized_key, total)
+          : this.rows<DemandRow>('SELECT demands.resource, demands.normalized_key, demands.last_accessed_at, COALESCE(versions.demand_version, 0) AS demand_version FROM scheduler_demands AS demands LEFT JOIN scheduler_demand_versions AS versions ON versions.resource = demands.resource AND versions.normalized_key = demands.normalized_key WHERE demands.resource = ? AND demands.suppressed_at_ms IS NULL ORDER BY demands.last_accessed_at ASC, demands.normalized_key ASC LIMIT ?', kind, total);
+        return rows.slice(offset).map((row) => ({ resource: row.resource as OwnedSchedulerResource, normalizedKey: row.normalized_key, lastAccessedAt: row.last_accessed_at, demandVersion: row.demand_version }));
       };
       const metar = select('metar', metarLimit); const airport = select('airport', airportLimit); const remaining = max - metar.length - airport.length;
       if (remaining > 0) { const kind: OwnedSchedulerResource = metar.length < metarLimit ? 'airport' : 'metar'; (kind === 'metar' ? metar : airport).push(...select(kind, remaining, kind === 'metar' ? metar.length : airport.length)); }
       const candidates = [...metar, ...airport];
       this.rows('INSERT INTO scheduler_runs(id, expires_at_ms, status) VALUES (?, ?, ?)', runId, now + holdSeconds * 1000, 'active');
-      for (const candidate of candidates) this.rows('INSERT INTO scheduler_run_items(run_id, resource, normalized_key) VALUES (?, ?, ?)', runId, candidate.resource, candidate.normalizedKey);
+      for (const candidate of candidates) this.rows('INSERT INTO scheduler_run_items(run_id, resource, normalized_key, demand_version) VALUES (?, ?, ?, ?)', runId, candidate.resource, candidate.normalizedKey, candidate.demandVersion);
       for (const kind of ['metar', 'airport'] as const) { const last = candidates.filter((candidate) => candidate.resource === kind).at(-1); if (last) this.rows('INSERT INTO scheduler_run_progress(run_id, resource, last_accessed_at, normalized_key) VALUES (?, ?, ?, ?)', runId, kind, last.lastAccessedAt, last.normalizedKey); }
-        return { runId, candidates };
+        return { runId, candidates: candidates.map((candidate) => ({ resource: candidate.resource, normalizedKey: candidate.normalizedKey, lastAccessedAt: candidate.lastAccessedAt })) };
       });
     }
     const state = await this.fallback(); this.cleanFallback(state, now);
     if (Object.values(state.runs).some((run) => run.status === 'active' && run.expiresAtMs > now)) return null;
-    const select = (kind: OwnedSchedulerResource, limit: number, offset = 0) => { const all = Object.values(state.demands).filter((demand) => demand.resource === kind && !demand.suppressedAtMs).sort((left, right) => left.lastAccessedAt.localeCompare(right.lastAccessedAt) || left.normalizedKey.localeCompare(right.normalizedKey)); const progress = state.progress[kind]; const after = progress ? all.filter((demand) => demand.lastAccessedAt > progress.lastAccessedAt || (demand.lastAccessedAt === progress.lastAccessedAt && demand.normalizedKey > progress.normalizedKey)) : []; return [...after, ...all.filter((demand) => !after.includes(demand))].slice(offset, offset + limit).map(({ resource: candidateResource, normalizedKey, lastAccessedAt }) => ({ resource: candidateResource, normalizedKey, lastAccessedAt })); };
+    const select = (kind: OwnedSchedulerResource, limit: number, offset = 0) => { const all = Object.values(state.demands).filter((demand) => demand.resource === kind && !demand.suppressedAtMs).sort((left, right) => left.lastAccessedAt.localeCompare(right.lastAccessedAt) || left.normalizedKey.localeCompare(right.normalizedKey)); const progress = state.progress[kind]; const after = progress ? all.filter((demand) => demand.lastAccessedAt > progress.lastAccessedAt || (demand.lastAccessedAt === progress.lastAccessedAt && demand.normalizedKey > progress.normalizedKey)) : []; return [...after, ...all.filter((demand) => !after.includes(demand))].slice(offset, offset + limit).map(({ resource: candidateResource, normalizedKey, lastAccessedAt, demandVersion }) => ({ resource: candidateResource, normalizedKey, lastAccessedAt, demandVersion })); };
     const metar = select('metar', metarLimit); const airport = select('airport', airportLimit); const remaining = max - metar.length - airport.length;
     if (remaining > 0) { const kind: OwnedSchedulerResource = metar.length < metarLimit ? 'airport' : 'metar'; (kind === 'metar' ? metar : airport).push(...select(kind, remaining, kind === 'metar' ? metar.length : airport.length)); }
-    const candidates = [...metar, ...airport]; state.runs[runId] = { expiresAtMs: now + holdSeconds * 1000, status: 'active', candidates, applied: {} }; await this.save(state); return { runId, candidates };
+    const candidates = [...metar, ...airport]; state.runs[runId] = { expiresAtMs: now + holdSeconds * 1000, status: 'active', candidates, applied: {} }; await this.save(state); return { runId, candidates: candidates.map((candidate) => ({ resource: candidate.resource, normalizedKey: candidate.normalizedKey, lastAccessedAt: candidate.lastAccessedAt })) };
   }
   async renew(runId: string, holdSeconds: number, now: number): Promise<boolean> {
     if (this.sql) return this.transaction(() => { this.setup(); const run = this.rows<RunRow>('SELECT expires_at_ms, status FROM scheduler_runs WHERE id = ? LIMIT 1', runId)[0]; if (!run || run.status !== 'active' || run.expires_at_ms <= now) return false; this.rows('UPDATE scheduler_runs SET expires_at_ms = ? WHERE id = ?', now + holdSeconds * 1000, runId); return true; });
@@ -164,18 +173,18 @@ class SchedulerState {
       const suppressed: string[] = [];
       for (const outcome of outcomes) {
         if (!resource(outcome.resource) || !outcome.normalizedKey || !['refreshed', 'upstream_failed', 'neutral'].includes(outcome.outcome)) continue;
-        const item = this.rows<ItemRow>('SELECT applied FROM scheduler_run_items WHERE run_id = ? AND resource = ? AND normalized_key = ? LIMIT 1', runId, outcome.resource, outcome.normalizedKey)[0]; if (!item || item.applied !== 0) continue;
+        const item = this.rows<ItemRow>('SELECT applied, demand_version FROM scheduler_run_items WHERE run_id = ? AND resource = ? AND normalized_key = ? LIMIT 1', runId, outcome.resource, outcome.normalizedKey)[0]; if (!item || item.applied !== 0) continue;
         this.rows('UPDATE scheduler_run_items SET applied = 1 WHERE run_id = ? AND resource = ? AND normalized_key = ?', runId, outcome.resource, outcome.normalizedKey);
         if (outcome.outcome === 'refreshed') this.rows('UPDATE scheduler_demands SET failures = 0, suppressed_at_ms = NULL WHERE resource = ? AND normalized_key = ?', outcome.resource, outcome.normalizedKey);
-        if (outcome.outcome === 'upstream_failed') { const demand = this.rows<{ failures: number }>('SELECT failures FROM scheduler_demands WHERE resource = ? AND normalized_key = ? LIMIT 1', outcome.resource, outcome.normalizedKey)[0]; if (demand) { const failures = demand.failures + 1; this.rows('UPDATE scheduler_demands SET failures = ?, suppressed_at_ms = CASE WHEN ? >= 3 THEN ? ELSE suppressed_at_ms END WHERE resource = ? AND normalized_key = ?', failures, failures, now, outcome.resource, outcome.normalizedKey); if (failures >= 3) suppressed.push(identity(outcome)); } }
+        if (outcome.outcome === 'upstream_failed') { const demand = this.rows<{ failures: number; demand_version: number }>('SELECT demands.failures, COALESCE(versions.demand_version, 0) AS demand_version FROM scheduler_demands AS demands LEFT JOIN scheduler_demand_versions AS versions ON versions.resource = demands.resource AND versions.normalized_key = demands.normalized_key WHERE demands.resource = ? AND demands.normalized_key = ? LIMIT 1', outcome.resource, outcome.normalizedKey)[0]; if (demand && demand.demand_version === item.demand_version) { const failures = demand.failures + 1; this.rows('UPDATE scheduler_demands SET failures = ?, suppressed_at_ms = CASE WHEN ? >= 3 THEN ? ELSE suppressed_at_ms END WHERE resource = ? AND normalized_key = ?', failures, failures, now, outcome.resource, outcome.normalizedKey); if (failures >= 3) suppressed.push(identity(outcome)); } }
       }
         this.rows('INSERT INTO scheduler_progress(resource, last_accessed_at, normalized_key) SELECT resource, last_accessed_at, normalized_key FROM scheduler_run_progress WHERE run_id = ? ON CONFLICT(resource) DO UPDATE SET last_accessed_at = excluded.last_accessed_at, normalized_key = excluded.normalized_key', runId);
         this.rows('UPDATE scheduler_runs SET status = ?, completed_at_ms = ? WHERE id = ?', 'completed', now, runId); return suppressed;
       });
     }
     const state = await this.fallback(); this.cleanFallback(state, now); const run = state.runs[runId]; if (!run || run.status !== 'active' || run.expiresAtMs <= now) return null;
-    const candidates = new Set(run.candidates.map(identity)); const suppressed: string[] = [];
-    for (const outcome of outcomes) { const key = identity(outcome); if (!candidates.has(key) || run.applied[key]) continue; run.applied[key] = true; const demand = state.demands[key]; if (!demand) continue; if (outcome.outcome === 'refreshed') { demand.failures = 0; delete demand.suppressedAtMs; } else if (outcome.outcome === 'upstream_failed') { demand.failures += 1; if (demand.failures >= 3) { demand.suppressedAtMs = now; suppressed.push(key); } } }
+    const candidates = new Map(run.candidates.map((candidate) => [identity(candidate), candidate])); const suppressed: string[] = [];
+    for (const outcome of outcomes) { const key = identity(outcome); const candidate = candidates.get(key); if (!candidate || run.applied[key]) continue; run.applied[key] = true; const demand = state.demands[key]; if (!demand) continue; if (outcome.outcome === 'refreshed') { demand.failures = 0; delete demand.suppressedAtMs; } else if (outcome.outcome === 'upstream_failed' && demand.demandVersion === candidate.demandVersion) { demand.failures += 1; if (demand.failures >= 3) { demand.suppressedAtMs = now; suppressed.push(key); } } }
     for (const kind of ['metar', 'airport'] as const) { const last = run.candidates.filter((candidate) => candidate.resource === kind).at(-1); if (last) state.progress[kind] = last; }
     run.status = 'completed'; run.completedAtMs = now; await this.save(state); return suppressed;
   }

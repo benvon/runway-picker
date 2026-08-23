@@ -127,12 +127,12 @@ describe('owned scheduler demand lifecycle', () => {
       if (query.includes('FROM scheduler_progress')) {
         return [{ last_accessed_at: '2026-03-06T12:00:00.000Z', normalized_key: 'KJFK' }];
       }
-      if (query.includes('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands')) {
+      if (query.includes('FROM scheduler_demands AS demands')) {
         if (bindings[0] !== 'metar') return [];
         expect(query).toContain('ORDER BY CASE WHEN');
         return [
-          { resource: 'metar', normalized_key: 'KORD', last_accessed_at: '2026-03-06T12:00:01.000Z' },
-          { resource: 'metar', normalized_key: 'KJFK', last_accessed_at: '2026-03-06T12:00:00.000Z' }
+          { resource: 'metar', normalized_key: 'KORD', last_accessed_at: '2026-03-06T12:00:01.000Z', demand_version: 2 },
+          { resource: 'metar', normalized_key: 'KJFK', last_accessed_at: '2026-03-06T12:00:00.000Z', demand_version: 1 }
         ];
       }
       if (query.includes('INSERT INTO scheduler_run_items')) {
@@ -154,6 +154,32 @@ describe('owned scheduler demand lifecycle', () => {
       ]
     });
     expect(inserted).toEqual(new Set(['metar:KORD', 'metar:KJFK']));
+  });
+
+  it('does not let a failed run outcome overwrite a later successful client touch', async () => {
+    const namespace = new Namespace();
+    await recordOwnedSchedulerDemand(namespace, 'metar', 'KORD', 3600);
+    for (let count = 0; count < 2; count += 1) {
+      const run = await beginOwnedSchedulerRun(namespace, 30, 2);
+      const candidate = run?.candidates[0];
+      if (!run || !candidate) throw new Error('Expected a claimed candidate.');
+      await completeOwnedSchedulerRun(namespace, run.runId, [{ ...candidate, outcome: 'upstream_failed' }]);
+    }
+
+    const staleRun = await beginOwnedSchedulerRun(namespace, 30, 2);
+    const staleCandidate = staleRun?.candidates[0];
+    if (!staleRun || !staleCandidate) throw new Error('Expected a claimed candidate.');
+    await recordOwnedSchedulerDemand(namespace, 'metar', 'KORD', 3600, true);
+    await expect(completeOwnedSchedulerRun(namespace, staleRun.runId, [{ ...staleCandidate, outcome: 'upstream_failed' }]))
+      .resolves.toEqual([]);
+
+    for (let count = 0; count < 2; count += 1) {
+      const run = await beginOwnedSchedulerRun(namespace, 30, 2);
+      const candidate = run?.candidates[0];
+      if (!run || !candidate) throw new Error('Expected a claimed candidate.');
+      await expect(completeOwnedSchedulerRun(namespace, run.runId, [{ ...candidate, outcome: 'upstream_failed' }]))
+        .resolves.toEqual([]);
+    }
   });
 
   it('returns inactive-run responses without mutating demand state', async () => {
