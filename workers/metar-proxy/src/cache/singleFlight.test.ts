@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   CacheSingleFlightCoordinator,
   acquireSingleFlightLease,
+  abortSchedulerRun,
+  acknowledgeSchedulerDequeues,
+  beginSchedulerRun,
+  commitSchedulerRun,
+  processSchedulerDequeues,
+  recordSchedulerDemand,
+  renewSchedulerRun,
   releaseSingleFlightLease
 } from './singleFlight';
 import type { DurableObjectNamespaceLike } from './types';
@@ -27,8 +34,35 @@ class MemoryStorage {
   }
 }
 
+class MemoryKv {
+  private readonly values = new Map<string, unknown>();
+  beforeDelete: ((key: string) => Promise<void>) | undefined;
+
+  async get(key: string, type: 'json' | 'text'): Promise<unknown> {
+    const value = this.values.get(key) ?? null;
+    if (type === 'text' && value !== null) return JSON.stringify(value);
+    return value;
+  }
+
+  async put(key: string, value: string): Promise<void> {
+    this.values.set(key, JSON.parse(value) as unknown);
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.beforeDelete?.(key);
+    this.values.delete(key);
+  }
+
+  read<T>(key: string): T | null {
+    return (this.values.get(key) as T | undefined) ?? null;
+  }
+}
+
 class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
   private readonly storage = new MemoryStorage();
+  private coordinator: CacheSingleFlightCoordinator | undefined;
+
+  constructor(private readonly cache?: MemoryKv) {}
 
   idFromName(name: string): string {
     return name;
@@ -36,7 +70,10 @@ class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
 
   get(_id: unknown): { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> } {
     void _id;
-    const coordinator = new CacheSingleFlightCoordinator({ storage: this.storage });
+    this.coordinator ??= new CacheSingleFlightCoordinator(
+      { storage: this.storage },
+      this.cache ? { METAR_CACHE: this.cache } : undefined
+    );
     return {
       fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
         const request =
@@ -47,7 +84,7 @@ class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
                 headers: init?.headers,
                 body: init?.body
               });
-        return coordinator.fetch(request);
+        return this.coordinator?.fetch(request) ?? Promise.reject(new Error('Coordinator unavailable.'));
       }
     };
   }
@@ -161,5 +198,227 @@ describe('singleFlight namespace helpers', () => {
   it('releaseSingleFlightLease no-ops when namespace or lease is missing', async () => {
     await expect(releaseSingleFlightLease(undefined, null)).resolves.toBeUndefined();
     await expect(releaseSingleFlightLease(new InMemoryCoordinatorNamespace(), null)).resolves.toBeUndefined();
+  });
+});
+
+describe('scheduler coordinator protocol', () => {
+  it('serializes a run and persists cursors only with its atomic outcome commit', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const first = await beginSchedulerRun(namespace, 30);
+    expect(first?.cursors).toEqual({});
+    await expect(beginSchedulerRun(namespace, 30)).resolves.toBeNull();
+    const committed = await commitSchedulerRun(namespace, {
+      runId: first?.runId ?? '',
+      cursors: { metar: 'opaque-metAR-cursor' },
+      inactivityTtlSeconds: 60,
+      outcomes: [{ identity: 'v2:hot:metar:KJFK', outcome: 'upstream_failed', lastAccessedAt: new Date().toISOString() }]
+    });
+    expect(committed).toEqual({ dequeueIdentities: [] });
+    const next = await beginSchedulerRun(namespace, 30);
+    expect(next?.cursors).toEqual({ metar: 'opaque-metAR-cursor' });
+  });
+
+  it('makes commit idempotent and drops demand only on the third upstream failure', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const identity = 'v2:hot:airport:KJFK';
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      const body = {
+        runId: lease?.runId ?? '',
+        cursors: {},
+        inactivityTtlSeconds: 60,
+        outcomes: [{ identity, outcome: 'upstream_failed' as const, lastAccessedAt: new Date().toISOString() }]
+      };
+      const result = await commitSchedulerRun(namespace, body);
+      expect(result?.dequeueIdentities).toEqual(attempt === 3 ? [identity] : []);
+      await expect(commitSchedulerRun(namespace, body)).resolves.toEqual(result);
+    }
+  });
+
+  it('retains a pending dequeue until the worker acknowledges successful KV deletion', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const identity = 'v2:hot:metar:KORD';
+    let thirdRunId = '';
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      thirdRunId = lease?.runId ?? '';
+      await commitSchedulerRun(namespace, {
+        runId: thirdRunId, cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: new Date().toISOString() }]
+      });
+    }
+    const retryLease = await beginSchedulerRun(namespace, 30);
+    const retry = await commitSchedulerRun(namespace, { runId: retryLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: [] });
+    expect(retry?.dequeueIdentities).toContain(identity);
+    await expect(acknowledgeSchedulerDequeues(namespace, retryLease?.runId ?? '', [identity])).resolves.toBe(true);
+    const afterAck = await beginSchedulerRun(namespace, 30);
+    expect(afterAck).not.toBeNull();
+    await expect(commitSchedulerRun(namespace, { runId: afterAck?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: [] })).resolves.toEqual({ dequeueIdentities: [] });
+    void thirdRunId;
+  });
+
+  it('does not let a stale dequeue remove demand re-enqueued by a client', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:metar:KORD';
+    const oldAccess = new Date().toISOString();
+    const newAccess = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+
+    await expect(recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: oldAccess, expirationTtl: 3600
+    })).resolves.toBe(true);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess, demandVersion: 1 }]
+      });
+    }
+
+    await expect(recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: newAccess, expirationTtl: 3600
+    })).resolves.toBe(true);
+    await expect(processSchedulerDequeues(namespace)).resolves.toBe(true);
+    expect(cache.read<{ lastAccessedAt: string }>(identity)).toMatchObject({ lastAccessedAt: newAccess });
+
+    const afterReenqueue = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: afterReenqueue?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: []
+    })).resolves.toEqual({ dequeueIdentities: [] });
+  });
+
+  it('serializes a pending dequeue with a concurrent demand touch', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:metar:KORD';
+    const oldAccess = new Date().toISOString();
+    const newAccess = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    let startDelete: (() => void) | undefined;
+    const deleteStarted = new Promise<void>((resolve) => { startDelete = resolve; });
+    let finishDelete: (() => void) | undefined;
+    const deleteMayFinish = new Promise<void>((resolve) => { finishDelete = resolve; });
+    cache.beforeDelete = async (key) => {
+      if (key === identity) {
+        startDelete?.();
+        await deleteMayFinish;
+      }
+    };
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: oldAccess, expirationTtl: 3600
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess, demandVersion: 1 }]
+      });
+    }
+
+    const dequeue = processSchedulerDequeues(namespace);
+    await deleteStarted;
+    const touch = recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: newAccess, expirationTtl: 3600
+    });
+    finishDelete?.();
+
+    await expect(dequeue).resolves.toBe(true);
+    await expect(touch).resolves.toBe(true);
+    expect(cache.read<{ lastAccessedAt: string }>(identity)).toMatchObject({ lastAccessedAt: newAccess });
+  });
+
+  it('preserves ordinary failure history when a client refreshes demand', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:airport:KORD';
+    const accessedAt = new Date().toISOString();
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: accessedAt, expirationTtl: 3600
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt, demandVersion: 1 }]
+      });
+    }
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: accessedAt, expirationTtl: 3600
+    });
+    const thirdLease = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: thirdLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt, demandVersion: 2 }]
+    })).resolves.toEqual({ dequeueIdentities: [identity] });
+  });
+
+  it('ignores a stale third-failure outcome after a newer demand touch', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:airport:KORD';
+    const firstAccess = new Date().toISOString();
+    const newerAccess = new Date(Date.now() + 1_000).toISOString();
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: firstAccess, expirationTtl: 3600
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: firstAccess, demandVersion: 1 }]
+      });
+    }
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: newerAccess, expirationTtl: 3600
+    });
+    const staleLease = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: staleLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: firstAccess, demandVersion: 1 }]
+    })).resolves.toEqual({ dequeueIdentities: [] });
+    expect(cache.read<{ demandVersion: number }>(identity)?.demandVersion).toBe(2);
+
+    const currentLease = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: currentLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: newerAccess, demandVersion: 2 }]
+    })).resolves.toEqual({ dequeueIdentities: [identity] });
+  });
+
+  it('abort releases a run without committing cursor or outcome state', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const lease = await beginSchedulerRun(namespace, 30);
+    await abortSchedulerRun(namespace, lease?.runId ?? '');
+    const next = await beginSchedulerRun(namespace, 30);
+    expect(next?.cursors).toEqual({});
+  });
+
+  it('renews only the active run token and rejects renewal after abort', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const lease = await beginSchedulerRun(namespace, 1);
+    await expect(renewSchedulerRun(namespace, lease?.runId ?? '', 30)).resolves.toBe(true);
+    await expect(renewSchedulerRun(namespace, 'wrong-token', 30)).resolves.toBe(false);
+    await abortSchedulerRun(namespace, lease?.runId ?? '');
+    await expect(renewSchedulerRun(namespace, lease?.runId ?? '', 30)).resolves.toBe(false);
+  });
+
+  it('keeps a sequential seven-attempt run eligible to commit after repeated renewals', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const lease = await beginSchedulerRun(namespace, 1);
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      await expect(renewSchedulerRun(namespace, lease?.runId ?? '', 1)).resolves.toBe(true);
+    }
+    await expect(commitSchedulerRun(namespace, {
+      runId: lease?.runId ?? '', cursors: { metar: 'after-seven' }, inactivityTtlSeconds: 60,
+      outcomes: Array.from({ length: 7 }, (_, attempt) => ({ identity: `v2:hot:metar:K${attempt}`, outcome: 'upstream_failed' as const, lastAccessedAt: new Date().toISOString() }))
+    })).resolves.toEqual({ dequeueIdentities: [] });
+  });
+
+  it('fails closed when the scheduler coordinator binding is unavailable', async () => {
+    await expect(beginSchedulerRun(undefined, 30)).resolves.toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getOrRefreshCached } from './engine';
+import { getOrRefreshCached, inspectCachedPayloadForMaintenance, maintainCachedEntry } from './engine';
 import type {
   CacheEnvelope,
   CacheEngineEnv,
@@ -33,8 +33,12 @@ class MemoryKv implements KvNamespaceLike {
   private values = new Map<string, unknown>();
   private writeOptions = new Map<string, { expirationTtl?: number } | undefined>();
 
-  async get(key: string): Promise<unknown> {
-    return this.values.get(key) ?? null;
+  async get(key: string, type: 'json' | 'text' = 'json'): Promise<unknown> {
+    const value = this.values.get(key) ?? null;
+    if (type === 'text' && value !== null) {
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    }
+    return value;
   }
 
   async put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
@@ -48,6 +52,14 @@ class MemoryKv implements KvNamespaceLike {
 
   getWriteOptions(key: string): { expirationTtl?: number } | undefined {
     return this.writeOptions.get(key);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.values.delete(key);
+  }
+
+  has(key: string): boolean {
+    return this.values.has(key);
   }
 }
 
@@ -63,8 +75,16 @@ class MemoryEdgeCache implements EdgeCacheLike {
     this.values.set(request.url, response.clone());
   }
 
+  async delete(request: Request): Promise<boolean> {
+    return this.values.delete(request.url);
+  }
+
   seed(cacheKey: string, response: Response): void {
     this.values.set(`https://cache.runway.internal/${encodeURIComponent(cacheKey)}`, response);
+  }
+
+  has(cacheKey: string): boolean {
+    return this.values.has(`https://cache.runway.internal/${encodeURIComponent(cacheKey)}`);
   }
 }
 
@@ -125,6 +145,7 @@ function buildAdapter(overrides?: {
   validate?: CacheResourceAdapter<DemoInput, string, DemoData>['validate'];
   serialize?: CacheResourceAdapter<DemoInput, string, DemoData>['serialize'];
   ttlSeconds?: number;
+  maxPayloadAgeSeconds?: number;
   staleWhileRevalidateSeconds?: number;
   staleOnErrorSeconds?: number;
   negativeCache?: NegativeCachePolicy<DemoInput>;
@@ -182,6 +203,7 @@ function buildAdapter(overrides?: {
     },
     policy: {
       ttlSeconds: overrides?.ttlSeconds ?? 30,
+      maxPayloadAgeSeconds: overrides?.maxPayloadAgeSeconds ?? 150,
       staleWhileRevalidateSeconds: overrides?.staleWhileRevalidateSeconds ?? 10,
       staleOnErrorSeconds: overrides?.staleOnErrorSeconds ?? 120,
       negativeCacheTtlSeconds: 5,
@@ -217,6 +239,16 @@ function buildEnvelope(cacheKey: string, value: string, fetchedAt: string, ttlSe
 }
 
 describe('cache engine', () => {
+  it('purges malformed maintenance payload text without turning it into a KV failure', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v1:demo:alpha', '{invalid-json');
+
+    await expect(inspectCachedPayloadForMaintenance({
+      adapter: buildAdapter(), input: { key: 'alpha' }, env: { METAR_CACHE: kv }, now: new Date('2026-03-03T12:00:00.000Z')
+    })).resolves.toEqual({ kind: 'missing' });
+    expect(kv.has('v1:demo:alpha')).toBe(false);
+  });
+
   it('returns edge cache hit when edge entry is fresh', async () => {
     const adapter = buildAdapter({
       fetchUpstream: vi.fn().mockResolvedValue('not-used')
@@ -294,6 +326,33 @@ describe('cache engine', () => {
     expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
   });
 
+  it('keeps an upstream refresh successful when the post-commit edge write fails', async () => {
+    const adapter = buildAdapter({ fetchUpstream: vi.fn().mockResolvedValue('fresh-value') });
+    const kv = new MemoryKv();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const edge: EdgeCacheLike = {
+      match: async () => undefined,
+      put: async () => {
+        throw new Error('edge unavailable');
+      }
+    };
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('upstream_refresh');
+    expect(kv.has('v1:demo:alpha')).toBe(true);
+    expect(adapter.fetchUpstream).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith('Edge cache promotion failed.', { cacheKey: 'v1:demo:alpha' });
+    warning.mockRestore();
+  });
+
   it('rechecks freshness after a delayed KV read before promoting a cache record', async () => {
     let now = new Date('2026-03-03T12:00:00.000Z');
     const adapter = buildAdapter({
@@ -361,15 +420,15 @@ describe('cache engine', () => {
     );
   });
 
-  it('clamps sub-second and future cached expiries without extending edge-cache lifetime', async () => {
+  it('clamps sub-second expiries and rejects future positive expiries beyond the policy TTL', async () => {
     const adapter = buildAdapter({ fetchUpstream: vi.fn().mockResolvedValue('not-used') });
     const now = new Date('2026-03-03T12:00:00.000Z');
     const edge = new MemoryEdgeCache();
     const kv = new MemoryKv();
     kv.seed('v1:demo:alpha', {
-      ...buildEnvelope('v1:demo:alpha', 'sub-second', '2026-03-03T11:59:30.000Z'),
+      ...buildEnvelope('v1:demo:alpha', 'sub-second', '2026-03-03T11:59:31.000Z'),
       cacheMeta: {
-        fetchedAt: '2026-03-03T11:59:30.000Z',
+        fetchedAt: '2026-03-03T11:59:31.000Z',
         expiresAt: '2026-03-03T12:00:00.999Z',
         policyVersion: 'demo-v1',
         source: 'upstream'
@@ -407,7 +466,9 @@ describe('cache engine', () => {
       now
     });
 
-    expect(future.cache.freshnessRemainingSeconds).toBe(30);
+    expect(future.cache.status).toBe('upstream_refresh');
+    expect(future.payload.value).toBe('not-used');
+    expect(adapter.fetchUpstream).toHaveBeenCalledTimes(1);
     const promoted = await edge.match(new Request('https://cache.runway.internal/v1%3Ademo%3Abravo'));
     expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=30, s-maxage=30');
   });
@@ -553,6 +614,116 @@ describe('cache engine', () => {
     expect(kv.getWriteOptions('v1:demo:alpha')).toEqual({ expirationTtl: 5 });
   });
 
+  it('reports a valid negative envelope to maintenance without purging it', async () => {
+    const fetchUpstream = vi.fn().mockRejectedValue(new DemoStableMissError());
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const request = new Request('https://example.com');
+
+    await expect(
+      getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env: { METAR_CACHE: kv } })
+    ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
+
+    await expect(inspectCachedPayloadForMaintenance({ adapter, input: { key: 'alpha' }, env: { METAR_CACHE: kv } }))
+      .resolves.toMatchObject({ kind: 'negative' });
+    expect(kv.has('v1:demo:alpha')).toBe(true);
+  });
+
+  it('treats an already-cached stable negative as satisfied maintenance without another upstream attempt', async () => {
+    const fetchUpstream = vi.fn().mockRejectedValue(new DemoStableMissError());
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const env: CacheEngineEnv = { METAR_CACHE: kv, CACHE_COORDINATOR: createCoordinatorNamespace() };
+    const request = new Request('https://example.com');
+
+    await expect(getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env })).rejects.toMatchObject({ status: 404 });
+
+    await expect(maintainCachedEntry({
+      adapter,
+      input: { key: 'alpha' },
+      request,
+      env,
+      refreshIntervalSeconds: 60
+    })).resolves.toEqual({
+      kind: 'satisfied',
+      state: 'negative',
+      origin: 'already_current',
+      upstreamAttempted: false
+    });
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+  });
+
+  it('reports per-key refresh contention as deferred rather than an infrastructure failure', async () => {
+    const kv = new MemoryKv();
+    const coordinator = createCoordinatorNamespace();
+    const env: CacheEngineEnv = { METAR_CACHE: kv, CACHE_COORDINATOR: coordinator };
+    const cacheKey = 'v1:demo:alpha';
+    const lock = coordinator.get(coordinator.idFromName(cacheKey));
+    await lock.fetch('https://cache-coordinator.internal/acquire', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: cacheKey, holdSeconds: 20 })
+    });
+
+    await expect(maintainCachedEntry({
+      adapter: buildAdapter(),
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env,
+      refreshIntervalSeconds: 60
+    })).resolves.toEqual({ kind: 'deferred', reason: 'contended', upstreamAttempted: false });
+  });
+
+  it('rejects a negative cache entry whose expiry exceeds its configured horizon', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue('fresh');
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    kv.seed('v1:demo:alpha', {
+      schemaVersion: 2,
+      resource: 'demo',
+      key: 'v1:demo:alpha',
+      negative: { status: 404, code: 'DEMO_NOT_FOUND' },
+      cacheMeta: {
+        fetchedAt: '2026-03-03T11:59:59.000Z',
+        expiresAt: '2026-03-03T12:10:00.000Z',
+        policyVersion: 'demo-v1',
+        source: 'upstream'
+      }
+    });
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('upstream_refresh');
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+  });
+
   it('returns the leader-written stable miss to concurrent single-flight followers', async () => {
     const fetchUpstream = vi.fn().mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 120));
@@ -650,7 +821,7 @@ describe('cache engine', () => {
       negative: { status: 404, code: 'DEMO_NOT_FOUND' },
       cacheMeta: {
         fetchedAt,
-        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        expiresAt: new Date(new Date(fetchedAt).getTime() + 5_000).toISOString(),
         policyVersion: 'demo-v1',
         source: 'upstream'
       }
@@ -691,7 +862,7 @@ describe('cache engine', () => {
       key: 'v1:demo:missing',
       negative: { status: 404, code: 'DEMO_NOT_FOUND' },
       cacheMeta: {
-        fetchedAt: '2026-03-03T11:59:55.000Z',
+        fetchedAt: '2026-03-03T11:59:58.000Z',
         expiresAt: '2026-03-03T12:00:03.000Z',
         policyVersion: 'demo-v1',
         source: 'upstream'
@@ -916,5 +1087,61 @@ describe('cache engine', () => {
 
     expect(result.cache.status).toBe('stale_on_error');
     expect(result.payload.value).toBe('older-stale');
+  });
+
+  it('allows stale fallback immediately before the payload age boundary', async () => {
+    const adapter = buildAdapter({ maxPayloadAgeSeconds: 5400, staleOnErrorSeconds: 7200, fetchUpstream: vi.fn().mockRejectedValue(new Error('offline')) });
+    const kv = new MemoryKv();
+    kv.seed('v1:demo:alpha', buildEnvelope('v1:demo:alpha', 'still-valid', '2026-03-03T10:30:01.000Z', 30));
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('stale_on_error');
+    expect(result.payload.value).toBe('still-valid');
+  });
+
+  it('purges KV and edge copies at the payload age boundary and never serves stale fallback', async () => {
+    const adapter = buildAdapter({ maxPayloadAgeSeconds: 5400, fetchUpstream: vi.fn().mockRejectedValue(new Error('offline')) });
+    const kv = new MemoryKv();
+    const edge = new MemoryEdgeCache();
+    const envelope = buildEnvelope('v1:demo:alpha', 'expired', '2026-03-03T10:30:00.000Z', 30);
+    kv.seed('v1:demo:alpha', envelope);
+    edge.seed('v1:demo:alpha', Response.json(envelope));
+
+    await expect(getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now: new Date('2026-03-03T12:00:00.000Z')
+    })).rejects.toThrow('offline');
+
+    expect(kv.has('v1:demo:alpha')).toBe(false);
+    expect(edge.has('v1:demo:alpha')).toBe(false);
+  });
+
+  it('fails closed for a record without a trusted fetched timestamp even when cleanup fails', async () => {
+    const adapter = buildAdapter({ maxPayloadAgeSeconds: 5400, fetchUpstream: vi.fn().mockRejectedValue(new Error('offline')) });
+    const kv = new MemoryKv();
+    const envelope = buildEnvelope('v1:demo:alpha', 'unknown-age', '2026-03-03T11:59:00.000Z', 30);
+    envelope.cacheMeta.fetchedAt = 'not-a-date';
+    envelope.data.fetchedAt = 'not-a-date';
+    kv.seed('v1:demo:alpha', envelope);
+    vi.spyOn(kv, 'delete').mockRejectedValue(new Error('cleanup unavailable'));
+
+    await expect(getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      now: new Date('2026-03-03T12:00:00.000Z')
+    })).rejects.toThrow('offline');
   });
 });

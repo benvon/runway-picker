@@ -35,6 +35,7 @@ describe('cache adapter registry', () => {
       deserialize: (cached) => (cached as { value: string }) ?? null,
       policy: {
         ttlSeconds: 10,
+        maxPayloadAgeSeconds: 30,
         staleWhileRevalidateSeconds: 1,
         staleOnErrorSeconds: 20,
         negativeCacheTtlSeconds: 2,

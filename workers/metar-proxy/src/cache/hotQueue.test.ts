@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
-  listHotCacheQueueEntries,
+  commitHotCacheQueueCursor,
+  listHotCacheQueuePage,
+  loadHotCacheQueueEntries,
   parseCacheRefresherConfig,
+  readHotCacheQueueCursor,
   readHotCacheQueueEntry,
+  recordHotCacheRefreshFailure,
+  recoverRejectedHotCacheQueueCursor,
   refreshIntervalSecondsForResource,
   touchHotCacheEntry,
   updateHotCacheEntryAfterRefresh,
@@ -70,6 +75,11 @@ describe('hot queue refresher config', () => {
     expect(refreshIntervalSecondsForResource('metar', config)).toBe(900);
     expect(refreshIntervalSecondsForResource('airport', config)).toBe(43200);
   });
+
+  it('normalizes a configured refresh cap below two to the effective floor', () => {
+    const config = parseCacheRefresherConfig(createEnv({ CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }));
+    expect(config.maxItemsPerRun).toBe(2);
+  });
 });
 
 function fakeProvenance(key: string, fetchedAt: string): CacheProvenance {
@@ -82,6 +92,7 @@ function fakeProvenance(key: string, fetchedAt: string): CacheProvenance {
     freshnessRemainingSeconds: 1800,
     servedAt: fetchedAt,
     ttlSeconds: 1800,
+    maxPayloadAgeSeconds: 5400,
     key,
     resource: 'metar'
   };
@@ -155,6 +166,40 @@ describe('readHotCacheQueueEntry', () => {
 });
 
 describe('touchHotCacheEntry', () => {
+  it('updates only demand state on an existing entry', async () => {
+    const metadataKey = 'v2:hot:metar:KJFK';
+    const store = new Map<string, unknown>([[metadataKey, {
+      schemaVersion: 3,
+      resource: 'metar',
+      normalizedKey: 'KJFK',
+      lastAccessedAt: '2026-03-06T11:00:00.000Z',
+      lastRefreshedAt: '2026-03-06T10:00:00.000Z',
+      consecutiveRefreshFailures: 2
+    }]]);
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key) => store.get(key) ?? null,
+        put: async (key, value) => { store.set(key, JSON.parse(value) as unknown); },
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: async () => {}
+      }
+    });
+
+    await touchHotCacheEntry({
+      env,
+      resource: 'metar',
+      normalizedKey: 'KJFK',
+      cache: fakeProvenance('v1:metar:KJFK', '2026-03-06T12:00:00.000Z'),
+      lastAccessedAt: '2026-03-06T12:05:00.000Z'
+    });
+
+    expect(store.get(metadataKey)).toMatchObject({
+      schemaVersion: 5,
+      lastAccessedAt: '2026-03-06T12:05:00.000Z'
+    });
+    expect(store.get(metadataKey)).not.toHaveProperty('consecutiveRefreshFailures');
+  });
+
   it('forwards expirationTtl to the KV put call', async () => {
     const puts: Array<[string, string, { expirationTtl?: number } | undefined]> = [];
     const env = createEnv({
@@ -337,8 +382,55 @@ describe('updateHotCacheEntryAfterRefresh', () => {
   });
 });
 
-describe('listHotCacheQueueEntries', () => {
-  it('returns empty array when KV does not support list', async () => {
+describe('recordHotCacheRefreshFailure', () => {
+  it('migrates V2 metadata, resets failures after success, and drops only the queue entry on the third failure', async () => {
+    const metadataKey = 'v2:hot:metar:KJFK';
+    const payloadKey = 'v1:metar:KJFK';
+    const store = new Map<string, unknown>([
+      [
+        metadataKey,
+        {
+          schemaVersion: 2,
+          resource: 'metar',
+          normalizedKey: 'KJFK',
+          lastAccessedAt: '2026-03-06T11:00:00.000Z',
+          lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+        }
+      ],
+      [payloadKey, { cached: true }]
+    ]);
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key) => store.get(key) ?? null,
+        put: async (key, value) => { store.set(key, JSON.parse(value) as unknown); },
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: async (key) => { store.delete(key); }
+      }
+    });
+    const entry = buildValidEntry('metar', 'KJFK', metadataKey);
+
+    await expect(recordHotCacheRefreshFailure(env, entry, 432000)).resolves.toEqual({
+      consecutiveRefreshFailures: 0,
+      dropped: false
+    });
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 2 });
+
+    await updateHotCacheEntryAfterRefresh(
+      env,
+      entry,
+      fakeProvenance(payloadKey, '2026-03-06T12:00:00.000Z'),
+      432000
+    );
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 5 });
+
+    await expect(recordHotCacheRefreshFailure(env, entry, 432000)).resolves.toEqual({ consecutiveRefreshFailures: 0, dropped: false });
+    expect(store.has(metadataKey)).toBe(true);
+    expect(store.get(payloadKey)).toEqual({ cached: true });
+  });
+});
+
+describe('hot queue scan pages', () => {
+  it('returns an empty completed page when KV does not support list', async () => {
     const env = createEnv({
       METAR_CACHE: {
         get: async () => null,
@@ -346,11 +438,11 @@ describe('listHotCacheQueueEntries', () => {
         delete: async () => {}
       }
     });
-    const result = await listHotCacheQueueEntries(env);
-    expect(result).toHaveLength(0);
+    const result = await listHotCacheQueuePage(env, 'metar', undefined, 1);
+    expect(result).toEqual({ metadataKeys: [], scanned: 0, listComplete: true });
   });
 
-  it('uses the v2 metadata namespace so legacy entries cannot consume a refresh scan', async () => {
+  it('scans only the requested resource namespace so other resources and legacy entries cannot consume its budget', async () => {
     const prefixes: string[] = [];
     const env = createEnv({
       METAR_CACHE: {
@@ -364,9 +456,9 @@ describe('listHotCacheQueueEntries', () => {
       }
     });
 
-    await listHotCacheQueueEntries(env, 1);
+    await listHotCacheQueuePage(env, 'airport', undefined, 1);
 
-    expect(prefixes).toEqual(['v2:hot:']);
+    expect(prefixes).toEqual(['v2:hot:airport:']);
   });
 
   it('derives the payload key instead of trusting a persisted queue cacheKey', async () => {
@@ -387,19 +479,20 @@ describe('listHotCacheQueueEntries', () => {
       }
     });
 
-    const [entry] = await listHotCacheQueueEntries(env);
+    const page = await listHotCacheQueuePage(env, 'airport', undefined, 1);
+    const [entry] = await loadHotCacheQueueEntries(env, page);
 
     expect(entry?.cacheKey).toBe('v1:airport:KJFK');
   });
 
-  it('returns all entries across multiple KV pages', async () => {
-    const allKeys = ['v2:hot:metar:KAAA', 'v2:hot:metar:KBBB', 'v2:hot:airport:KJFK'];
+  it('keeps page listing and metadata loading free of checkpoint writes', async () => {
+    const allKeys = ['v2:hot:metar:KAAA', 'v2:hot:metar:KBBB'];
     const store = new Map<string, unknown>(
       allKeys.map((key) => [
         key,
         {
           schemaVersion: 2,
-          resource: key.includes(':airport:') ? 'airport' : 'metar',
+          resource: 'metar',
           normalizedKey: key.split(':').pop(),
           cacheKey: key.replace('hot:', ''),
           lastAccessedAt: '2026-03-06T11:00:00.000Z',
@@ -410,7 +503,9 @@ describe('listHotCacheQueueEntries', () => {
     const env = createEnv({
       METAR_CACHE: {
         get: async (key) => store.get(key) ?? null,
-        put: async () => {},
+        put: async (key, value) => {
+          store.set(key, JSON.parse(value) as unknown);
+        },
         list: async (opts) => {
           // Serve one key per page to exercise multi-page pagination.
           const start = Number.parseInt(opts?.cursor ?? '0', 10);
@@ -422,13 +517,27 @@ describe('listHotCacheQueueEntries', () => {
             cursor: listComplete ? undefined : `${start + 1}`
           };
         },
-        delete: async () => {}
+        delete: async (key) => {
+          store.delete(key);
+        }
       }
     });
 
-    const result = await listHotCacheQueueEntries(env);
-    expect(result).toHaveLength(3);
-    expect(result.map((e) => e.normalizedKey).sort()).toEqual(['KAAA', 'KBBB', 'KJFK']);
+    store.set('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: '0' });
+    const first = await listHotCacheQueuePage(env, 'metar', '0', 1);
+    const firstEntries = await loadHotCacheQueueEntries(env, first);
+    expect(firstEntries.map((entry) => entry.normalizedKey)).toEqual(['KAAA']);
+    expect(first.scanned).toBe(1);
+    expect(first.listComplete).toBe(false);
+    expect(store.get('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '0' });
+
+    await commitHotCacheQueueCursor(env, 'metar', first);
+    expect(store.get('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '1' });
+
+    const second = await listHotCacheQueuePage(env, 'metar', first.nextCursor, 1);
+    expect(second.listComplete).toBe(true);
+    await commitHotCacheQueueCursor(env, 'metar', second);
+    expect(store.has('v2:control:hot-refresh-cursor:metar')).toBe(false);
   });
 
   it('skips malformed entries without failing', async () => {
@@ -458,12 +567,13 @@ describe('listHotCacheQueueEntries', () => {
       }
     });
 
-    const result = await listHotCacheQueueEntries(env);
+    const page = await listHotCacheQueuePage(env, 'metar', undefined, 2);
+    const result = await loadHotCacheQueueEntries(env, page);
     expect(result).toHaveLength(1);
     expect(result[0]?.normalizedKey).toBe('KJFK');
   });
 
-  it('stops scanning once maxScanEntries is reached', async () => {
+  it('bounds each resource page by its scan budget', async () => {
     const allKeys = Array.from({ length: 10 }, (_, i) => `v2:hot:metar:K${String(i).padStart(3, '0')}`);
     const store = new Map<string, unknown>(
       allKeys.map((key) => [
@@ -501,11 +611,111 @@ describe('listHotCacheQueueEntries', () => {
     });
 
     // With maxScanEntries=3, only the first 3 keys should be fetched.
-    const result = await listHotCacheQueueEntries(env, 3);
-    expect(result).toHaveLength(3);
+    const result = await listHotCacheQueuePage(env, 'metar', undefined, 3);
+    expect(result.metadataKeys).toHaveLength(3);
     // The list call should have been issued with limit=3, not the default 1000.
     expect(listCalls[0]).toBe(3);
     // Only one page call should have been made since 3 entries exhausted the cap.
     expect(listCalls).toHaveLength(1);
+  });
+
+  it('clears a malformed saved cursor and starts from the beginning with one bounded diagnostic', async () => {
+    const store = new Map<string, unknown>([
+      ['v2:control:hot-refresh-cursor:airport', { schemaVersion: 1, cursor: 42 }]
+    ]);
+    const listCursors: Array<string | undefined> = [];
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key) => store.get(key) ?? null,
+        put: async (key, value) => { store.set(key, JSON.parse(value) as unknown); },
+        list: async (options) => {
+          listCursors.push(options?.cursor);
+          return { keys: [], list_complete: true };
+        },
+        delete: async (key) => { store.delete(key); }
+      }
+    });
+
+    const cursor = await readHotCacheQueueCursor(env, 'airport');
+    await listHotCacheQueuePage(env, 'airport', cursor, 1);
+
+    expect(listCursors).toEqual([undefined]);
+    expect(store.has('v2:control:hot-refresh-cursor:airport')).toBe(false);
+    expect(warning).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith(
+      'Scheduled cache refresh cursor checkpoint reset.',
+      { resource: 'airport', reason: 'malformed' }
+    );
+    warning.mockRestore();
+  });
+
+  it('reads a valid cursor from raw JSON without changing the checkpoint', async () => {
+    const store = new Map<string, unknown>([
+      ['v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'opaque-cursor' }]
+    ]);
+    const deleteSpy = vi.fn();
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key, type) => {
+          const value = store.get(key) ?? null;
+          return type === 'text' && value !== null ? JSON.stringify(value) : value;
+        },
+        put: async () => {},
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: deleteSpy
+      }
+    });
+
+    await expect(readHotCacheQueueCursor(env, 'metar')).resolves.toBe('opaque-cursor');
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it('clears syntactically invalid raw JSON checkpoints and recovers from the prefix', async () => {
+    const deletedKeys: string[] = [];
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (_key, type) => (type === 'text' ? '{not-json' : null),
+        put: async () => {},
+        list: async () => ({ keys: [], list_complete: true }),
+        delete: async (key) => { deletedKeys.push(key); }
+      }
+    });
+
+    await expect(readHotCacheQueueCursor(env, 'airport')).resolves.toBeUndefined();
+    expect(deletedKeys).toEqual(['v2:control:hot-refresh-cursor:airport']);
+    expect(warning).toHaveBeenCalledWith(
+      'Scheduled cache refresh cursor checkpoint reset.',
+      { resource: 'airport', reason: 'malformed' }
+    );
+    warning.mockRestore();
+  });
+
+  it('clears a rejected saved cursor without deleting hot-entry or payload data', async () => {
+    const store = new Map<string, unknown>([
+      ['v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'stale' }],
+      ['v2:hot:metar:KJFK', { schemaVersion: 2, resource: 'metar', normalizedKey: 'KJFK', lastAccessedAt: '2026-03-06T11:00:00.000Z', lastRefreshedAt: '2026-03-06T10:00:00.000Z' }],
+      ['v1:metar:KJFK', { cached: true }]
+    ]);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const env = createEnv({
+      METAR_CACHE: {
+        get: async (key) => store.get(key) ?? null,
+        put: async (key, value) => { store.set(key, JSON.parse(value) as unknown); },
+        list: async () => ({ keys: [{ name: 'v2:hot:metar:KJFK' }], list_complete: true }),
+        delete: async (key) => { store.delete(key); }
+      }
+    });
+
+    await recoverRejectedHotCacheQueueCursor(env, 'metar');
+
+    expect(store.has('v2:hot:metar:KJFK')).toBe(true);
+    expect(store.has('v1:metar:KJFK')).toBe(true);
+    expect(warning).toHaveBeenCalledWith(
+      'Scheduled cache refresh cursor checkpoint reset.',
+      { resource: 'metar', reason: 'rejected' }
+    );
+    warning.mockRestore();
   });
 });

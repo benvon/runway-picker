@@ -9,6 +9,8 @@ export type CacheStatus =
 
 export interface CachePolicy {
   ttlSeconds: number;
+  /** Absolute payload-age limit. Records at or beyond it are never delivered. */
+  maxPayloadAgeSeconds: number;
   staleWhileRevalidateSeconds: number;
   staleOnErrorSeconds: number;
   negativeCacheTtlSeconds: number;
@@ -56,6 +58,7 @@ export interface CacheObservability {
 export interface CacheAdapterContext {
   request: Request;
   env: CacheEngineEnv;
+  signal?: AbortSignal;
 }
 
 export interface CacheResourceAdapter<TInput, TUpstream, TData> {
@@ -85,6 +88,7 @@ export interface CacheProvenance {
   freshnessRemainingSeconds: number;
   servedAt: string;
   ttlSeconds: number;
+  maxPayloadAgeSeconds: number;
   key: string;
   resource: string;
 }
@@ -103,14 +107,16 @@ export interface DurableObjectNamespaceLike {
   get(id: unknown): DurableObjectStub;
 }
 
+export interface KvListPage {
+  keys: Array<{ name: string }>;
+  list_complete: boolean;
+  cursor?: string;
+}
+
 export interface KvNamespaceLike {
-  get(key: string, type: 'json'): Promise<unknown>;
+  get(key: string, type: 'json' | 'text'): Promise<unknown>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
-  list?(options?: { prefix?: string; cursor?: string; limit?: number }): Promise<{
-    keys: Array<{ name: string }>;
-    list_complete: boolean;
-    cursor?: string;
-  }>;
+  list?(options?: { prefix?: string; cursor?: string; limit?: number }): Promise<KvListPage>;
   delete?(key: string): Promise<void>;
 }
 
@@ -132,6 +138,7 @@ export interface CacheEngineEnv {
 export interface EdgeCacheLike {
   match(request: Request): Promise<Response | undefined>;
   put(request: Request, response: Response): Promise<void>;
+  delete?(request: Request): Promise<boolean>;
 }
 
 export interface CacheEngineInput<TInput, TUpstream, TData> {
@@ -143,4 +150,6 @@ export interface CacheEngineInput<TInput, TUpstream, TData> {
   /** Injectable clock for cache-operation timing tests. */
   clock?: () => Date;
   now?: Date;
+  /** Scheduler-only upstream cancellation; shorter than coordinator and single-flight leases. */
+  upstreamSignal?: AbortSignal;
 }

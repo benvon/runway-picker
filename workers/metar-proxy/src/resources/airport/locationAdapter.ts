@@ -112,6 +112,7 @@ export const airportLocationResourceAdapter: CacheResourceAdapter<AirportResourc
   deserialize: deserializeAirportLocation,
   policy: {
     ttlSeconds: 2_592_000,
+    maxPayloadAgeSeconds: 10_368_000,
     staleWhileRevalidateSeconds: 2_592_000,
     staleOnErrorSeconds: 7_776_000,
     negativeCacheTtlSeconds: 3_600,

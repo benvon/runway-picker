@@ -1,110 +1,187 @@
 # Cache Architecture
 
-This repository uses a shared, adapter-driven cache framework in the METAR Worker to protect upstream APIs and support future cacheable resources.
+The METAR Worker uses a Cloudflare-native, adapter-driven cache. Its design has
+two deliberately separate concerns:
 
-## Goals
+1. serve validated resource data safely and efficiently; and
+2. refresh recently requested data fairly, without allowing cache bookkeeping to
+   corrupt request behavior.
 
-- Reuse cache entries across users.
-- Minimize upstream calls for expensive APIs.
-- Support stale serving when upstream is slow or unavailable.
-- Add new resources (airport info and future data sources) without rewriting cache orchestration.
+The boundary is important: cached payloads live in KV, while the Durable Object
+owns the complete demand-record lifecycle and all scheduler state.
 
-## Request flow
+## Design goals
 
-For each resource request, the worker executes this sequence:
+- Reuse validated data across users and avoid unnecessary provider traffic.
+- Fail safely when a cached record is malformed, too old, or inconsistent with
+  the request.
+- Permit bounded stale serving where a resource policy allows it, but never
+  extend a hard payload-age limit.
+- Keep client demand independent of refresh scheduling so a busy client cannot
+  overwrite scheduler state.
+- Make scheduled refreshes bounded, fair between METAR and airport data, and
+  recoverable after a Worker, KV, or provider failure.
 
-1. Normalize input and build a versioned cache key: `v1:{resource}:{normalizedKey}`.
-2. Check edge cache (`caches.default`).
-3. Check KV (`METAR_CACHE`).
-4. If missing/expired, acquire a per-key lock via Durable Object (`CACHE_COORDINATOR`).
-5. Only the lock owner refreshes upstream and writes cache.
-6. Non-owners either:
-   - wait for a fresh KV write, or
-   - serve stale when allowed by policy.
+## Components and ownership
 
-## Cache metadata contract
+| Component | Owns | Does not own |
+| --- | --- | --- |
+| Edge cache (`caches.default`) | Disposable local copy of a validated payload | Scheduler state or source of truth |
+| KV (`METAR_CACHE`) | Versioned payload envelopes | Demand records, cursors, leases, or refresh failure counters |
+| `CACHE_COORDINATOR` Durable Object | Per-key single-flight locks and the transactional demand/scheduler state machine | Cached payload bodies |
+| Resource adapter | Input normalization, provider access, data validation, and resource policy | Cross-resource scheduling |
 
-Successful API responses include a `cache` object with:
+This split is intentional. KV is excellent for read-heavy payload data and
+short-lived demand hints, but it is not used as a compare-and-swap coordination
+store. The Durable Object provides serialized, durable transitions for the
+state that must not race: active scheduler ownership, opaque continuations,
+failure counts, and pending removals. No external cache service, queue, or
+additional namespace is required.
 
-- `status`: `edge_hit`, `kv_hit`, `upstream_refresh`, `stale_while_refresh`, `stale_on_error`
-- `source`: `edge`, `kv`, `upstream`, `stale`
-- `ageSeconds`
-- `fetchedAt`
-- `expiresAt`
-- `freshnessRemainingSeconds` (whole seconds remaining, capped to the resource policy TTL)
-- `servedAt`
-- `ttlSeconds`
-- `key`
-- `resource`
+## Request path
 
-Headers:
+For a cacheable request, the Worker:
 
-- `X-Runway-Cache-Status`: canonical status header.
-- Successful fresh responses use `Cache-Control` values derived from
-  `freshnessRemainingSeconds` (`max-age` is capped at 60 seconds). Stale or
-  zero-remaining responses use `no-store`, so downstream caches cannot extend
-  the cache engine's freshness policy.
+1. normalizes the input and derives a versioned key such as
+   `v1:metar:KJFK`;
+2. checks the edge cache, then KV;
+3. validates every reusable envelope before delivery;
+4. on a miss or unusable copy, obtains a token-bound, per-key single-flight
+   lease from `CACHE_COORDINATOR`;
+5. lets only the lease owner call the provider and write the new envelope;
+6. lets other requests wait briefly for the fresh KV entry or use stale data
+   only when the resource policy permits it; and
+7. records successful client access as a best-effort coordinator demand touch.
+   A demand-write failure never fails the user request.
 
-## Adapter model
+The cache engine, rather than a resource adapter, writes authoritative envelope
+metadata. On both edge and KV reads it checks envelope identity, resource,
+policy version, canonical timestamps, and the resource validity horizon.
+Malformed or incompatible copies are cache misses and are removed best-effort;
+cleanup failure never makes an invalid copy deliverable.
 
-Each resource adapter implements:
+## Payload freshness and public contract
 
-- `resource`
-- `normalizeKey(input)`
-- `fetchUpstream(input, ctx)`
-- `validate(upstream, input, ctx)`
-- `serialize(data, key, resource)`
-- `deserialize(cached)`
-- `policy` (`ttlSeconds`, `staleWhileRevalidateSeconds`, `staleOnErrorSeconds`, `negativeCacheTtlSeconds`, `policyVersion`)
-- `observability(input, key)`
+Successful API responses include a `cache` object with `status`, `source`,
+`ageSeconds`, `fetchedAt`, `expiresAt`, `maxPayloadAgeSeconds`,
+`freshnessRemainingSeconds`, `servedAt`, `ttlSeconds`, `key`, and `resource`.
+`X-Runway-Cache-Status` carries the same canonical status in a header.
 
-`deserialize(cached)` is a cache trust boundary. It must validate every
-semantic invariant required for a response to be safely reused (including that
-the cached identity exactly matches the normalized request key). Tightening an
-invariant requires a schema-version bump so incompatible records are refreshed.
-For METAR records, this includes agreement among the envelope key, cached ICAO,
-and the station token anchored at the start of the raw observation.
+Fresh response headers are derived from remaining freshness and cap downstream
+`max-age` at 60 seconds. Stale and zero-remaining responses are `no-store`, so
+a downstream cache cannot lengthen the Worker policy.
 
-Registered adapters live in:
+METAR has a 30-minute fresh interval and a strict 90-minute payload-age limit
+measured from trusted `fetchedAt`. At or beyond that hard limit, METAR data is
+not served—even during an upstream outage. The Worker removes payload copies
+from KV and edge cache when possible, while retaining demand metadata so a
+later scheduler run or client request can recover the entry. Airport policies
+are defined by their adapter and are independent of METAR's hard limit.
 
-- `workers/metar-proxy/src/resources/index.ts`
+## Hot demand and scheduled refresh
 
-Current adapters:
+Only successful `/api/metar` and `/api/airport` responses enter the hot set.
+The named `CACHE_COORDINATOR` owns each demand row in its SQLite storage. A row
+contains the canonical resource/key, a coordinator-stamped access time and
+expiry, consecutive upstream-failure count, and optional suppression state.
+It does **not** contain a payload body. There are no `v2:hot:*` demand keys in
+the current design; old keys are ignored and expire naturally.
 
-- `metar`
-- `airport` (AirportDB-backed; daily-refresh policy)
-- `airport-location` (AirportDB-backed reference coordinates; long-lived and intentionally excluded from the hot-refresh queue)
+A cron runs every 15 minutes. It obtains the named scheduler lease from
+`CACHE_COORDINATOR`, then:
 
-The hot-refresh queue is only for resources whose complete refresh input can be reconstructed from a normalized ICAO key. Resource variants with different payload contracts must be modeled as distinct resources, not query-mode flags on a shared cache key.
+1. atomically expires inactive demand rows, claims a token-bound run, and
+   returns bounded METAR and airport candidates from coordinator storage;
+2. alternates the oldest candidates by resource, then acquires the same
+   token-bound per-key refresh lease used by the request path;
+3. while that lease is held, re-reads and validates the authoritative KV
+   envelope using the current clock. A current positive envelope or an
+   unexpired valid negative envelope satisfies maintenance without a provider
+   request; contention is deferred without waiting;
+4. performs at most the configured number of real upstream attempts (25 by
+   default). Only an actual provider attempt consumes this budget; cache hits
+   and contention do not; and
+5. renews its scheduler lease and immediately, idempotently applies each
+   processed outcome. The continuation advances only for entries that were
+   actually processed, so an attempt cap or later failure cannot sink the
+   remaining claimed entries.
 
-Hot metadata uses a versioned namespace (`v2:hot:*`) and stores only resource
-plus normalized key. The scheduler derives the payload key from that canonical
-identity, rather than trusting a separately persisted cache key. Older queue
-namespaces are deliberately not scanned and expire through their existing KV
-inactivity TTL.
+The initial lease is 300 seconds, which covers the default maximum of 25
+sequential ten-second attempts. Each processed entry renews a 60-second lease
+with the active run token. An infrastructure failure aborts the remaining run;
+already-applied item outcomes and their continuations remain durable, while
+unprocessed candidates are retried safely. Every upstream attempt, including
+METAR station validation, receives the same 10-second abort signal.
 
-## Adding a new resource
+## Failure and recovery semantics
 
-1. Create `workers/metar-proxy/src/resources/<resource>/adapter.ts` implementing the adapter interface.
-2. Add the adapter to `workers/metar-proxy/src/resources/index.ts`.
-3. Add route handler wiring (if exposing a new endpoint).
-4. Add tests:
-   - adapter contract tests
-   - engine behavior tests for the resource policy
-   - endpoint tests for response and cache metadata
-5. Choose policy values according to upstream constraints:
-   - daily-refresh sources should use longer TTLs and stale windows.
+Any satisfied maintenance state resets that entry's failure count: a current
+positive or negative envelope, a newly committed positive payload, or a newly
+committed adapter-approved stable negative. A failure after a provider attempt
+increments the count. Client accesses are neutral. Cache reads/writes,
+single-flight coordination, and other scheduler infrastructure failures abort
+the remaining run instead: they do not increment a provider-failure count.
 
-## Runtime bindings
+This typed maintenance contract is intentionally distinct from the request
+cache contract. Request handling may serve stale data, expose HTTP cache
+provenance, or reconstruct a stable-negative error for the client. Scheduled
+maintenance never interprets those request outcomes or error identities. It
+returns only `satisfied`, `deferred`, `provider_failed`, or
+`infrastructure_failed`, preventing a foreground negative cache write from
+being misclassified as a scheduler failure.
 
-`workers/metar-proxy/wrangler.jsonc` requires:
+Client touches are neutral: they update expiry but cannot erase failure history
+or reactivate a stuck background entry. After three consecutive upstream
+failures, the coordinator suppresses that row. Cache-hit and stale traffic
+cannot recreate it; only a newer successful payload refresh clears suppression.
+This is a true sink for a stuck entry, unlike deleting a record that the next
+cache hit immediately recreates. An idempotent Durable Object alarm removes
+expired rows and completed-run records even when refresh is disabled.
 
-- KV namespace binding: `METAR_CACHE`
-- Durable Object binding: `CACHE_COORDINATOR`
-- migration entry for `CacheSingleFlightCoordinator`
+The scheduler fails closed when its coordinator is unavailable or already
+owned. Payload KV read/write failures abort a run without failure-accounting
+mutation. Demand bookkeeping never relies on eventually consistent KV reads.
 
-The preview environment also binds `CACHE_COORDINATOR`.
+## Why this approach is sound
 
-## Operations
+The architecture uses Cloudflare primitives for the responsibilities they are
+good at: KV provides inexpensive payload data and the Durable Object's SQLite
+storage owns the authoritative control plane. A demand transition never spans
+two storage systems, preventing the lost-update and ambiguous rollback failures
+that occur when client touches and failure accounting depend on KV projections.
 
-- Scheduler monitoring and operational procedures are in [cache-refresh-operations.md](./cache-refresh-operations.md).
+The scheduler has explicit bounds (scan cap, attempt cap, per-attempt timeout,
+lease renewal, and completed-run retention), typed outcomes, and serialized
+demand mutations. Validation is at the cache trust boundary, so malformed or
+future/incompatible data is not made safe by accident. These are concrete
+properties covered by regression tests for slow runs, lease loss, corrupt
+metadata, cursor recovery, concurrent touches, and failed dequeue deletion.
+
+This is intentionally a small custom policy layer, not a reimplementation of a
+general cache service. It contains the application-specific contracts that a
+generic HTTP cache cannot know: resource validation, the METAR hard-age rule,
+fairness between resource types, and the three-failure dequeue policy.
+
+## Adapter model and extension
+
+Each adapter defines `resource`, `normalizeKey`, `fetchUpstream`, `validate`,
+`serialize`, `deserialize`, `policy`, and `observability`. `deserialize` is a
+trust boundary: it must prove every semantic invariant required for a safely
+reusable response. Tightening an invariant requires a policy/schema-version
+bump so incompatible records refresh.
+
+To add a hot-refreshed resource, add an adapter and route, define its policy,
+register it, and add adapter, engine, endpoint, and scheduler tests. The full
+refresh input must be reconstructable from the normalized key; variants with
+different payload contracts are separate resources. Long-lived reference data
+such as `airport-location` remains outside the hot scheduler.
+
+## Runtime bindings and operations
+
+`workers/metar-proxy/wrangler.jsonc` binds `METAR_CACHE` and
+`CACHE_COORDINATOR`; preview uses the corresponding isolated bindings. The
+coordinator is a SQLite-backed Durable Object declared by the
+`v1-cache-coordinator` migration.
+
+Operational controls, diagnostics, and safe intervention procedures are in
+[cache-refresh-operations.md](./cache-refresh-operations.md).
