@@ -1512,6 +1512,7 @@ describe('airport worker', () => {
   it('retries a rejected saved cursor from the prefix without deleting queue or payload data', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-03-06T12:00:00.000Z'));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
     const kv = new MemoryKv();
     kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'stale' });
     seedHotQueueEntry(kv, {
@@ -1639,6 +1640,7 @@ describe('airport worker', () => {
   });
 
   it('repeats a page from its prior cursor when checkpoint commit fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
     const kv = new MemoryKv();
     for (let index = 0; index < 21; index++) {
       const normalizedKey = `K${String(index).padStart(3, '0')}`;
