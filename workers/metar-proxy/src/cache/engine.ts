@@ -364,7 +364,13 @@ async function writeEdgeEnvelope<TData>(
     }
   });
 
-  await edgeCache.put(request, response);
+  try {
+    await edgeCache.put(request, response);
+  } catch {
+    // KV is authoritative. An edge promotion failure must not turn a
+    // successfully committed refresh into a scheduler infrastructure failure.
+    console.warn('Edge cache promotion failed.', { cacheKey });
+  }
 }
 
 async function readEdgeCacheRecords<TInput, TUpstream, TData>(

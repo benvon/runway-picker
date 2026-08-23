@@ -326,6 +326,33 @@ describe('cache engine', () => {
     expect(promoted?.headers.get('Cache-Control')).toBe('public, max-age=5, s-maxage=5');
   });
 
+  it('keeps an upstream refresh successful when the post-commit edge write fails', async () => {
+    const adapter = buildAdapter({ fetchUpstream: vi.fn().mockResolvedValue('fresh-value') });
+    const kv = new MemoryKv();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const edge: EdgeCacheLike = {
+      match: async () => undefined,
+      put: async () => {
+        throw new Error('edge unavailable');
+      }
+    };
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: edge,
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('upstream_refresh');
+    expect(kv.has('v1:demo:alpha')).toBe(true);
+    expect(adapter.fetchUpstream).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith('Edge cache promotion failed.', { cacheKey: 'v1:demo:alpha' });
+    warning.mockRestore();
+  });
+
   it('rechecks freshness after a delayed KV read before promoting a cache record', async () => {
     let now = new Date('2026-03-03T12:00:00.000Z');
     const adapter = buildAdapter({
