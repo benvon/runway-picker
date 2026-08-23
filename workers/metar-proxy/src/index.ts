@@ -398,6 +398,9 @@ async function isRefreshDue(
       now
     });
   if (inspection.kind !== 'valid') {
+    if (inspection.kind === 'negative') {
+      return false;
+    }
     return true;
   }
   return now.getTime() - readIsoTimestamp(inspection.fetchedAt) >= refreshIntervalMs;
@@ -627,13 +630,18 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
   const candidateCount = dueEntries.metar.length + dueEntries.airport.length;
   const toRefresh = selectRoundRobinDueEntries(dueEntries, candidateCount);
   let attemptedRefreshes = 0;
-  const outcomes: Array<{ identity: string; outcome: SchedulerMaintenanceOutcome; lastAccessedAt: string }> = [];
+  const outcomes: Array<{ identity: string; outcome: SchedulerMaintenanceOutcome; lastAccessedAt: string; demandVersion?: number }> = [];
   for (const entry of toRefresh) {
     if (attemptedRefreshes >= config.maxItemsPerRun) {
       break;
     }
     const outcome = await processScheduledRefreshEntry(env, entry);
-    outcomes.push({ identity: entry.metadataKey, outcome, lastAccessedAt: entry.lastAccessedAt });
+    outcomes.push({
+      identity: entry.metadataKey,
+      outcome,
+      lastAccessedAt: entry.lastAccessedAt,
+      demandVersion: entry.demandVersion
+    });
     if (outcome !== 'neutral') attemptedRefreshes += 1;
     if (!(await renewSchedulerRun(env.CACHE_COORDINATOR, lease.runId, 60))) {
       throw new Error('Scheduled cache refresh coordinator lease renewal failed.');

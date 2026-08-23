@@ -69,6 +69,7 @@ export function isUpstreamAttemptError(error: unknown): boolean {
 export type CacheMaintenanceInspection =
   | { kind: 'missing' }
   | { kind: 'valid'; fetchedAt: string }
+  | { kind: 'negative'; expiresAt: string }
   | { kind: 'expired' };
 
 function getRuntimeEdgeCache(): EdgeCacheLike | undefined {
@@ -539,15 +540,24 @@ export async function inspectCachedPayloadForMaintenance<TInput, TUpstream, TDat
     return { kind: 'missing' };
   }
   const record = toCachedRecord(raw, params.adapter, cacheKey, now);
-  if (!record) {
-    await purgeInvalidPayloadCopies(params.env, undefined, cacheKey, true, false);
-    return { kind: 'missing' };
+  if (record) {
+    if (!isWithinPayloadAge(record, now, params.adapter.policy)) {
+      await purgeInvalidPayloadCopies(params.env, undefined, cacheKey, true, false);
+      return { kind: 'expired' };
+    }
+    return { kind: 'valid', fetchedAt: record.fetchedAt.toISOString() };
   }
-  if (!isWithinPayloadAge(record, now, params.adapter.policy)) {
+
+  const negative = toCachedNegativeRecord(raw, params.adapter, cacheKey, params.input, now);
+  if (negative) {
+    if (negative.expiresAt.getTime() > now.getTime()) {
+      return { kind: 'negative', expiresAt: negative.expiresAt.toISOString() };
+    }
     await purgeInvalidPayloadCopies(params.env, undefined, cacheKey, true, false);
     return { kind: 'expired' };
   }
-  return { kind: 'valid', fetchedAt: record.fetchedAt.toISOString() };
+  await purgeInvalidPayloadCopies(params.env, undefined, cacheKey, true, false);
+  return { kind: 'missing' };
 }
 
 async function discardPayloadOutsideValidity<TData>(

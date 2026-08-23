@@ -271,7 +271,7 @@ describe('scheduler coordinator protocol', () => {
       const lease = await beginSchedulerRun(namespace, 30);
       await commitSchedulerRun(namespace, {
         runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
-        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess }]
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess, demandVersion: 1 }]
       });
     }
 
@@ -311,7 +311,7 @@ describe('scheduler coordinator protocol', () => {
       const lease = await beginSchedulerRun(namespace, 30);
       await commitSchedulerRun(namespace, {
         runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
-        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess }]
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess, demandVersion: 1 }]
       });
     }
 
@@ -340,7 +340,7 @@ describe('scheduler coordinator protocol', () => {
       const lease = await beginSchedulerRun(namespace, 30);
       await commitSchedulerRun(namespace, {
         runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
-        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt }]
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt, demandVersion: 1 }]
       });
     }
 
@@ -350,7 +350,42 @@ describe('scheduler coordinator protocol', () => {
     const thirdLease = await beginSchedulerRun(namespace, 30);
     await expect(commitSchedulerRun(namespace, {
       runId: thirdLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
-      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt }]
+      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt, demandVersion: 2 }]
+    })).resolves.toEqual({ dequeueIdentities: [identity] });
+  });
+
+  it('ignores a stale third-failure outcome after a newer demand touch', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:airport:KORD';
+    const firstAccess = new Date().toISOString();
+    const newerAccess = new Date(Date.now() + 1_000).toISOString();
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: firstAccess, expirationTtl: 3600
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: firstAccess, demandVersion: 1 }]
+      });
+    }
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: newerAccess, expirationTtl: 3600
+    });
+    const staleLease = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: staleLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: firstAccess, demandVersion: 1 }]
+    })).resolves.toEqual({ dequeueIdentities: [] });
+    expect(cache.read<{ demandVersion: number }>(identity)?.demandVersion).toBe(2);
+
+    const currentLease = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: currentLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: newerAccess, demandVersion: 2 }]
     })).resolves.toEqual({ dequeueIdentities: [identity] });
   });
 

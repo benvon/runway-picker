@@ -585,6 +585,28 @@ describe('cache engine', () => {
     expect(kv.getWriteOptions('v1:demo:alpha')).toEqual({ expirationTtl: 5 });
   });
 
+  it('reports a valid negative envelope to maintenance without purging it', async () => {
+    const fetchUpstream = vi.fn().mockRejectedValue(new DemoStableMissError());
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const request = new Request('https://example.com');
+
+    await expect(
+      getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env: { METAR_CACHE: kv } })
+    ).rejects.toMatchObject({ status: 404, code: 'DEMO_NOT_FOUND' });
+
+    await expect(inspectCachedPayloadForMaintenance({ adapter, input: { key: 'alpha' }, env: { METAR_CACHE: kv } }))
+      .resolves.toMatchObject({ kind: 'negative' });
+    expect(kv.has('v1:demo:alpha')).toBe(true);
+  });
+
   it('rejects a negative cache entry whose expiry exceeds its configured horizon', async () => {
     const fetchUpstream = vi.fn().mockResolvedValue('fresh');
     const adapter = buildAdapter({

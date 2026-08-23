@@ -8,6 +8,8 @@ export interface HotCacheEntry {
   resource: HotCacheResource;
   normalizedKey: string;
   lastAccessedAt: string;
+  /** Coordinator-issued version used to reject stale scheduler outcomes. */
+  demandVersion?: number;
   /** Legacy scheduler state; accepted only to lazily migrate old demand records. */
   lastRefreshedAt?: string;
   /** Legacy scheduler state; current demand records never write it. */
@@ -122,6 +124,9 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
   }
   const validatedEntry = entry as HotCacheEntry;
   const lastAccessedAt = validatedEntry.lastAccessedAt;
+  const demandVersion = Number.isSafeInteger(validatedEntry.demandVersion) && (validatedEntry.demandVersion ?? 0) > 0
+    ? validatedEntry.demandVersion
+    : undefined;
 
   return {
     schemaVersion: validatedEntry.schemaVersion,
@@ -129,6 +134,7 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
     normalizedKey: validatedEntry.normalizedKey,
     cacheKey: buildCacheKey(validatedEntry.resource, validatedEntry.normalizedKey),
     lastAccessedAt,
+    demandVersion,
     metadataKey
   };
 }

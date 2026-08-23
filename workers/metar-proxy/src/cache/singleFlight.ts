@@ -43,6 +43,11 @@ interface SchedulerFailureRecord {
   lastAccessedAt: string;
 }
 
+interface SchedulerDemandRecord {
+  version: number;
+  lastAccessedAt: string;
+}
+
 interface SchedulerDemandBody {
   resource: SchedulerResource;
   normalizedKey: string;
@@ -53,6 +58,7 @@ interface SchedulerDemandBody {
 interface SchedulerState {
   schemaVersion: 1;
   cursors: Partial<Record<SchedulerResource, string>>;
+  demands: Record<string, SchedulerDemandRecord>;
   failures: Record<string, SchedulerFailureRecord>;
   pendingDequeues: Record<string, SchedulerFailureRecord>;
   activeRun?: SchedulerRunRecord;
@@ -63,7 +69,7 @@ interface BeginRunBody { holdSeconds: number; }
 interface CommitRunBody {
   runId: string;
   cursors: Partial<Record<SchedulerResource, string>>;
-  outcomes: Array<{ identity: string; outcome: SchedulerMaintenanceOutcome; lastAccessedAt: string }>;
+  outcomes: Array<{ identity: string; outcome: SchedulerMaintenanceOutcome; lastAccessedAt: string; demandVersion?: number }>;
   inactivityTtlSeconds: number;
 }
 interface AbortRunBody { runId: string; }
@@ -204,8 +210,26 @@ function readPendingDequeues(
   return pendingDequeues;
 }
 
+function isDemandRecord(value: unknown): value is SchedulerDemandRecord {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    Number.isSafeInteger((value as Partial<SchedulerDemandRecord>).version) &&
+    (value as Partial<SchedulerDemandRecord>).version! > 0 &&
+    typeof (value as Partial<SchedulerDemandRecord>).lastAccessedAt === 'string' &&
+    Number.isFinite(Date.parse((value as Partial<SchedulerDemandRecord>).lastAccessedAt ?? ''))
+  );
+}
+
+function readDemandRecords(raw: unknown): Record<string, SchedulerDemandRecord> {
+  if (!raw || typeof raw !== 'object') return {};
+  return Object.fromEntries(
+    Object.entries(raw).filter((entry): entry is [string, SchedulerDemandRecord] => isDemandRecord(entry[1]))
+  );
+}
+
 function emptySchedulerState(): SchedulerState {
-  return { schemaVersion: 1, cursors: {}, failures: {}, pendingDequeues: {}, completedRuns: {} };
+  return { schemaVersion: 1, cursors: {}, demands: {}, failures: {}, pendingDequeues: {}, completedRuns: {} };
 }
 
 function readSchedulerState(raw: unknown): SchedulerState {
@@ -217,6 +241,7 @@ function readSchedulerState(raw: unknown): SchedulerState {
   return {
     schemaVersion: 1,
     cursors: readSchedulerCursors(candidate.cursors),
+    demands: readDemandRecords(candidate.demands),
     failures: candidate.failures,
     pendingDequeues: readPendingDequeues(candidate.failures, candidate.pendingDequeues),
     completedRuns: candidate.completedRuns,
@@ -266,10 +291,17 @@ async function handleDemandTouch(
   if (!body) return Response.json({ error: 'Invalid request body.' }, { status: 400 });
   if (!cache) return Response.json({ error: 'Cache binding unavailable.' }, { status: 503 });
   const identity = hotDemandIdentity(body.resource, body.normalizedKey);
+  const previousDemand = state.demands[identity];
+  const lastAccessedAt =
+    previousDemand && Date.parse(previousDemand.lastAccessedAt) > Date.parse(body.lastAccessedAt)
+      ? previousDemand.lastAccessedAt
+      : body.lastAccessedAt;
+  const demandVersion = (previousDemand?.version ?? 0) + 1;
 
-  // Persist the newer demand generation before writing its KV projection. A later
+  // Persist the newer demand version before writing its KV projection. A later
   // dequeue request is serialized behind this transition and cannot remove it.
   // Client traffic is neutral: it cannot reset ordinary scheduler failure history.
+  state.demands[identity] = { version: demandVersion, lastAccessedAt };
   delete state.pendingDequeues[identity];
   await storage.put(SCHEDULER_STATE_KEY, state);
   try {
@@ -279,7 +311,8 @@ async function handleDemandTouch(
         schemaVersion: HOT_DEMAND_SCHEMA_VERSION,
         resource: body.resource,
         normalizedKey: body.normalizedKey,
-        lastAccessedAt: body.lastAccessedAt
+        lastAccessedAt,
+        demandVersion
       }),
       { expirationTtl: body.expirationTtl as number }
     );
@@ -304,6 +337,7 @@ async function handlePendingDequeues(
     }
     delete state.pendingDequeues[identity];
     delete state.failures[identity];
+    delete state.demands[identity];
   }
   await storage.put(SCHEDULER_STATE_KEY, state);
   return new Response(null, { status: 204 });
@@ -361,6 +395,7 @@ async function handleSchedulerRequest(
       if (typeof identity === 'string' && state.pendingDequeues[identity]) {
         delete state.pendingDequeues[identity];
         delete state.failures[identity];
+        delete state.demands[identity];
       }
     }
     await storage.put(SCHEDULER_STATE_KEY, state);
@@ -381,9 +416,12 @@ async function handleSchedulerRequest(
   const dequeueIdentities = Object.keys(state.pendingDequeues);
   for (const outcome of body.outcomes) {
     if (!outcome || typeof outcome.identity !== 'string' || !outcome.identity || typeof outcome.lastAccessedAt !== 'string') continue;
+    const demand = state.demands[outcome.identity];
+    const staleDemandOutcome = Boolean(demand && outcome.demandVersion !== demand.version);
     if (outcome.outcome === 'refreshed') {
       delete state.failures[outcome.identity];
     } else if (outcome.outcome === 'upstream_failed') {
+      if (staleDemandOutcome) continue;
       const next = (state.failures[outcome.identity]?.consecutiveFailures ?? 0) + 1;
       if (next >= 3) {
         state.failures[outcome.identity] = { consecutiveFailures: next, lastAccessedAt: outcome.lastAccessedAt };
@@ -396,6 +434,9 @@ async function handleSchedulerRequest(
   }
   for (const [identity, failure] of Object.entries(state.failures)) {
     if (Date.parse(failure.lastAccessedAt) <= now - inactivityTtlSeconds * 1000) delete state.failures[identity];
+  }
+  for (const [identity, demand] of Object.entries(state.demands)) {
+    if (Date.parse(demand.lastAccessedAt) <= now - inactivityTtlSeconds * 1000) delete state.demands[identity];
   }
   state.cursors = cursors;
   state.completedRuns[runId] = dequeueIdentities;

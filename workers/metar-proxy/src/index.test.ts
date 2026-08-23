@@ -909,6 +909,7 @@ describe('metar worker', () => {
       resource: string;
       normalizedKey: string;
       lastAccessedAt: string;
+      demandVersion?: number;
       lastRefreshedAt: string;
       schemaVersion: number;
     }>('v2:hot:metar:KMCI');
@@ -920,6 +921,7 @@ describe('metar worker', () => {
     });
     expect(queueEntry).not.toHaveProperty('cacheKey');
     expect(typeof queueEntry?.lastAccessedAt).toBe('string');
+    expect(queueEntry?.demandVersion).toBe(1);
     expect(queueEntry).not.toHaveProperty('lastRefreshedAt');
   });
 
@@ -1483,6 +1485,37 @@ describe('airport worker', () => {
     const kv = new MemoryKv();
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
     expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
+  });
+
+  it('does not refresh or purge a hot airport with a valid negative cache entry', async () => {
+    const fetchUpstream = vi.fn().mockRejectedValue(new Error('scheduler should not fetch a cached miss'));
+    vi.stubGlobal('fetch', fetchUpstream);
+    const kv = new MemoryKv();
+    const now = new Date('2026-03-06T12:00:00.000Z');
+    kv.seed('v2:hot:airport:KORD', {
+      schemaVersion: 5,
+      resource: 'airport',
+      normalizedKey: 'KORD',
+      lastAccessedAt: '2026-03-06T11:50:00.000Z',
+      demandVersion: 1
+    });
+    kv.seed('v1:airport:KORD', {
+      schemaVersion: 9,
+      resource: 'airport',
+      key: 'v1:airport:KORD',
+      negative: { status: 404, code: 'ICAO_NOT_FOUND' },
+      cacheMeta: {
+        fetchedAt: '2026-03-06T11:30:00.000Z',
+        expiresAt: '2026-03-06T12:30:00.000Z',
+        policyVersion: 'airport-v6',
+        source: 'upstream'
+      }
+    });
+
+    await expect(runScheduledCacheRefresh({ METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' }, now)).resolves.toBeUndefined();
+
+    expect(fetchUpstream).not.toHaveBeenCalled();
+    expect(kv.has('v1:airport:KORD')).toBe(true);
   });
 
   it('does not re-list a resource that completed exactly at its initial scan budget', async () => {

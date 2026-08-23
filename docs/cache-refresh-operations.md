@@ -19,7 +19,8 @@ This runbook covers the scheduled demand refresh system in
   order when both have work. This prevents one resource type from starving the
   other.
 - A request touch updates demand only. It does not make an entry fresh or reset
-  a scheduler failure count.
+  a scheduler failure count. Each touch receives a new coordinator-owned
+  version, so an older failed scheduler outcome cannot remove the newer demand.
 
 ## Runtime controls
 
@@ -47,6 +48,9 @@ making another tuning change. Changes require a Worker deployment.
   that entry's failure count; stale-on-error and failed upstream work increment
   it. Cache/KV and coordinator failures abort the run without incrementing the
   count or advancing its cursor.
+- A valid negative-cache entry (for example, an airport 404) is not due for a
+  scheduled refresh before its recorded expiry. It is retained rather than
+  treated as malformed cache data.
 - On the third consecutive failure, the demand record is queued for removal.
   Its payload remains under normal cache policy. The coordinator performs the
   KV deletion itself, retains the removal intent until KV confirms it, and

@@ -86,11 +86,12 @@ The KV record is a schema-5 demand record at:
 - `v2:hot:metar:{ICAO}`
 - `v2:hot:airport:{ICAO}`
 
-It contains only the resource identity and `lastAccessedAt`. It does **not**
-contain a payload timestamp, refresh cursor, lease, or failure count. A client
-touch therefore cannot undo a concurrent scheduler outcome. Older hot-record
-shapes are accepted only for lazy migration and are rewritten on their next
-safe demand update.
+It contains only the resource identity, `lastAccessedAt`, and a coordinator-
+issued demand version. It does **not** contain a payload timestamp, refresh
+cursor, lease, or failure count. The scheduler carries that version through an
+attempt and ignores a stale failed outcome after a newer client touch. Older
+hot-record shapes are accepted only for lazy migration and are rewritten on
+their next safe demand update.
 
 A cron runs every 15 minutes. It obtains the named scheduler lease from
 `CACHE_COORDINATOR`, then:
@@ -102,7 +103,8 @@ A cron runs every 15 minutes. It obtains the named scheduler lease from
    its cursor;
 3. rechecks inactivity before eviction to avoid racing a client touch;
 4. derives due state from the validated payload envelope—not from demand
-   metadata—and selects the oldest due work in alternating resource order;
+   metadata—treating a valid negative envelope as non-due until its expiry,
+   and selects the oldest due work in alternating resource order;
 5. performs at most the configured number of real upstream attempts (25 by
    default); cache hits and contention are neutral and do not consume this
    budget;
@@ -127,6 +129,10 @@ cache hits are neutral and never change the count. Cache reads/writes,
 single-flight coordination, and other scheduler infrastructure failures abort
 the run instead: they do not increment a provider-failure count or advance its
 cursors.
+
+A failed outcome is applied only when its demand version still matches the
+latest coordinator touch. This prevents an already-scanned failure from
+dequeueing demand that a client refreshed while the scheduler was working.
 
 After three consecutive upstream failures, the Durable Object persists a
 pending-dequeue intent while retaining the failure state. The coordinator itself
