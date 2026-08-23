@@ -131,6 +131,23 @@ function toStableNegativeCacheEntry(value: unknown): StableNegativeCacheEntry | 
   return { status: 404, code: candidate.code };
 }
 
+function hasValidNegativeCacheMeta(
+  meta: Partial<CacheEnvelope<unknown>['cacheMeta']> | undefined,
+  policy: CachePolicy,
+  now: Date
+): boolean {
+  if (!hasValidCacheMeta(meta, policy, now)) {
+    return false;
+  }
+  const fetchedAt = parseCanonicalTimestamp(meta?.fetchedAt, now);
+  const expiresAt = parseIsoDate(meta?.expiresAt);
+  if (!fetchedAt || !expiresAt || expiresAt.toISOString() !== meta?.expiresAt) {
+    return false;
+  }
+  const maxExpiryMs = fetchedAt.getTime() + policy.negativeCacheTtlSeconds * 1000;
+  return expiresAt.getTime() >= fetchedAt.getTime() && expiresAt.getTime() <= maxExpiryMs;
+}
+
 function toCachedNegativeRecord<TInput, TUpstream, TData>(
   raw: unknown,
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
@@ -147,7 +164,7 @@ function toCachedNegativeRecord<TInput, TUpstream, TData>(
   }
 
   const candidate = raw as Partial<NegativeCacheEnvelope>;
-  if (!hasCompatibleEnvelope(candidate, adapter, cacheKey) || !hasValidCacheMeta(candidate.cacheMeta, adapter.policy, now)) {
+  if (!hasCompatibleEnvelope(candidate, adapter, cacheKey) || !hasValidNegativeCacheMeta(candidate.cacheMeta, adapter.policy, now)) {
     return null;
   }
 

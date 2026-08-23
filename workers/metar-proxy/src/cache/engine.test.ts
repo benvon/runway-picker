@@ -585,6 +585,42 @@ describe('cache engine', () => {
     expect(kv.getWriteOptions('v1:demo:alpha')).toEqual({ expirationTtl: 5 });
   });
 
+  it('rejects a negative cache entry whose expiry exceeds its configured horizon', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue('fresh');
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    kv.seed('v1:demo:alpha', {
+      schemaVersion: 2,
+      resource: 'demo',
+      key: 'v1:demo:alpha',
+      negative: { status: 404, code: 'DEMO_NOT_FOUND' },
+      cacheMeta: {
+        fetchedAt: '2026-03-03T11:59:59.000Z',
+        expiresAt: '2026-03-03T12:10:00.000Z',
+        policyVersion: 'demo-v1',
+        source: 'upstream'
+      }
+    });
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      now: new Date('2026-03-03T12:00:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('upstream_refresh');
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+  });
+
   it('returns the leader-written stable miss to concurrent single-flight followers', async () => {
     const fetchUpstream = vi.fn().mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 120));
@@ -682,7 +718,7 @@ describe('cache engine', () => {
       negative: { status: 404, code: 'DEMO_NOT_FOUND' },
       cacheMeta: {
         fetchedAt,
-        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        expiresAt: new Date(new Date(fetchedAt).getTime() + 5_000).toISOString(),
         policyVersion: 'demo-v1',
         source: 'upstream'
       }
@@ -723,7 +759,7 @@ describe('cache engine', () => {
       key: 'v1:demo:missing',
       negative: { status: 404, code: 'DEMO_NOT_FOUND' },
       cacheMeta: {
-        fetchedAt: '2026-03-03T11:59:55.000Z',
+        fetchedAt: '2026-03-03T11:59:58.000Z',
         expiresAt: '2026-03-03T12:00:03.000Z',
         policyVersion: 'demo-v1',
         source: 'upstream'

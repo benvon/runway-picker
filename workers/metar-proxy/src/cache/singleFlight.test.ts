@@ -284,6 +284,33 @@ describe('scheduler coordinator protocol', () => {
     })).resolves.toEqual({ dequeueIdentities: [] });
   });
 
+  it('preserves ordinary failure history when a client refreshes demand', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:airport:KORD';
+    const accessedAt = new Date().toISOString();
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: accessedAt, expirationTtl: 3600
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt }]
+      });
+    }
+
+    await recordSchedulerDemand(namespace, {
+      resource: 'airport', normalizedKey: 'KORD', lastAccessedAt: accessedAt, expirationTtl: 3600
+    });
+    const thirdLease = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: thirdLease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+      outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: accessedAt }]
+    })).resolves.toEqual({ dequeueIdentities: [identity] });
+  });
+
   it('abort releases a run without committing cursor or outcome state', async () => {
     const namespace = new InMemoryCoordinatorNamespace();
     const lease = await beginSchedulerRun(namespace, 30);

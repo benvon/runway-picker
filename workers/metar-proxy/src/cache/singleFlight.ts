@@ -269,8 +269,8 @@ async function handleDemandTouch(
 
   // Persist the newer demand generation before writing its KV projection. A later
   // dequeue request is serialized behind this transition and cannot remove it.
+  // Client traffic is neutral: it cannot reset ordinary scheduler failure history.
   delete state.pendingDequeues[identity];
-  delete state.failures[identity];
   await storage.put(SCHEDULER_STATE_KEY, state);
   try {
     await cache.put(

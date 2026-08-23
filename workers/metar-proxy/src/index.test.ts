@@ -1677,6 +1677,7 @@ describe('airport worker', () => {
   });
 
   it('keeps scans bounded per resource and never exceeds the global scan cap', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
     const kv = new MemoryKv();
     const listSpy = vi.spyOn(kv, 'list');
     for (let index = 0; index < 20; index++) {
