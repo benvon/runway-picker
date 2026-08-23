@@ -49,8 +49,8 @@ function withSchedulerCoordinator(env: CacheEngineEnv): CacheEngineEnv {
   return { ...env, CACHE_COORDINATOR: coordinator };
 }
 
-function runScheduledCacheRefresh(env: CacheEngineEnv, now?: Date): Promise<void> {
-  return runScheduledCacheRefreshFromWorker(withSchedulerCoordinator(env), now);
+function runScheduledCacheRefresh(env: CacheEngineEnv, clock?: () => Date): Promise<void> {
+  return runScheduledCacheRefreshFromWorker(withSchedulerCoordinator(env), clock);
 }
 
 class MemoryKv {
@@ -921,7 +921,7 @@ describe('metar worker', () => {
 
     expect(response.status).toBe(200);
     expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date(Date.now() + 31 * 60 * 1000));
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, () => new Date(Date.now() + 31 * 60 * 1000));
     expect(kv.has('v1:metar:KMCI')).toBe(true);
   });
 
@@ -1475,6 +1475,20 @@ describe('airport worker', () => {
     await runScheduledCacheRefresh({ METAR_CACHE: kv });
     expect(fetchUpstream).toHaveBeenCalledTimes(2);
     expect(listSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses the current inspection time for a foreground-refreshed payload', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-07T12:10:00.000Z'));
+    const fetchUpstream = vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 12 })]));
+    vi.stubGlobal('fetch', fetchUpstream);
+    const kv = new MemoryKv();
+    await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), { METAR_CACHE: kv });
+
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, () => new Date('2026-03-07T12:10:00.000Z'));
+
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
+    expect(kv.has('v1:metar:KMCI')).toBe(true);
   });
 
   it('refreshes bounded work fairly across METAR and airport demand', async () => {

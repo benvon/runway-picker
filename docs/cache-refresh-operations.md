@@ -107,9 +107,9 @@ operator interface.
    are removed by the coordinator alarm.
 5. Re-enable the refresher and deploy after stability is restored.
 
-Demand records have a KV TTL matching the inactivity setting, so they will
-eventually expire while the refresher is disabled. The scheduler's inactivity
-eviction is also disabled, however, so do not leave it off longer than needed.
+Demand records remain in coordinator SQLite while refresh is disabled. The
+coordinator alarm continues to remove inactive records without a scheduler run
+or a KV TTL, so disabling refresh does not create a manual cleanup burden.
 
 There is no manual per-demand deletion procedure. If a specific demand must be
 suppressed operationally, disable refresh while investigating the provider or

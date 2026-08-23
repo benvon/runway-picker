@@ -593,7 +593,7 @@ async function processScheduledRefreshEntry(
   return 'refreshed';
 }
 
-export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Date()): Promise<void> {
+export async function runScheduledCacheRefresh(env: CacheEngineEnv, clock: () => Date = () => new Date()): Promise<void> {
   const config = parseCacheRefresherConfig(env);
   if (!config.enabled) {
     return;
@@ -620,7 +620,9 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
       metadataKey: `scheduler:${candidate.resource}:${candidate.normalizedKey}`,
       cacheKey: buildCacheKey(candidate.resource, candidate.normalizedKey)
     };
-    if (await isRefreshDue(entry, env, now, config)) {
+    // Inspections occur sequentially and may follow a foreground refresh, so
+    // validate each payload against the time it is actually read.
+    if (await isRefreshDue(entry, env, clock(), config)) {
       dueEntries[entry.resource].push(entry);
     }
   }
