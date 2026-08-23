@@ -95,6 +95,11 @@ export interface SingleFlightLease {
   token: string;
 }
 
+export type SingleFlightAcquireResult =
+  | { kind: 'acquired'; lease: SingleFlightLease }
+  | { kind: 'contended' }
+  | { kind: 'unavailable' };
+
 function createToken(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -493,7 +498,7 @@ export class CacheSingleFlightCoordinator {
       return handleRelease(request, this.state.storage);
     }
 
-    if (url.pathname.startsWith('/scheduler/v2/')) {
+    if (url.pathname.startsWith('/scheduler/v2/') || url.pathname.startsWith('/scheduler/v3/')) {
       return this.ownedScheduler.fetch(request, url.pathname);
     }
 
@@ -633,6 +638,35 @@ export async function acquireSingleFlightLease(
     key,
     token: body.token
   };
+}
+
+/**
+ * Scheduler maintenance needs to distinguish normal contention from an
+ * unavailable coordinator. Request-path callers deliberately keep the older
+ * nullable helper because their wait/stale behavior is different.
+ */
+export async function acquireSingleFlightLeaseForMaintenance(
+  namespace: DurableObjectNamespaceLike | undefined,
+  key: string,
+  holdSeconds: number
+): Promise<SingleFlightAcquireResult> {
+  if (!namespace) return { kind: 'unavailable' };
+
+  try {
+    const stub = namespace.get(namespace.idFromName(key));
+    const response = await stub.fetch('https://cache-coordinator.internal/acquire', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, holdSeconds } satisfies AcquireLockBody)
+    });
+    if (!response.ok) return { kind: 'unavailable' };
+    const body = await response.json() as AcquireResponse;
+    if (!body.acquired) return { kind: 'contended' };
+    if (!body.token) return { kind: 'unavailable' };
+    return { kind: 'acquired', lease: { key, token: body.token } };
+  } catch {
+    return { kind: 'unavailable' };
+  }
 }
 
 export async function releaseSingleFlightLease(

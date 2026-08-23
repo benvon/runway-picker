@@ -1,4 +1,8 @@
-import { acquireSingleFlightLease, releaseSingleFlightLease } from './singleFlight';
+import {
+  acquireSingleFlightLease,
+  acquireSingleFlightLeaseForMaintenance,
+  releaseSingleFlightLease
+} from './singleFlight';
 import { buildCacheKey } from './keys';
 import { remainingFreshnessSeconds } from './freshness';
 import type {
@@ -72,9 +76,37 @@ export type CacheMaintenanceInspection =
   | { kind: 'negative'; expiresAt: string }
   | { kind: 'expired' };
 
+/** Internal scheduler contract; it is intentionally separate from HTTP cache provenance. */
+export type CacheMaintenanceOutcome =
+  | { kind: 'satisfied'; state: 'positive' | 'negative'; origin: 'already_current' | 'refreshed'; upstreamAttempted: boolean }
+  | { kind: 'deferred'; reason: 'contended'; upstreamAttempted: false }
+  | { kind: 'provider_failed'; category: 'timeout' | 'provider'; upstreamAttempted: true }
+  | { kind: 'infrastructure_failed'; stage: 'coordination' | 'kv_read' | 'kv_write'; upstreamAttempted: boolean; cause: Error };
+
 function getRuntimeEdgeCache(): EdgeCacheLike | undefined {
   const runtime = globalThis as unknown as { caches?: { default?: EdgeCacheLike } };
   return runtime.caches?.default;
+}
+
+async function readKvPayload(env: CacheEngineEnv, cacheKey: string): Promise<unknown> {
+  let raw: unknown;
+  try {
+    raw = await env.METAR_CACHE.get(cacheKey, 'text');
+  } catch (error) {
+    throw new CacheEngineError(error instanceof Error ? error.message : 'Cache payload read failed.', 503);
+  }
+  if (raw === null) return null;
+  if (typeof raw !== 'string') {
+    if (raw && typeof raw === 'object') return raw;
+    await purgeInvalidPayloadCopies(env, undefined, cacheKey, true, false);
+    return null;
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    await purgeInvalidPayloadCopies(env, undefined, cacheKey, true, false);
+    return null;
+  }
 }
 
 function buildEdgeRequest(cacheKey: string): Request {
@@ -804,6 +836,96 @@ async function refreshAsLeader<TInput, TUpstream, TData>(
   }
 }
 
+function maintenanceCurrentState<TData>(
+  records: CacheRecords<TData>,
+  policy: CachePolicy,
+  now: Date,
+  refreshIntervalSeconds: number
+): CacheMaintenanceOutcome | null {
+  if (records.data && isWithinPayloadAge(records.data, now, policy) && now.getTime() - records.data.fetchedAt.getTime() < refreshIntervalSeconds * 1000) {
+    return { kind: 'satisfied', state: 'positive', origin: 'already_current', upstreamAttempted: false };
+  }
+  return records.negative && records.negative.expiresAt.getTime() > now.getTime()
+    ? { kind: 'satisfied', state: 'negative', origin: 'already_current', upstreamAttempted: false }
+    : null;
+}
+
+function maintenanceInfrastructureFailure(stage: 'kv_read' | 'kv_write', upstreamAttempted: boolean, error: unknown): CacheMaintenanceOutcome {
+  return {
+    kind: 'infrastructure_failed',
+    stage,
+    upstreamAttempted,
+    cause: error instanceof Error ? error : new Error(`Cache payload ${stage === 'kv_read' ? 'read' : 'write'} failed.`)
+  };
+}
+
+async function refreshCachedEntryForMaintenance<TInput, TUpstream, TData>(
+  input: CacheEngineInput<TInput, TUpstream, TData>,
+  cacheKey: string,
+  clock: () => Date
+): Promise<CacheMaintenanceOutcome> {
+  const { adapter, env } = input;
+  const context: CacheAdapterContext = { request: input.request, env, signal: input.upstreamSignal };
+  let upstreamPayload: TUpstream;
+  let data: TData;
+  try {
+    upstreamPayload = await adapter.fetchUpstream(input.input, context);
+    data = await adapter.validate(upstreamPayload, input.input, context);
+  } catch (error) {
+    const negative = toNegativeEnvelope(adapter, error, cacheKey, clock());
+    if (!negative) return { kind: 'provider_failed', category: input.upstreamSignal?.aborted ? 'timeout' : 'provider', upstreamAttempted: true };
+    try {
+      await env.METAR_CACHE.put(cacheKey, JSON.stringify(negative), { expirationTtl: adapter.policy.negativeCacheTtlSeconds });
+    } catch (writeError) {
+      return maintenanceInfrastructureFailure('kv_write', true, writeError);
+    }
+    await writeEdgeEnvelope(input.edgeCache ?? getRuntimeEdgeCache(), cacheKey, negative, adapter.policy.negativeCacheTtlSeconds, clock);
+    return { kind: 'satisfied', state: 'negative', origin: 'refreshed', upstreamAttempted: true };
+  }
+  const envelope = toEnvelope(adapter, data, cacheKey, clock(), upstreamPayload);
+  const retentionTtl = Math.min(adapter.policy.maxPayloadAgeSeconds, adapter.policy.ttlSeconds + Math.max(adapter.policy.staleWhileRevalidateSeconds, adapter.policy.staleOnErrorSeconds));
+  try {
+    await env.METAR_CACHE.put(cacheKey, JSON.stringify(envelope), { expirationTtl: retentionTtl });
+  } catch (error) {
+    return maintenanceInfrastructureFailure('kv_write', true, error);
+  }
+  await writeEdgeEnvelope(input.edgeCache ?? getRuntimeEdgeCache(), cacheKey, envelope, adapter.policy.ttlSeconds, clock);
+  return { kind: 'satisfied', state: 'positive', origin: 'refreshed', upstreamAttempted: true };
+}
+
+/**
+ * Performs scheduler maintenance under the per-key refresh lease. Unlike the
+ * request path, this never uses HTTP provenance or thrown adapter errors as a
+ * scheduling protocol.
+ */
+export async function maintainCachedEntry<TInput, TUpstream, TData>(
+  input: CacheEngineInput<TInput, TUpstream, TData> & { refreshIntervalSeconds: number }
+): Promise<CacheMaintenanceOutcome> {
+  const { adapter, env } = input;
+  const clock = input.clock ?? (input.now ? () => input.now as Date : () => new Date());
+  const cacheKey = buildCacheKey(adapter.resource, adapter.normalizeKey(input.input));
+  const acquisition = await acquireSingleFlightLeaseForMaintenance(env.CACHE_COORDINATOR, cacheKey, 20);
+  if (acquisition.kind === 'contended') return { kind: 'deferred', reason: 'contended', upstreamAttempted: false };
+  if (acquisition.kind === 'unavailable') return { kind: 'infrastructure_failed', stage: 'coordination', upstreamAttempted: false, cause: new Error('Cache maintenance coordinator is unavailable.') };
+  try {
+    const now = clock();
+    let records: CacheRecords<TData>;
+    try {
+      records = toCacheRecords(await readKvPayload(env, cacheKey), adapter, cacheKey, input.input, now);
+    } catch (error) {
+      return maintenanceInfrastructureFailure('kv_read', false, error);
+    }
+    return maintenanceCurrentState(records, adapter.policy, now, input.refreshIntervalSeconds)
+      ?? await refreshCachedEntryForMaintenance(input, cacheKey, clock);
+  } finally {
+    try {
+      await releaseSingleFlightLease(env.CACHE_COORDINATOR, acquisition.lease);
+    } catch {
+      console.warn('Cache maintenance lease release failed.', { cacheKey });
+    }
+  }
+}
+
 export async function getOrRefreshCached<TInput, TUpstream, TData>(
   input: CacheEngineInput<TInput, TUpstream, TData>
 ): Promise<CacheEngineResult<TData>> {
@@ -812,28 +934,7 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
   const normalizedKey = adapter.normalizeKey(input.input);
   const cacheKey = buildCacheKey(adapter.resource, normalizedKey);
   const edgeCache = input.edgeCache ?? getRuntimeEdgeCache();
-  const readKv = async (key: string): Promise<unknown> => {
-    let raw: unknown;
-    try {
-      raw = await env.METAR_CACHE.get(key, 'text');
-    } catch (error) {
-      throw new CacheEngineError(error instanceof Error ? error.message : 'Cache payload read failed.', 503);
-    }
-    if (raw === null) return null;
-    // Cloudflare KV text reads are strings. Preserve object fixtures only for
-    // the narrow adapter boundary used by local in-memory test doubles.
-    if (typeof raw !== 'string') {
-      if (raw && typeof raw === 'object') return raw;
-      await purgeInvalidPayloadCopies(env, undefined, key, true, false);
-      return null;
-    }
-    try {
-      return JSON.parse(raw) as unknown;
-    } catch {
-      await purgeInvalidPayloadCopies(env, undefined, key, true, false);
-      return null;
-    }
-  };
+  const readKv = (key: string): Promise<unknown> => readKvPayload(env, key);
   const adapterContext: CacheAdapterContext = { request, env, signal: input.upstreamSignal };
 
   const cached = await readCachedData(adapter, cacheKey, input.input, env, edgeCache, readKv, clock);

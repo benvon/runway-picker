@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getOrRefreshCached, inspectCachedPayloadForMaintenance } from './engine';
+import { getOrRefreshCached, inspectCachedPayloadForMaintenance, maintainCachedEntry } from './engine';
 import type {
   CacheEnvelope,
   CacheEngineEnv,
@@ -634,6 +634,58 @@ describe('cache engine', () => {
     await expect(inspectCachedPayloadForMaintenance({ adapter, input: { key: 'alpha' }, env: { METAR_CACHE: kv } }))
       .resolves.toMatchObject({ kind: 'negative' });
     expect(kv.has('v1:demo:alpha')).toBe(true);
+  });
+
+  it('treats an already-cached stable negative as satisfied maintenance without another upstream attempt', async () => {
+    const fetchUpstream = vi.fn().mockRejectedValue(new DemoStableMissError());
+    const adapter = buildAdapter({
+      fetchUpstream,
+      negativeCache: {
+        toEntry: (error) =>
+          error instanceof DemoStableMissError ? { status: 404, code: 'DEMO_NOT_FOUND' } : null,
+        toError: (entry) => (entry.code === 'DEMO_NOT_FOUND' ? new DemoStableMissError() : null)
+      }
+    });
+    const kv = new MemoryKv();
+    const env: CacheEngineEnv = { METAR_CACHE: kv, CACHE_COORDINATOR: createCoordinatorNamespace() };
+    const request = new Request('https://example.com');
+
+    await expect(getOrRefreshCached({ adapter, input: { key: 'alpha' }, request, env })).rejects.toMatchObject({ status: 404 });
+
+    await expect(maintainCachedEntry({
+      adapter,
+      input: { key: 'alpha' },
+      request,
+      env,
+      refreshIntervalSeconds: 60
+    })).resolves.toEqual({
+      kind: 'satisfied',
+      state: 'negative',
+      origin: 'already_current',
+      upstreamAttempted: false
+    });
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+  });
+
+  it('reports per-key refresh contention as deferred rather than an infrastructure failure', async () => {
+    const kv = new MemoryKv();
+    const coordinator = createCoordinatorNamespace();
+    const env: CacheEngineEnv = { METAR_CACHE: kv, CACHE_COORDINATOR: coordinator };
+    const cacheKey = 'v1:demo:alpha';
+    const lock = coordinator.get(coordinator.idFromName(cacheKey));
+    await lock.fetch('https://cache-coordinator.internal/acquire', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: cacheKey, holdSeconds: 20 })
+    });
+
+    await expect(maintainCachedEntry({
+      adapter: buildAdapter(),
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env,
+      refreshIntervalSeconds: 60
+    })).resolves.toEqual({ kind: 'deferred', reason: 'contended', upstreamAttempted: false });
   });
 
   it('rejects a negative cache entry whose expiry exceeds its configured horizon', async () => {

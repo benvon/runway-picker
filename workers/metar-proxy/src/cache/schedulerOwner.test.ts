@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   OwnedSchedulerCoordinator,
+  applyOwnedSchedulerRunOutcome,
   abortOwnedSchedulerRun,
   beginOwnedSchedulerRun,
   completeOwnedSchedulerRun,
@@ -221,7 +222,7 @@ describe('owned scheduler demand lifecycle', () => {
     await abortOwnedSchedulerRun(namespace, run?.runId ?? '');
   });
 
-  it('advances the completed resource window so bounded runs reach later demand', async () => {
+  it('advances only processed work so bounded runs reach later demand without sinking unprocessed entries', async () => {
     const namespace = new Namespace();
     for (const key of ['KAAA', 'KBBB', 'KCCC', 'KDDD']) {
       await recordOwnedSchedulerDemand(namespace, 'metar', key, 3600);
@@ -229,11 +230,31 @@ describe('owned scheduler demand lifecycle', () => {
 
     const first = await beginOwnedSchedulerRun(namespace, 30, 2);
     expect(first?.candidates.map((candidate) => candidate.normalizedKey)).toEqual(['KAAA', 'KBBB']);
-    await completeOwnedSchedulerRun(namespace, first?.runId ?? '', []);
+    const firstCandidate = first?.candidates[0];
+    if (!first || !firstCandidate) throw new Error('Expected a claimed candidate.');
+    await expect(applyOwnedSchedulerRunOutcome(namespace, first.runId, { ...firstCandidate, outcome: 'neutral' })).resolves.toEqual([]);
+    await completeOwnedSchedulerRun(namespace, first.runId, []);
 
     const second = await beginOwnedSchedulerRun(namespace, 30, 2);
-    expect(second?.candidates.map((candidate) => candidate.normalizedKey)).toEqual(['KCCC', 'KDDD']);
+    expect(second?.candidates.map((candidate) => candidate.normalizedKey)).toEqual(['KBBB', 'KCCC']);
     await abortOwnedSchedulerRun(namespace, second?.runId ?? '');
+  });
+
+  it('keeps an immediately applied outcome when a later scheduler failure aborts the run', async () => {
+    const namespace = new Namespace();
+    for (const key of ['KAAA', 'KBBB', 'KCCC']) {
+      await recordOwnedSchedulerDemand(namespace, 'metar', key, 3600);
+    }
+    const first = await beginOwnedSchedulerRun(namespace, 30, 2);
+    const firstCandidate = first?.candidates[0];
+    if (!first || !firstCandidate) throw new Error('Expected a claimed candidate.');
+
+    await expect(applyOwnedSchedulerRunOutcome(namespace, first.runId, { ...firstCandidate, outcome: 'refreshed' })).resolves.toEqual([]);
+    await abortOwnedSchedulerRun(namespace, first.runId);
+
+    const retry = await beginOwnedSchedulerRun(namespace, 30, 2);
+    expect(retry?.candidates.map((candidate) => candidate.normalizedKey)).toEqual(['KBBB', 'KCCC']);
+    await abortOwnedSchedulerRun(namespace, retry?.runId ?? '');
   });
 
   it('cleans expired demand from its alarm path even when no run occurs', async () => {

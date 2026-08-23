@@ -1,8 +1,8 @@
 import {
   CacheEngineError,
   getOrRefreshCached,
-  inspectCachedPayloadForMaintenance,
-  isUpstreamAttemptError
+  maintainCachedEntry,
+  type CacheMaintenanceOutcome
 } from './cache/engine';
 import { provenanceAtResponseTime } from './cache/freshness';
 import {
@@ -21,15 +21,16 @@ import {
 } from './cache/hotQueue';
 import { getAdapterOrThrow } from './cache/registry';
 import {
-  CacheSingleFlightCoordinator,
-  type SchedulerMaintenanceOutcome
+  CacheSingleFlightCoordinator
 } from './cache/singleFlight';
 import {
   abortOwnedSchedulerRun,
+  applyOwnedSchedulerRunOutcome,
   beginOwnedSchedulerRun,
   completeOwnedSchedulerRun,
   recordOwnedSchedulerDemand,
-  renewOwnedSchedulerRun
+  renewOwnedSchedulerRun,
+  type OwnedSchedulerOutcome
 } from './cache/schedulerOwner';
 import { buildCacheKey } from './cache/keys';
 import type { CacheEngineEnv, CacheProvenance } from './cache/types';
@@ -317,34 +318,6 @@ function toRefreshRequest(resource: Endpoint, normalizedKey: string): Request {
   );
 }
 
-async function refreshQueueEntry(entry: HotCacheQueueEntry, env: CacheEngineEnv): Promise<CacheProvenance> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SCHEDULED_UPSTREAM_TIMEOUT_MS);
-  try {
-  if (entry.resource === 'metar') {
-    const result = await getOrRefreshCached({
-      adapter: METAR_ADAPTER,
-      input: { icao: entry.normalizedKey },
-      request: toRefreshRequest('metar', entry.normalizedKey),
-      env,
-      upstreamSignal: controller.signal
-    });
-    return result.cache;
-  }
-
-  const result = await getOrRefreshCached({
-    adapter: AIRPORT_ADAPTER,
-    input: { icao: entry.normalizedKey },
-    request: toRefreshRequest('airport', entry.normalizedKey),
-    env,
-    upstreamSignal: controller.signal
-  });
-  return result.cache;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 async function purgeEdgeCacheForKey(cacheKey: string): Promise<void> {
   const runtime = globalThis as unknown as {
     caches?: {
@@ -370,39 +343,6 @@ async function purgeEdgeCacheForKey(cacheKey: string): Promise<void> {
 
 function isInactive(lastAccessedAtMs: number, nowMs: number, inactivityTtlMs: number): boolean {
   return lastAccessedAtMs <= 0 || nowMs - lastAccessedAtMs > inactivityTtlMs;
-}
-
-async function isRefreshDue(
-  entry: HotCacheQueueEntry,
-  env: CacheEngineEnv,
-  now: Date,
-  config: ReturnType<typeof parseCacheRefresherConfig>
-): Promise<boolean> {
-  const refreshIntervalMs = refreshIntervalSecondsForResource(entry.resource, config) * 1000;
-  if (entry.schemaVersion < 4) {
-    const legacyTimestamp = readIsoTimestamp(entry.lastRefreshedAt ?? '');
-    return legacyTimestamp <= 0 || now.getTime() - legacyTimestamp >= refreshIntervalMs;
-  }
-  const inspection = entry.resource === 'metar'
-    ? await inspectCachedPayloadForMaintenance({
-      adapter: METAR_ADAPTER,
-      input: { icao: entry.normalizedKey },
-      env,
-      now
-    })
-    : await inspectCachedPayloadForMaintenance({
-      adapter: AIRPORT_ADAPTER,
-      input: { icao: entry.normalizedKey },
-      env,
-      now
-    });
-  if (inspection.kind !== 'valid') {
-    if (inspection.kind === 'negative') {
-      return false;
-    }
-    return true;
-  }
-  return now.getTime() - readIsoTimestamp(inspection.fetchedAt) >= refreshIntervalMs;
 }
 
 function selectRoundRobinDueEntries(
@@ -569,28 +509,72 @@ export const __cacheRefreshHelpers = {
   scanHotQueueEntries
 };
 
-async function processScheduledRefreshEntry(
+async function maintainScheduledCacheEntry(
   env: CacheEngineEnv,
-  entry: HotCacheQueueEntry
-): Promise<SchedulerMaintenanceOutcome> {
-  let refreshedCache: CacheProvenance;
+  entry: HotCacheQueueEntry,
+  config: ReturnType<typeof parseCacheRefresherConfig>,
+  clock: () => Date
+): Promise<CacheMaintenanceOutcome> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SCHEDULED_UPSTREAM_TIMEOUT_MS);
+  const common = {
+    request: toRefreshRequest(entry.resource, entry.normalizedKey),
+    env,
+    upstreamSignal: controller.signal,
+    refreshIntervalSeconds: refreshIntervalSecondsForResource(entry.resource, config),
+    clock
+  };
   try {
-    refreshedCache = await refreshQueueEntry(entry, env);
-  } catch (error) {
-    if (isUpstreamAttemptError(error)) {
-      console.error('Scheduled cache refresh upstream attempt failed.', { resource: entry.resource });
-      return 'upstream_failed';
-    }
-    throw error;
+    return entry.resource === 'metar'
+      ? await maintainCachedEntry({ ...common, adapter: METAR_ADAPTER, input: { icao: entry.normalizedKey } })
+      : await maintainCachedEntry({ ...common, adapter: AIRPORT_ADAPTER, input: { icao: entry.normalizedKey } });
+  } finally {
+    clearTimeout(timeout);
   }
-  if (refreshedCache.status === 'stale_on_error') {
-    console.error('Scheduled cache refresh upstream attempt fell back to stale data.', { resource: entry.resource });
-    return 'upstream_failed';
+}
+
+function schedulerEntryFromCandidate(candidate: { resource: 'metar' | 'airport'; normalizedKey: string; lastAccessedAt: string }): HotCacheQueueEntry {
+  return {
+    schemaVersion: 5,
+    resource: candidate.resource,
+    normalizedKey: candidate.normalizedKey,
+    lastAccessedAt: candidate.lastAccessedAt,
+    metadataKey: `scheduler:${candidate.resource}:${candidate.normalizedKey}`,
+    cacheKey: buildCacheKey(candidate.resource, candidate.normalizedKey)
+  };
+}
+
+function schedulerOutcomeForMaintenance(maintenance: CacheMaintenanceOutcome): OwnedSchedulerOutcome {
+  if (maintenance.kind === 'provider_failed') return 'upstream_failed';
+  return maintenance.kind === 'satisfied' ? 'refreshed' : 'neutral';
+}
+
+async function processScheduledCandidate(
+  env: CacheEngineEnv,
+  runId: string,
+  entry: HotCacheQueueEntry,
+  config: ReturnType<typeof parseCacheRefresherConfig>,
+  clock: () => Date
+): Promise<boolean> {
+  const maintenance = await maintainScheduledCacheEntry(env, entry, config, clock);
+  if (maintenance.kind === 'infrastructure_failed') {
+    console.error('Scheduled cache maintenance infrastructure failure.', { resource: entry.resource, stage: maintenance.stage });
+    throw maintenance.cause;
   }
-  if (refreshedCache.status !== 'upstream_refresh') {
-    return 'neutral';
+  if (maintenance.kind === 'provider_failed') {
+    console.error('Scheduled cache refresh upstream attempt failed.', { resource: entry.resource, category: maintenance.category });
   }
-  return 'refreshed';
+  const committedOutcome = await applyOwnedSchedulerRunOutcome(env.CACHE_COORDINATOR, runId, {
+    resource: entry.resource,
+    normalizedKey: entry.normalizedKey,
+    outcome: schedulerOutcomeForMaintenance(maintenance),
+    lastAccessedAt: entry.lastAccessedAt
+  });
+  if (committedOutcome === null) throw new Error('Scheduled cache refresh coordinator outcome commit failed.');
+  if (!(await renewOwnedSchedulerRun(env.CACHE_COORDINATOR, runId, 60))) {
+    throw new Error('Scheduled cache refresh coordinator lease renewal failed.');
+  }
+  return maintenance.upstreamAttempted;
 }
 
 export async function runScheduledCacheRefresh(env: CacheEngineEnv, clock: () => Date = () => new Date()): Promise<void> {
@@ -606,48 +590,26 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, clock: () =>
     return;
   }
   try {
-  const dueEntries: Record<'metar' | 'airport', HotCacheQueueEntry[]> = {
+  const candidatesByResource: Record<'metar' | 'airport', HotCacheQueueEntry[]> = {
     metar: [],
     airport: []
   };
 
   for (const candidate of lease.candidates) {
-    const entry: HotCacheQueueEntry = {
-      schemaVersion: 5,
-      resource: candidate.resource,
-      normalizedKey: candidate.normalizedKey,
-      lastAccessedAt: candidate.lastAccessedAt,
-      metadataKey: `scheduler:${candidate.resource}:${candidate.normalizedKey}`,
-      cacheKey: buildCacheKey(candidate.resource, candidate.normalizedKey)
-    };
-    // Inspections occur sequentially and may follow a foreground refresh, so
-    // validate each payload against the time it is actually read.
-    if (await isRefreshDue(entry, env, clock(), config)) {
-      dueEntries[entry.resource].push(entry);
-    }
+    const entry = schedulerEntryFromCandidate(candidate);
+    candidatesByResource[entry.resource].push(entry);
   }
 
-  const candidateCount = dueEntries.metar.length + dueEntries.airport.length;
-  const toRefresh = selectRoundRobinDueEntries(dueEntries, candidateCount);
+  const candidateCount = candidatesByResource.metar.length + candidatesByResource.airport.length;
+  const candidates = selectRoundRobinDueEntries(candidatesByResource, candidateCount);
   let attemptedRefreshes = 0;
-  const outcomes: Array<{ resource: 'metar' | 'airport'; normalizedKey: string; lastAccessedAt: string; outcome: SchedulerMaintenanceOutcome }> = [];
-  for (const entry of toRefresh) {
+  for (const entry of candidates) {
     if (attemptedRefreshes >= config.maxItemsPerRun) {
       break;
     }
-    const outcome = await processScheduledRefreshEntry(env, entry);
-    outcomes.push({
-      resource: entry.resource,
-      normalizedKey: entry.normalizedKey,
-      outcome,
-      lastAccessedAt: entry.lastAccessedAt
-    });
-    if (outcome !== 'neutral') attemptedRefreshes += 1;
-    if (!(await renewOwnedSchedulerRun(env.CACHE_COORDINATOR, lease.runId, 60))) {
-      throw new Error('Scheduled cache refresh coordinator lease renewal failed.');
-    }
+    if (await processScheduledCandidate(env, lease.runId, entry, config, clock)) attemptedRefreshes += 1;
   }
-  const committed = await completeOwnedSchedulerRun(env.CACHE_COORDINATOR, lease.runId, outcomes);
+  const committed = await completeOwnedSchedulerRun(env.CACHE_COORDINATOR, lease.runId, []);
   if (!committed) throw new Error('Scheduled cache refresh coordinator commit failed.');
   } catch (error) {
     await abortOwnedSchedulerRun(env.CACHE_COORDINATOR, lease.runId);

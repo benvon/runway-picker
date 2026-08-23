@@ -43,7 +43,11 @@ interface Run {
 interface FallbackState { schemaVersion: 1; demands: Record<string, Demand>; runs: Record<string, Run>; progress: Partial<Record<OwnedSchedulerResource, OwnedSchedulerCandidate>>; }
 interface DemandRow { resource: string; normalized_key: string; last_accessed_at: string; demand_version: number; }
 interface RunRow { expires_at_ms: number; status: string; }
-interface ItemRow { applied: number; demand_version: number; }
+interface ItemRow {
+  applied: number;
+  demand_version: number;
+  last_accessed_at: string;
+}
 
 const OBJECT_NAME = '__cache-refresh-scheduler-v1__';
 const FALLBACK_KEY = 'owned-scheduler-test-fallback';
@@ -79,9 +83,12 @@ class SchedulerState {
     // the demand; neutral cache-hit touches must not discard real failures.
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_demand_versions (resource TEXT NOT NULL, normalized_key TEXT NOT NULL, demand_version INTEGER NOT NULL, PRIMARY KEY(resource, normalized_key))');
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_runs (id TEXT PRIMARY KEY, expires_at_ms INTEGER NOT NULL, status TEXT NOT NULL, completed_at_ms INTEGER)');
-    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_run_items (run_id TEXT NOT NULL, resource TEXT NOT NULL, normalized_key TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, demand_version INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, resource, normalized_key))');
+    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_run_items (run_id TEXT NOT NULL, resource TEXT NOT NULL, normalized_key TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, demand_version INTEGER NOT NULL DEFAULT 0, last_accessed_at TEXT NOT NULL DEFAULT \'\', PRIMARY KEY(run_id, resource, normalized_key))');
     if (!this.rows<{ name: string }>('PRAGMA table_info(scheduler_run_items)').some((column) => column.name === 'demand_version')) {
       sql.exec('ALTER TABLE scheduler_run_items ADD COLUMN demand_version INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!this.rows<{ name: string }>('PRAGMA table_info(scheduler_run_items)').some((column) => column.name === 'last_accessed_at')) {
+      sql.exec("ALTER TABLE scheduler_run_items ADD COLUMN last_accessed_at TEXT NOT NULL DEFAULT ''");
     }
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_run_progress (run_id TEXT NOT NULL, resource TEXT NOT NULL, last_accessed_at TEXT NOT NULL, normalized_key TEXT NOT NULL, PRIMARY KEY(run_id, resource))');
     sql.exec('CREATE TABLE IF NOT EXISTS scheduler_progress (resource TEXT PRIMARY KEY, last_accessed_at TEXT NOT NULL, normalized_key TEXT NOT NULL)');
@@ -142,8 +149,7 @@ class SchedulerState {
       if (remaining > 0) { const kind: OwnedSchedulerResource = metar.length < metarLimit ? 'airport' : 'metar'; (kind === 'metar' ? metar : airport).push(...select(kind, remaining, kind === 'metar' ? metar.length : airport.length)); }
       const candidates = [...metar, ...airport];
       this.rows('INSERT INTO scheduler_runs(id, expires_at_ms, status) VALUES (?, ?, ?)', runId, now + holdSeconds * 1000, 'active');
-      for (const candidate of candidates) this.rows('INSERT INTO scheduler_run_items(run_id, resource, normalized_key, demand_version) VALUES (?, ?, ?, ?)', runId, candidate.resource, candidate.normalizedKey, candidate.demandVersion);
-      for (const kind of ['metar', 'airport'] as const) { const last = candidates.filter((candidate) => candidate.resource === kind).at(-1); if (last) this.rows('INSERT INTO scheduler_run_progress(run_id, resource, last_accessed_at, normalized_key) VALUES (?, ?, ?, ?)', runId, kind, last.lastAccessedAt, last.normalizedKey); }
+      for (const candidate of candidates) this.rows('INSERT INTO scheduler_run_items(run_id, resource, normalized_key, demand_version, last_accessed_at) VALUES (?, ?, ?, ?, ?)', runId, candidate.resource, candidate.normalizedKey, candidate.demandVersion, candidate.lastAccessedAt);
         return { runId, candidates: candidates.map((candidate) => ({ resource: candidate.resource, normalizedKey: candidate.normalizedKey, lastAccessedAt: candidate.lastAccessedAt })) };
       });
     }
@@ -162,31 +168,68 @@ class SchedulerState {
     if (this.sql) { this.transaction(() => { this.setup(); this.rows('DELETE FROM scheduler_run_items WHERE run_id = ?', runId); this.rows('DELETE FROM scheduler_run_progress WHERE run_id = ?', runId); this.rows('DELETE FROM scheduler_runs WHERE id = ? AND status = ?', runId, 'active'); }); return; }
     const state = await this.fallback(); if (state.runs[runId]?.status === 'active') delete state.runs[runId]; await this.save(state);
   }
-  // Completion validates claimed work, applies outcomes, and advances durable
-  // continuation together; splitting those branches would weaken that contract.
-  // eslint-disable-next-line complexity
+  private applySqlOutcome(runId: string, outcome: OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }, now: number): string[] {
+    if (!resource(outcome.resource) || !outcome.normalizedKey || !['refreshed', 'upstream_failed', 'neutral'].includes(outcome.outcome)) return [];
+    const item = this.rows<ItemRow>('SELECT applied, demand_version, last_accessed_at FROM scheduler_run_items WHERE run_id = ? AND resource = ? AND normalized_key = ? LIMIT 1', runId, outcome.resource, outcome.normalizedKey)[0];
+    if (!item || item.applied !== 0) return [];
+    this.rows('UPDATE scheduler_run_items SET applied = 1 WHERE run_id = ? AND resource = ? AND normalized_key = ?', runId, outcome.resource, outcome.normalizedKey);
+    if (outcome.outcome === 'refreshed') this.rows('UPDATE scheduler_demands SET failures = 0, suppressed_at_ms = NULL WHERE resource = ? AND normalized_key = ?', outcome.resource, outcome.normalizedKey);
+    const suppressed: string[] = [];
+    if (outcome.outcome === 'upstream_failed') {
+      const demand = this.rows<{ failures: number; demand_version: number }>('SELECT demands.failures, COALESCE(versions.demand_version, 0) AS demand_version FROM scheduler_demands AS demands LEFT JOIN scheduler_demand_versions AS versions ON versions.resource = demands.resource AND versions.normalized_key = demands.normalized_key WHERE demands.resource = ? AND demands.normalized_key = ? LIMIT 1', outcome.resource, outcome.normalizedKey)[0];
+      if (demand && demand.demand_version === item.demand_version) {
+        const failures = demand.failures + 1;
+        this.rows('UPDATE scheduler_demands SET failures = ?, suppressed_at_ms = CASE WHEN ? >= 3 THEN ? ELSE suppressed_at_ms END WHERE resource = ? AND normalized_key = ?', failures, failures, now, outcome.resource, outcome.normalizedKey);
+        if (failures >= 3) suppressed.push(identity(outcome));
+      }
+    }
+    this.rows('INSERT INTO scheduler_progress(resource, last_accessed_at, normalized_key) VALUES (?, ?, ?) ON CONFLICT(resource) DO UPDATE SET last_accessed_at = excluded.last_accessed_at, normalized_key = excluded.normalized_key', outcome.resource, item.last_accessed_at || outcome.lastAccessedAt, outcome.normalizedKey);
+    return suppressed;
+  }
+  private applyFallbackOutcome(state: FallbackState, run: Run, outcome: OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }, now: number): string[] {
+    if (!resource(outcome.resource) || !outcome.normalizedKey || !['refreshed', 'upstream_failed', 'neutral'].includes(outcome.outcome)) return [];
+    const key = identity(outcome); const candidate = run.candidates.find((value) => identity(value) === key);
+    if (!candidate || run.applied[key]) return [];
+    run.applied[key] = true;
+    const demand = state.demands[key];
+    const suppressed: string[] = [];
+    if (demand) {
+      if (outcome.outcome === 'refreshed') { demand.failures = 0; delete demand.suppressedAtMs; }
+      else if (outcome.outcome === 'upstream_failed' && demand.demandVersion === candidate.demandVersion) {
+        demand.failures += 1;
+        if (demand.failures >= 3) { demand.suppressedAtMs = now; suppressed.push(key); }
+      }
+    }
+    state.progress[outcome.resource] = candidate;
+    return suppressed;
+  }
+  // Each result advances only the continuation position that was actually
+  // processed. This prevents attempt limits or an infrastructure abort from
+  // silently dropping the remaining claimed candidates.
+  async apply(runId: string, outcome: OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }, now: number): Promise<string[] | null> {
+    if (this.sql) return this.transaction(() => {
+      this.setup(); this.cleanSql(now);
+      const run = this.rows<RunRow>('SELECT expires_at_ms, status FROM scheduler_runs WHERE id = ? LIMIT 1', runId)[0];
+      if (!run || run.status !== 'active' || run.expires_at_ms <= now) return null;
+      return this.applySqlOutcome(runId, outcome, now);
+    });
+    const state = await this.fallback(); this.cleanFallback(state, now); const run = state.runs[runId];
+    if (!run || run.status !== 'active' || run.expiresAtMs <= now) return null;
+    const suppressed = this.applyFallbackOutcome(state, run, outcome, now); await this.save(state); return suppressed;
+  }
+  // Completion retains the batch API for compatibility, but applies every
+  // supplied item with the same per-item transaction semantics as `apply`.
   async complete(runId: string, outcomes: Array<OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }>, now: number): Promise<string[] | null> {
     if (this.sql) {
       // The claimed-item check and state transition must share one transaction.
-      // eslint-disable-next-line complexity
       return this.transaction(() => {
       this.setup(); this.cleanSql(now); const run = this.rows<RunRow>('SELECT expires_at_ms, status FROM scheduler_runs WHERE id = ? LIMIT 1', runId)[0]; if (!run || run.status !== 'active' || run.expires_at_ms <= now) return null;
-      const suppressed: string[] = [];
-      for (const outcome of outcomes) {
-        if (!resource(outcome.resource) || !outcome.normalizedKey || !['refreshed', 'upstream_failed', 'neutral'].includes(outcome.outcome)) continue;
-        const item = this.rows<ItemRow>('SELECT applied, demand_version FROM scheduler_run_items WHERE run_id = ? AND resource = ? AND normalized_key = ? LIMIT 1', runId, outcome.resource, outcome.normalizedKey)[0]; if (!item || item.applied !== 0) continue;
-        this.rows('UPDATE scheduler_run_items SET applied = 1 WHERE run_id = ? AND resource = ? AND normalized_key = ?', runId, outcome.resource, outcome.normalizedKey);
-        if (outcome.outcome === 'refreshed') this.rows('UPDATE scheduler_demands SET failures = 0, suppressed_at_ms = NULL WHERE resource = ? AND normalized_key = ?', outcome.resource, outcome.normalizedKey);
-        if (outcome.outcome === 'upstream_failed') { const demand = this.rows<{ failures: number; demand_version: number }>('SELECT demands.failures, COALESCE(versions.demand_version, 0) AS demand_version FROM scheduler_demands AS demands LEFT JOIN scheduler_demand_versions AS versions ON versions.resource = demands.resource AND versions.normalized_key = demands.normalized_key WHERE demands.resource = ? AND demands.normalized_key = ? LIMIT 1', outcome.resource, outcome.normalizedKey)[0]; if (demand && demand.demand_version === item.demand_version) { const failures = demand.failures + 1; this.rows('UPDATE scheduler_demands SET failures = ?, suppressed_at_ms = CASE WHEN ? >= 3 THEN ? ELSE suppressed_at_ms END WHERE resource = ? AND normalized_key = ?', failures, failures, now, outcome.resource, outcome.normalizedKey); if (failures >= 3) suppressed.push(identity(outcome)); } }
-      }
-        this.rows('INSERT INTO scheduler_progress(resource, last_accessed_at, normalized_key) SELECT resource, last_accessed_at, normalized_key FROM scheduler_run_progress WHERE run_id = ? ON CONFLICT(resource) DO UPDATE SET last_accessed_at = excluded.last_accessed_at, normalized_key = excluded.normalized_key', runId);
+      const suppressed = outcomes.flatMap((outcome) => this.applySqlOutcome(runId, outcome, now));
         this.rows('UPDATE scheduler_runs SET status = ?, completed_at_ms = ? WHERE id = ?', 'completed', now, runId); return suppressed;
       });
     }
     const state = await this.fallback(); this.cleanFallback(state, now); const run = state.runs[runId]; if (!run || run.status !== 'active' || run.expiresAtMs <= now) return null;
-    const candidates = new Map(run.candidates.map((candidate) => [identity(candidate), candidate])); const suppressed: string[] = [];
-    for (const outcome of outcomes) { const key = identity(outcome); const candidate = candidates.get(key); if (!candidate || run.applied[key]) continue; run.applied[key] = true; const demand = state.demands[key]; if (!demand) continue; if (outcome.outcome === 'refreshed') { demand.failures = 0; delete demand.suppressedAtMs; } else if (outcome.outcome === 'upstream_failed' && demand.demandVersion === candidate.demandVersion) { demand.failures += 1; if (demand.failures >= 3) { demand.suppressedAtMs = now; suppressed.push(key); } } }
-    for (const kind of ['metar', 'airport'] as const) { const last = run.candidates.filter((candidate) => candidate.resource === kind).at(-1); if (last) state.progress[kind] = last; }
+    const suppressed = outcomes.flatMap((outcome) => this.applyFallbackOutcome(state, run, outcome, now));
     run.status = 'completed'; run.completedAtMs = now; await this.save(state); return suppressed;
   }
   async cleanup(now: number): Promise<number | null> {
@@ -208,6 +251,7 @@ export class OwnedSchedulerCoordinator {
     const runId = stringField(body, 'runId'); if (!runId) return Response.json({ error: 'Invalid request body.' }, { status: 400 });
     if (path === '/scheduler/v2/abort') { await this.state.abort(runId); return Response.json({ ok: true }); }
     if (path === '/scheduler/v2/renew') { const hold = numberField(body, 'holdSeconds'); if (!validPositive(hold) || !(await this.state.renew(runId, hold, now))) return Response.json({ error: 'Run is not active.' }, { status: 409 }); return Response.json({ ok: true }); }
+    if (path === '/scheduler/v3/apply') { const outcome = body && typeof body === 'object' ? (body as { outcome?: OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome } }).outcome : null; if (!outcome) return Response.json({ error: 'Invalid request body.' }, { status: 400 }); const suppressedIdentities = await this.state.apply(runId, outcome, now); return suppressedIdentities === null ? Response.json({ error: 'Run is not active.' }, { status: 409 }) : Response.json({ suppressedIdentities }); }
     if (path === '/scheduler/v2/complete') { const outcomes = body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>).outcomes) ? (body as { outcomes: Array<OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }> }).outcomes : null; if (!outcomes) return Response.json({ error: 'Invalid request body.' }, { status: 400 }); const suppressedIdentities = await this.state.complete(runId, outcomes, now); return suppressedIdentities === null ? Response.json({ error: 'Run is not active.' }, { status: 409 }) : Response.json({ suppressedIdentities }); }
     return Response.json({ error: 'Not found.' }, { status: 404 });
   }
@@ -220,4 +264,5 @@ export async function recordOwnedSchedulerDemand(namespace: DurableObjectNamespa
 export async function beginOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, holdSeconds: number, maxCandidates: number): Promise<{ runId: string; candidates: OwnedSchedulerCandidate[] } | null> { const result = await request<{ acquired?: boolean; runId?: string; candidates?: OwnedSchedulerCandidate[] }>(namespace, '/scheduler/v2/begin', { holdSeconds, maxCandidates }); return result?.acquired && typeof result.runId === 'string' && Array.isArray(result.candidates) ? { runId: result.runId, candidates: result.candidates } : null; }
 export async function renewOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string, holdSeconds: number): Promise<boolean> { return Boolean(await request(namespace, '/scheduler/v2/renew', { runId, holdSeconds })); }
 export async function abortOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string): Promise<void> { await request(namespace, '/scheduler/v2/abort', { runId }); }
+export async function applyOwnedSchedulerRunOutcome(namespace: DurableObjectNamespaceLike | undefined, runId: string, outcome: OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }): Promise<string[] | null> { const result = await request<{ suppressedIdentities?: unknown }>(namespace, '/scheduler/v3/apply', { runId, outcome }); return result && Array.isArray(result.suppressedIdentities) && result.suppressedIdentities.every((value) => typeof value === 'string') ? result.suppressedIdentities : null; }
 export async function completeOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string, outcomes: Array<OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }>): Promise<string[] | null> { const result = await request<{ suppressedIdentities?: unknown }>(namespace, '/scheduler/v2/complete', { runId, outcomes }); return result && Array.isArray(result.suppressedIdentities) && result.suppressedIdentities.every((value) => typeof value === 'string') ? result.suppressedIdentities : null; }

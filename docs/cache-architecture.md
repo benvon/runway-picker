@@ -92,30 +92,43 @@ A cron runs every 15 minutes. It obtains the named scheduler lease from
 
 1. atomically expires inactive demand rows, claims a token-bound run, and
    returns bounded METAR and airport candidates from coordinator storage;
-2. derives due state from the validated payload envelope—not from demand
-   metadata—treating a valid negative envelope as non-due until its expiry,
-   and selects the oldest due work in alternating resource order;
-3. performs at most the configured number of real upstream attempts (25 by
-   default); cache hits and contention are neutral and do not consume this
-   budget;
-4. renews its token-bound scheduler lease after each processed entry and
-   transactionally applies each claimed outcome exactly once.
+2. alternates the oldest candidates by resource, then acquires the same
+   token-bound per-key refresh lease used by the request path;
+3. while that lease is held, re-reads and validates the authoritative KV
+   envelope using the current clock. A current positive envelope or an
+   unexpired valid negative envelope satisfies maintenance without a provider
+   request; contention is deferred without waiting;
+4. performs at most the configured number of real upstream attempts (25 by
+   default). Only an actual provider attempt consumes this budget; cache hits
+   and contention do not; and
+5. renews its scheduler lease and immediately, idempotently applies each
+   processed outcome. The continuation advances only for entries that were
+   actually processed, so an attempt cap or later failure cannot sink the
+   remaining claimed entries.
 
 The initial lease is 300 seconds, which covers the default maximum of 25
 sequential ten-second attempts. Each processed entry renews a 60-second lease
-with the active run token. If renewal or commit fails, the Worker aborts without
-committing new cursors or outcomes; another cron can retry safely. Every
-upstream attempt, including METAR station validation, receives the same
-10-second abort signal.
+with the active run token. An infrastructure failure aborts the remaining run;
+already-applied item outcomes and their continuations remain durable, while
+unprocessed candidates are retried safely. Every upstream attempt, including
+METAR station validation, receives the same 10-second abort signal.
 
 ## Failure and recovery semantics
 
-An actual upstream refresh resets that entry's failure count. A stale-on-error
-result or a failure after a provider attempt increments it. Client accesses and
-cache hits are neutral and never change the count. Cache reads/writes,
+Any satisfied maintenance state resets that entry's failure count: a current
+positive or negative envelope, a newly committed positive payload, or a newly
+committed adapter-approved stable negative. A failure after a provider attempt
+increments the count. Client accesses are neutral. Cache reads/writes,
 single-flight coordination, and other scheduler infrastructure failures abort
-the run instead: they do not increment a provider-failure count or advance its
-cursors.
+the remaining run instead: they do not increment a provider-failure count.
+
+This typed maintenance contract is intentionally distinct from the request
+cache contract. Request handling may serve stale data, expose HTTP cache
+provenance, or reconstruct a stable-negative error for the client. Scheduled
+maintenance never interprets those request outcomes or error identities. It
+returns only `satisfied`, `deferred`, `provider_failed`, or
+`infrastructure_failed`, preventing a foreground negative cache write from
+being misclassified as a scheduler failure.
 
 Client touches are neutral: they update expiry but cannot erase failure history
 or reactivate a stuck background entry. After three consecutive upstream
