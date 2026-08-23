@@ -8,9 +8,9 @@ export interface HotCacheEntry {
   resource: HotCacheResource;
   normalizedKey: string;
   lastAccessedAt: string;
-  /** Legacy V2/V3 field; never written by the current queue schema. */
+  /** Legacy scheduler state; accepted only to lazily migrate old demand records. */
   lastRefreshedAt?: string;
-  /** Consecutive scheduled refresh failures; absent V2 metadata is treated as zero. */
+  /** Legacy scheduler state; current demand records never write it. */
   consecutiveRefreshFailures?: number;
 }
 
@@ -35,8 +35,8 @@ export interface CacheRefresherConfig {
   maxItemsPerRun: number;
 }
 
-const HOT_QUEUE_SCHEMA_VERSION = 4;
-const LEGACY_HOT_QUEUE_SCHEMA_VERSIONS = new Set([2, 3]);
+const HOT_QUEUE_SCHEMA_VERSION = 5;
+const LEGACY_HOT_QUEUE_SCHEMA_VERSIONS = new Set([2, 3, 4]);
 const HOT_QUEUE_KEY_PREFIX = 'v2:hot:';
 const HOT_QUEUE_CURSOR_SCHEMA_VERSION = 1;
 const HOT_QUEUE_CURSOR_KEY_PREFIX = 'v2:control:hot-refresh-cursor:';
@@ -111,11 +111,6 @@ function hasValidHotCacheIdentity(entry: Partial<HotCacheEntry>, metadataKey: st
   return metadataKey === hotQueueKey(entry.resource, entry.normalizedKey);
 }
 
-function readConsecutiveRefreshFailures(entry: Partial<HotCacheEntry>): number | null {
-  const failures = entry.consecutiveRefreshFailures ?? 0;
-  return Number.isInteger(failures) && failures >= 0 ? failures : null;
-}
-
 function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQueueEntry | null {
   if (!candidate || typeof candidate !== 'object') {
     return null;
@@ -127,14 +122,6 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
   }
   const validatedEntry = entry as HotCacheEntry;
   const lastAccessedAt = validatedEntry.lastAccessedAt;
-  if (validatedEntry.schemaVersion !== HOT_QUEUE_SCHEMA_VERSION && !parseDate(validatedEntry.lastRefreshedAt)) {
-    return null;
-  }
-
-  const consecutiveRefreshFailures = readConsecutiveRefreshFailures(validatedEntry);
-  if (consecutiveRefreshFailures === null) {
-    return null;
-  }
 
   return {
     schemaVersion: validatedEntry.schemaVersion,
@@ -142,7 +129,6 @@ function parseHotCacheEntry(candidate: unknown, metadataKey: string): HotCacheQu
     normalizedKey: validatedEntry.normalizedKey,
     cacheKey: buildCacheKey(validatedEntry.resource, validatedEntry.normalizedKey),
     lastAccessedAt,
-    consecutiveRefreshFailures,
     metadataKey
   };
 }
@@ -344,7 +330,8 @@ export async function touchHotCacheEntry(params: {
   env: CacheEngineEnv;
   resource: HotCacheResource;
   normalizedKey: string;
-  cache: CacheProvenance;
+  /** Legacy caller input; demand records never persist cache lifecycle state. */
+  cache?: CacheProvenance;
   lastAccessedAt: string;
   expirationTtl?: number;
 }): Promise<void> {
@@ -356,14 +343,12 @@ export async function touchHotCacheEntry(params: {
       resource: existing.resource,
       normalizedKey: existing.normalizedKey,
       lastAccessedAt: params.lastAccessedAt,
-      consecutiveRefreshFailures: existing.consecutiveRefreshFailures
     }
     : {
       schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
       resource: params.resource,
       normalizedKey: params.normalizedKey,
       lastAccessedAt: params.lastAccessedAt,
-      consecutiveRefreshFailures: 0
     };
 
   await params.env.METAR_CACHE.put(
@@ -400,7 +385,6 @@ export async function updateHotCacheEntryAfterRefresh(
     resource: entry.resource,
     normalizedKey: entry.normalizedKey,
     lastAccessedAt,
-    consecutiveRefreshFailures: 0
   };
 
   await env.METAR_CACHE.put(
@@ -416,7 +400,6 @@ export async function deleteHotCacheEntryAndPayload(
 ): Promise<void> {
   if (env.METAR_CACHE.delete) {
     await env.METAR_CACHE.delete(entry.metadataKey);
-    await env.METAR_CACHE.delete(entry.cacheKey);
   }
 }
 
@@ -430,27 +413,11 @@ export async function recordHotCacheRefreshFailure(
     return { consecutiveRefreshFailures: 0, dropped: false };
   }
 
-  const consecutiveRefreshFailures = (existing.consecutiveRefreshFailures ?? 0) + 1;
-  if (consecutiveRefreshFailures >= 3) {
-    if (env.METAR_CACHE.delete) {
-      await env.METAR_CACHE.delete(existing.metadataKey);
-    }
-    return { consecutiveRefreshFailures, dropped: true };
-  }
-
-  const next: HotCacheEntry = {
-    schemaVersion: HOT_QUEUE_SCHEMA_VERSION,
-    resource: existing.resource,
-    normalizedKey: existing.normalizedKey,
-    lastAccessedAt: existing.lastAccessedAt,
-    consecutiveRefreshFailures
-  };
-  await env.METAR_CACHE.put(
-    existing.metadataKey,
-    JSON.stringify(next),
-    expirationTtl ? { expirationTtl } : undefined
-  );
-  return { consecutiveRefreshFailures, dropped: false };
+  void existing;
+  void expirationTtl;
+  // Failure ownership moved to CACHE_COORDINATOR. Kept as a compatibility no-op
+  // until callers on old worker versions age out.
+  return { consecutiveRefreshFailures: 0, dropped: false };
 }
 
 export function readIsoTimestamp(value: string): number {

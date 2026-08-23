@@ -582,6 +582,7 @@ export async function fetchAirportUpstream(input: AirportResourceInput, ctx: Par
   }
 
   const response = await fetch(buildAirportDbUrl(icao, token), {
+    signal: ctx.signal,
     headers: {
       'User-Agent': USER_AGENT,
       Accept: 'application/json'

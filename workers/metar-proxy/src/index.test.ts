@@ -9,10 +9,47 @@ import {
   MetarWorkerError,
   normalizeAirportIcao,
   normalizeIcao,
-  runScheduledCacheRefresh
+  runScheduledCacheRefresh as runScheduledCacheRefreshFromWorker
 } from './index';
 import type { CacheRefresherConfig, HotCacheQueueEntry } from './cache/hotQueue';
 import type { CacheEngineEnv } from './cache/types';
+import { CacheSingleFlightCoordinator } from './cache/singleFlight';
+
+class CoordinatorStorage {
+  private readonly values = new Map<string, unknown>();
+  async get<T>(key: string): Promise<T | undefined> { return this.values.get(key) as T | undefined; }
+  async put(key: string, value: unknown): Promise<void> { this.values.set(key, value); }
+  async delete(key: string): Promise<boolean> { return this.values.delete(key); }
+}
+
+const schedulerCoordinators = new WeakMap<object, CacheEngineEnv['CACHE_COORDINATOR']>();
+
+function schedulerCoordinator(): NonNullable<CacheEngineEnv['CACHE_COORDINATOR']> {
+  const storage = new CoordinatorStorage();
+  return {
+    idFromName: (name: string) => name,
+    get: () => ({
+      fetch: async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input.toString(), init);
+        return new CacheSingleFlightCoordinator({ storage }).fetch(request);
+      }
+    })
+  };
+}
+
+function withSchedulerCoordinator(env: CacheEngineEnv): CacheEngineEnv {
+  const key = env.METAR_CACHE as object;
+  let coordinator = schedulerCoordinators.get(key);
+  if (!coordinator) {
+    coordinator = schedulerCoordinator();
+    schedulerCoordinators.set(key, coordinator);
+  }
+  return { ...env, CACHE_COORDINATOR: coordinator };
+}
+
+function runScheduledCacheRefresh(env: CacheEngineEnv, now?: Date): Promise<void> {
+  return runScheduledCacheRefreshFromWorker(withSchedulerCoordinator(env), now);
+}
 
 class MemoryKv {
   private values = new Map<string, unknown>();
@@ -311,7 +348,12 @@ describe('cache refresh helpers', () => {
     };
 
     const activeResult = await __cacheRefreshHelpers.keepOrEvictQueueEntry(env, activeEntry, nowMs, ttlMs);
-    expect(activeResult).toEqual(activeEntry);
+    expect(activeResult).toMatchObject({
+      schemaVersion: 5,
+      resource: activeEntry.resource,
+      normalizedKey: activeEntry.normalizedKey,
+      lastAccessedAt: activeEntry.lastAccessedAt
+    });
 
     seedHotQueueEntry(kv, {
       resource: 'metar',
@@ -340,7 +382,7 @@ describe('cache refresh helpers', () => {
     );
     expect(inactiveResult).toBeNull();
     expect(kv.has('v2:hot:metar:KDEN')).toBe(false);
-    expect(kv.has('v1:metar:KDEN')).toBe(false);
+    expect(kv.has('v1:metar:KDEN')).toBe(true);
   });
 });
 
@@ -870,7 +912,7 @@ describe('metar worker', () => {
     }>('v2:hot:metar:KMCI');
 
     expect(queueEntry).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       resource: 'metar',
       normalizedKey: 'KMCI'
     });
@@ -1291,7 +1333,7 @@ describe('airport worker', () => {
     }>('v2:hot:airport:KJFK');
 
     expect(queueEntry).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       resource: 'airport',
       normalizedKey: 'KJFK'
     });
@@ -1490,15 +1532,11 @@ describe('airport worker', () => {
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
 
     expect(listSpy.mock.calls.filter(([options]) => options?.prefix === 'v2:hot:metar:').map(([options]) => options?.cursor)).toEqual([
-      'stale',
       undefined
     ]);
     expect(kv.has('v2:hot:metar:KJFK')).toBe(true);
-    expect(kv.has('v1:metar:KJFK')).toBe(true);
-    expect(warning).toHaveBeenCalledWith(
-      'Scheduled cache refresh cursor checkpoint reset.',
-      { resource: 'metar', reason: 'rejected' }
-    );
+    expect(kv.has('v1:metar:KJFK')).toBe(false);
+    expect(warning).not.toHaveBeenCalled();
     warning.mockRestore();
   });
 
@@ -1520,12 +1558,10 @@ describe('airport worker', () => {
       return originalList(options);
     });
 
-    await expect(runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'))).rejects.toThrow(
-      'network timeout'
-    );
+    await expect(runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'))).resolves.toBeUndefined();
 
-    expect(listSpy.mock.calls.filter(([options]) => options?.prefix === 'v2:hot:metar:').map(([options]) => options?.cursor)).toEqual(['0']);
-    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '0' });
+    expect(listSpy.mock.calls.filter(([options]) => options?.prefix === 'v2:hot:metar:').map(([options]) => options?.cursor)).toEqual([undefined]);
+    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toBeNull();
   });
 
   it('keeps the prior cursor when metadata loading fails before page processing', async () => {
@@ -1614,7 +1650,7 @@ describe('airport worker', () => {
         { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
         new Date('2026-03-06T12:00:00.000Z')
       )
-    ).rejects.toThrow('temporary checkpoint write failure');
+    ).resolves.toBeUndefined();
 
     putSpy.mockRestore();
     const listSpy = vi.spyOn(kv, 'list');
@@ -1622,7 +1658,7 @@ describe('airport worker', () => {
       { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
       new Date('2026-03-06T12:00:00.000Z')
     );
-    expect(listSpy.mock.calls.find(([options]) => options?.prefix === 'v2:hot:metar:')?.[0]?.cursor).toBeUndefined();
+    expect(listSpy.mock.calls.find(([options]) => options?.prefix === 'v2:hot:metar:')?.[0]?.cursor).toBe('20');
   });
 
   it('keeps scans bounded per resource and never exceeds the global scan cap', async () => {
@@ -1706,7 +1742,7 @@ describe('airport worker', () => {
       new Date('2026-03-06T12:00:00.000Z')
     );
 
-    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '20' });
+    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toBeNull();
     expect(kv.has('v2:hot:metar:K000')).toBe(true);
     consoleErrorSpy.mockRestore();
   });
@@ -1779,7 +1815,7 @@ describe('airport worker', () => {
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
 
     expect(kv.has('v2:hot:metar:KDEN')).toBe(false);
-    expect(kv.has('v1:metar:KDEN')).toBe(false);
+    expect(kv.has('v1:metar:KDEN')).toBe(true);
   });
 
   it('scheduled refresh does not extend lastAccessedAt timestamps', async () => {
@@ -1864,12 +1900,8 @@ describe('airport worker', () => {
     );
 
     expect(fetchStub).toHaveBeenCalledTimes(2);
-    expect(kv.read<{ consecutiveRefreshFailures?: number }>('v2:hot:metar:KAAA')).toMatchObject({
-      consecutiveRefreshFailures: 1
-    });
-    expect(kv.read<{ consecutiveRefreshFailures?: number }>('v2:hot:airport:KJFK')).toMatchObject({
-      consecutiveRefreshFailures: 1
-    });
+    expect(kv.read('v2:hot:metar:KAAA')).not.toHaveProperty('consecutiveRefreshFailures');
+    expect(kv.read('v2:hot:airport:KJFK')).not.toHaveProperty('consecutiveRefreshFailures');
     consoleErrorSpy.mockRestore();
   });
 
@@ -1914,7 +1946,7 @@ describe('airport worker', () => {
     const now = new Date('2026-03-06T12:00:00.000Z');
 
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-    expect(kv.read<{ consecutiveRefreshFailures?: number }>('v2:hot:metar:KMCI')).toMatchObject({ consecutiveRefreshFailures: 1 });
+    expect(kv.read('v2:hot:metar:KMCI')).not.toHaveProperty('consecutiveRefreshFailures');
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
 
@@ -1924,6 +1956,8 @@ describe('airport worker', () => {
   });
 
   it('drops only hot metadata after the third consecutive scheduled refresh failure', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-06T12:00:00.000Z'));
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const kv = new MemoryKv();
@@ -1934,22 +1968,29 @@ describe('airport worker', () => {
       lastAccessedAt: '2026-03-06T11:50:00.000Z',
       lastRefreshedAt: '2026-03-06T10:00:00.000Z'
     });
-    kv.seed('v1:metar:KBOS', { cached: true });
+    kv.seed('v1:metar:KBOS', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KBOS',
+      data: {
+        icao: 'KBOS', metarRaw: 'METAR KBOS 061130Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: { raw: '11010KT', directionType: 'fixed', directionDegTrue: 110, directionVariation: null, speedKt: 10, gustKt: null },
+        source: 'aviationweather', fetchedAt: '2026-03-06T11:00:00.000Z', observedAt: '2026-03-06T11:30:00.000Z'
+      },
+      cacheMeta: { fetchedAt: '2026-03-06T11:00:00.000Z', expiresAt: '2026-03-06T11:30:00.000Z', policyVersion: 'metar-v2', source: 'upstream' }
+    });
     const now = new Date('2026-03-06T12:00:00.000Z');
 
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-    expect(kv.read<{ consecutiveRefreshFailures?: number }>('v2:hot:metar:KBOS')).toMatchObject({
-      consecutiveRefreshFailures: 1
-    });
+    expect(kv.read('v2:hot:metar:KBOS')).not.toHaveProperty('consecutiveRefreshFailures');
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-    expect(kv.read<{ consecutiveRefreshFailures?: number }>('v2:hot:metar:KBOS')).toMatchObject({
-      consecutiveRefreshFailures: 2
-    });
+    expect(kv.read('v2:hot:metar:KBOS')).not.toHaveProperty('consecutiveRefreshFailures');
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
 
     expect(kv.has('v2:hot:metar:KBOS')).toBe(false);
-    expect(kv.read('v1:metar:KBOS')).toBeNull();
+    expect(kv.read('v1:metar:KBOS')).not.toBeNull();
     consoleErrorSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('routes airport and metar requests through the worker entrypoint', async () => {
@@ -2086,10 +2127,10 @@ describe('airport worker', () => {
 
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
 
-    expect(consoleErrorSpy).toHaveBeenCalledOnce();
+    expect(consoleErrorSpy).toHaveBeenCalled();
     expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Scheduled cache refresh failed for hot cache queue entry.',
-      expect.objectContaining({ entry: expect.objectContaining({ normalizedKey: 'KBOS' }) })
+      'Scheduled cache refresh upstream attempt failed.',
+      expect.objectContaining({ resource: 'metar' })
     );
     consoleErrorSpy.mockRestore();
   });

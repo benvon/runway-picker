@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   CacheSingleFlightCoordinator,
   acquireSingleFlightLease,
+  abortSchedulerRun,
+  beginSchedulerRun,
+  commitSchedulerRun,
   releaseSingleFlightLease
 } from './singleFlight';
 import type { DurableObjectNamespaceLike } from './types';
@@ -161,5 +164,52 @@ describe('singleFlight namespace helpers', () => {
   it('releaseSingleFlightLease no-ops when namespace or lease is missing', async () => {
     await expect(releaseSingleFlightLease(undefined, null)).resolves.toBeUndefined();
     await expect(releaseSingleFlightLease(new InMemoryCoordinatorNamespace(), null)).resolves.toBeUndefined();
+  });
+});
+
+describe('scheduler coordinator protocol', () => {
+  it('serializes a run and persists cursors only with its atomic outcome commit', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const first = await beginSchedulerRun(namespace, 30);
+    expect(first?.cursors).toEqual({});
+    await expect(beginSchedulerRun(namespace, 30)).resolves.toBeNull();
+    const committed = await commitSchedulerRun(namespace, {
+      runId: first?.runId ?? '',
+      cursors: { metar: 'opaque-metAR-cursor' },
+      inactivityTtlSeconds: 60,
+      outcomes: [{ identity: 'v2:hot:metar:KJFK', outcome: 'upstream_failed', lastAccessedAt: new Date().toISOString() }]
+    });
+    expect(committed).toEqual({ dequeueIdentities: [] });
+    const next = await beginSchedulerRun(namespace, 30);
+    expect(next?.cursors).toEqual({ metar: 'opaque-metAR-cursor' });
+  });
+
+  it('makes commit idempotent and drops demand only on the third upstream failure', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const identity = 'v2:hot:airport:KJFK';
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      const body = {
+        runId: lease?.runId ?? '',
+        cursors: {},
+        inactivityTtlSeconds: 60,
+        outcomes: [{ identity, outcome: 'upstream_failed' as const, lastAccessedAt: new Date().toISOString() }]
+      };
+      const result = await commitSchedulerRun(namespace, body);
+      expect(result?.dequeueIdentities).toEqual(attempt === 3 ? [identity] : []);
+      await expect(commitSchedulerRun(namespace, body)).resolves.toEqual(result);
+    }
+  });
+
+  it('abort releases a run without committing cursor or outcome state', async () => {
+    const namespace = new InMemoryCoordinatorNamespace();
+    const lease = await beginSchedulerRun(namespace, 30);
+    await abortSchedulerRun(namespace, lease?.runId ?? '');
+    const next = await beginSchedulerRun(namespace, 30);
+    expect(next?.cursors).toEqual({});
+  });
+
+  it('fails closed when the scheduler coordinator binding is unavailable', async () => {
+    await expect(beginSchedulerRun(undefined, 30)).resolves.toBeNull();
   });
 });

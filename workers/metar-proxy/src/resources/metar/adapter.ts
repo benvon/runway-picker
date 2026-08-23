@@ -603,9 +603,10 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
   resource: 'metar',
   schemaVersion: METAR_SCHEMA_VERSION,
   normalizeKey: (input) => normalizeIcao(input.icao),
-  fetchUpstream: async (input) => {
+  fetchUpstream: async (input, ctx) => {
     const icao = normalizeIcao(input.icao);
     const response = await fetch(buildMetarUrl(icao), {
+      signal: ctx.signal,
       headers: {
         'User-Agent': USER_AGENT,
         Accept: 'application/json'

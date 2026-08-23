@@ -344,12 +344,8 @@ async function readKvCacheRecords<TInput, TUpstream, TData>(
   clock: () => Date,
   readKv: (cacheKey: string) => Promise<unknown>
 ): Promise<CacheRecords<TData>> {
-  try {
-    const raw = await readKv(cacheKey);
-    return toCacheRecords(raw, adapter, cacheKey, input, clock());
-  } catch {
-    return { data: null, negative: null };
-  }
+  const raw = await readKv(cacheKey);
+  return toCacheRecords(raw, adapter, cacheKey, input, clock());
 }
 
 function toEnvelope<TInput, TUpstream, TData>(
@@ -731,8 +727,29 @@ export async function getOrRefreshCached<TInput, TUpstream, TData>(
   const normalizedKey = adapter.normalizeKey(input.input);
   const cacheKey = buildCacheKey(adapter.resource, normalizedKey);
   const edgeCache = input.edgeCache ?? getRuntimeEdgeCache();
-  const readKv = async (key: string): Promise<unknown> => env.METAR_CACHE.get(key, 'json');
-  const adapterContext: CacheAdapterContext = { request, env };
+  const readKv = async (key: string): Promise<unknown> => {
+    let raw: unknown;
+    try {
+      raw = await env.METAR_CACHE.get(key, 'text');
+    } catch (error) {
+      throw new CacheEngineError(error instanceof Error ? error.message : 'Cache payload read failed.', 503);
+    }
+    if (raw === null) return null;
+    // Cloudflare KV text reads are strings. Preserve object fixtures only for
+    // the narrow adapter boundary used by local in-memory test doubles.
+    if (typeof raw !== 'string') {
+      if (raw && typeof raw === 'object') return raw;
+      await purgeInvalidPayloadCopies(env, undefined, key, true, false);
+      return null;
+    }
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      await purgeInvalidPayloadCopies(env, undefined, key, true, false);
+      return null;
+    }
+  };
+  const adapterContext: CacheAdapterContext = { request, env, signal: input.upstreamSignal };
 
   const cached = await readCachedData(adapter, cacheKey, input.input, env, edgeCache, readKv, clock);
   if (cached.fresh) {

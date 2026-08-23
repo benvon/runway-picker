@@ -194,9 +194,10 @@ describe('touchHotCacheEntry', () => {
     });
 
     expect(store.get(metadataKey)).toMatchObject({
-      lastAccessedAt: '2026-03-06T12:05:00.000Z',
-      consecutiveRefreshFailures: 2
+      schemaVersion: 5,
+      lastAccessedAt: '2026-03-06T12:05:00.000Z'
     });
+    expect(store.get(metadataKey)).not.toHaveProperty('consecutiveRefreshFailures');
   });
 
   it('forwards expirationTtl to the KV put call', async () => {
@@ -409,10 +410,10 @@ describe('recordHotCacheRefreshFailure', () => {
     const entry = buildValidEntry('metar', 'KJFK', metadataKey);
 
     await expect(recordHotCacheRefreshFailure(env, entry, 432000)).resolves.toEqual({
-      consecutiveRefreshFailures: 1,
+      consecutiveRefreshFailures: 0,
       dropped: false
     });
-    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 4, consecutiveRefreshFailures: 1 });
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 2 });
 
     await updateHotCacheEntryAfterRefresh(
       env,
@@ -420,15 +421,10 @@ describe('recordHotCacheRefreshFailure', () => {
       fakeProvenance(payloadKey, '2026-03-06T12:00:00.000Z'),
       432000
     );
-    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 4, consecutiveRefreshFailures: 0 });
+    expect(store.get(metadataKey)).toMatchObject({ schemaVersion: 5 });
 
-    await recordHotCacheRefreshFailure(env, entry, 432000);
-    await recordHotCacheRefreshFailure(env, entry, 432000);
-    await expect(recordHotCacheRefreshFailure(env, entry, 432000)).resolves.toEqual({
-      consecutiveRefreshFailures: 3,
-      dropped: true
-    });
-    expect(store.has(metadataKey)).toBe(false);
+    await expect(recordHotCacheRefreshFailure(env, entry, 432000)).resolves.toEqual({ consecutiveRefreshFailures: 0, dropped: false });
+    expect(store.has(metadataKey)).toBe(true);
     expect(store.get(payloadKey)).toEqual({ cached: true });
   });
 });

@@ -58,6 +58,7 @@ export interface CacheObservability {
 export interface CacheAdapterContext {
   request: Request;
   env: CacheEngineEnv;
+  signal?: AbortSignal;
 }
 
 export interface CacheResourceAdapter<TInput, TUpstream, TData> {
@@ -149,4 +150,6 @@ export interface CacheEngineInput<TInput, TUpstream, TData> {
   /** Injectable clock for cache-operation timing tests. */
   clock?: () => Date;
   now?: Date;
+  /** Scheduler-only upstream cancellation; shorter than coordinator and single-flight leases. */
+  upstreamSignal?: AbortSignal;
 }
