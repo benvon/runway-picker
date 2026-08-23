@@ -18,6 +18,12 @@ class Storage {
   async getAlarm(): Promise<number | null> { return this.alarmAt; }
 }
 
+class SqlStorage extends Storage {
+  readonly execMock = vi.fn((...args: unknown[]): Array<Record<string, unknown>> => { void args; return []; });
+  readonly sql = { exec: <T = Record<string, unknown>>(...args: unknown[]): Iterable<T> => this.execMock(...args) as T[] };
+  transactionSync<T>(closure: () => T): T { return closure(); }
+}
+
 class Namespace implements DurableObjectNamespaceLike {
   private readonly coordinator = new OwnedSchedulerCoordinator({ storage: new Storage() });
   idFromName(name: string): string { return name; }
@@ -95,6 +101,19 @@ describe('owned scheduler demand lifecycle', () => {
       .resolves.toMatchObject({ status: 404 });
   });
 
+  it('uses Durable Object storage transactions for the SQLite demand path', async () => {
+    const storage = new SqlStorage();
+    const transactionSpy = vi.spyOn(storage, 'transactionSync');
+    const coordinator = new OwnedSchedulerCoordinator({ storage });
+
+    await expect(coordinatorRequest(coordinator, '/scheduler/v2/touch', {
+      resource: 'metar', normalizedKey: 'KORD', inactivityTtlSeconds: 60
+    })).resolves.toMatchObject({ status: 200 });
+
+    expect(transactionSpy).toHaveBeenCalledTimes(1);
+    expect(storage.execMock).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO scheduler_demands'), 'metar', 'KORD', expect.any(String), expect.any(Number), 0, 0);
+  });
+
   it('returns inactive-run responses without mutating demand state', async () => {
     const coordinator = new OwnedSchedulerCoordinator({ storage: new Storage() });
 
@@ -132,6 +151,21 @@ describe('owned scheduler demand lifecycle', () => {
     const run = await beginOwnedSchedulerRun(namespace, 30, 3);
     expect(run?.candidates.map((candidate) => candidate.resource)).toEqual(['metar', 'metar', 'airport']);
     await abortOwnedSchedulerRun(namespace, run?.runId ?? '');
+  });
+
+  it('advances the completed resource window so bounded runs reach later demand', async () => {
+    const namespace = new Namespace();
+    for (const key of ['KAAA', 'KBBB', 'KCCC', 'KDDD']) {
+      await recordOwnedSchedulerDemand(namespace, 'metar', key, 3600);
+    }
+
+    const first = await beginOwnedSchedulerRun(namespace, 30, 2);
+    expect(first?.candidates.map((candidate) => candidate.normalizedKey)).toEqual(['KAAA', 'KBBB']);
+    await completeOwnedSchedulerRun(namespace, first?.runId ?? '', []);
+
+    const second = await beginOwnedSchedulerRun(namespace, 30, 2);
+    expect(second?.candidates.map((candidate) => candidate.normalizedKey)).toEqual(['KCCC', 'KDDD']);
+    await abortOwnedSchedulerRun(namespace, second?.runId ?? '');
   });
 
   it('cleans expired demand from its alarm path even when no run occurs', async () => {
