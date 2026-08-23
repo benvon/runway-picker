@@ -6,6 +6,8 @@ import {
   acknowledgeSchedulerDequeues,
   beginSchedulerRun,
   commitSchedulerRun,
+  processSchedulerDequeues,
+  recordSchedulerDemand,
   renewSchedulerRun,
   releaseSingleFlightLease
 } from './singleFlight';
@@ -32,8 +34,32 @@ class MemoryStorage {
   }
 }
 
+class MemoryKv {
+  private readonly values = new Map<string, unknown>();
+
+  async get(key: string, type: 'json' | 'text'): Promise<unknown> {
+    const value = this.values.get(key) ?? null;
+    if (type === 'text' && value !== null) return JSON.stringify(value);
+    return value;
+  }
+
+  async put(key: string, value: string): Promise<void> {
+    this.values.set(key, JSON.parse(value) as unknown);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.values.delete(key);
+  }
+
+  read<T>(key: string): T | null {
+    return (this.values.get(key) as T | undefined) ?? null;
+  }
+}
+
 class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
   private readonly storage = new MemoryStorage();
+
+  constructor(private readonly cache?: MemoryKv) {}
 
   idFromName(name: string): string {
     return name;
@@ -41,7 +67,10 @@ class InMemoryCoordinatorNamespace implements DurableObjectNamespaceLike {
 
   get(_id: unknown): { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> } {
     void _id;
-    const coordinator = new CacheSingleFlightCoordinator({ storage: this.storage });
+    const coordinator = new CacheSingleFlightCoordinator(
+      { storage: this.storage },
+      this.cache ? { METAR_CACHE: this.cache } : undefined
+    );
     return {
       fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
         const request =
@@ -223,6 +252,36 @@ describe('scheduler coordinator protocol', () => {
     expect(afterAck).not.toBeNull();
     await expect(commitSchedulerRun(namespace, { runId: afterAck?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: [] })).resolves.toEqual({ dequeueIdentities: [] });
     void thirdRunId;
+  });
+
+  it('does not let a stale dequeue remove demand re-enqueued by a client', async () => {
+    const cache = new MemoryKv();
+    const namespace = new InMemoryCoordinatorNamespace(cache);
+    const identity = 'v2:hot:metar:KORD';
+    const oldAccess = '2026-03-06T12:00:00.000Z';
+    const newAccess = '2026-03-06T12:05:00.000Z';
+
+    await expect(recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: oldAccess, expirationTtl: 3600
+    })).resolves.toBe(true);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const lease = await beginSchedulerRun(namespace, 30);
+      await commitSchedulerRun(namespace, {
+        runId: lease?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600,
+        outcomes: [{ identity, outcome: 'upstream_failed', lastAccessedAt: oldAccess }]
+      });
+    }
+
+    await expect(recordSchedulerDemand(namespace, {
+      resource: 'metar', normalizedKey: 'KORD', lastAccessedAt: newAccess, expirationTtl: 3600
+    })).resolves.toBe(true);
+    await expect(processSchedulerDequeues(namespace)).resolves.toBe(true);
+    expect(cache.read<{ lastAccessedAt: string }>(identity)).toMatchObject({ lastAccessedAt: newAccess });
+
+    const afterReenqueue = await beginSchedulerRun(namespace, 30);
+    await expect(commitSchedulerRun(namespace, {
+      runId: afterReenqueue?.runId ?? '', cursors: {}, inactivityTtlSeconds: 3600, outcomes: []
+    })).resolves.toEqual({ dequeueIdentities: [] });
   });
 
   it('abort releases a run without committing cursor or outcome state', async () => {

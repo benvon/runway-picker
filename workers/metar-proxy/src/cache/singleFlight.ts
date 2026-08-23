@@ -1,4 +1,4 @@
-import type { DurableObjectNamespaceLike, DurableObjectStub } from './types';
+import type { CacheEngineEnv, DurableObjectNamespaceLike, DurableObjectStub, KvNamespaceLike } from './types';
 
 interface AcquireLockBody {
   key: string;
@@ -43,11 +43,18 @@ interface SchedulerFailureRecord {
   lastAccessedAt: string;
 }
 
+interface SchedulerDemandBody {
+  resource: SchedulerResource;
+  normalizedKey: string;
+  lastAccessedAt: string;
+  expirationTtl: number;
+}
+
 interface SchedulerState {
   schemaVersion: 1;
   cursors: Partial<Record<SchedulerResource, string>>;
   failures: Record<string, SchedulerFailureRecord>;
-  pendingDequeues: Record<string, true>;
+  pendingDequeues: Record<string, SchedulerFailureRecord>;
   activeRun?: SchedulerRunRecord;
   completedRuns: Record<string, string[]>;
 }
@@ -73,6 +80,8 @@ export interface SchedulerCommitResult { dequeueIdentities: string[]; }
 const SCHEDULER_OBJECT_NAME = '__cache-refresh-scheduler-v1__';
 const SCHEDULER_STATE_KEY = 'scheduler-state';
 const MAX_COMPLETED_RUNS = 20;
+const HOT_DEMAND_SCHEMA_VERSION = 5;
+const HOT_DEMAND_KEY_PREFIX = 'v2:hot:';
 
 export interface SingleFlightLease {
   key: string;
@@ -158,26 +167,58 @@ async function handleRelease(
   return new Response(null, { status: 204 });
 }
 
-function readSchedulerState(raw: unknown): SchedulerState {
-  if (!raw || typeof raw !== 'object') {
-    return { schemaVersion: 1, cursors: {}, failures: {}, pendingDequeues: {}, completedRuns: {} };
-  }
-  const candidate = raw as Partial<SchedulerState>;
-  if (candidate.schemaVersion !== 1 || !candidate.cursors || !candidate.failures || !candidate.completedRuns) {
-    return { schemaVersion: 1, cursors: {}, failures: {}, pendingDequeues: {}, completedRuns: {} };
-  }
+function readSchedulerCursors(raw: Partial<Record<SchedulerResource, string>>): Partial<Record<SchedulerResource, string>> {
   const cursors: Partial<Record<SchedulerResource, string>> = {};
   for (const resource of ['metar', 'airport'] as const) {
-    const cursor = candidate.cursors[resource];
+    const cursor = raw[resource];
     if (typeof cursor === 'string' && cursor.length > 0) {
       cursors[resource] = cursor;
     }
   }
+  return cursors;
+}
+
+function isFailureRecord(value: unknown): value is SchedulerFailureRecord {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    typeof (value as Partial<SchedulerFailureRecord>).lastAccessedAt === 'string' &&
+    Number.isFinite((value as Partial<SchedulerFailureRecord>).consecutiveFailures)
+  );
+}
+
+function readPendingDequeues(
+  failures: Record<string, SchedulerFailureRecord>,
+  rawPending: unknown
+): Record<string, SchedulerFailureRecord> {
+  const pendingDequeues: Record<string, SchedulerFailureRecord> = {};
+  if (!rawPending || typeof rawPending !== 'object') return pendingDequeues;
+  for (const [identity, pending] of Object.entries(rawPending)) {
+    const failure = failures[identity];
+    if (isFailureRecord(failure)) {
+      pendingDequeues[identity] = failure;
+    } else if (isFailureRecord(pending)) {
+      pendingDequeues[identity] = pending;
+    }
+  }
+  return pendingDequeues;
+}
+
+function emptySchedulerState(): SchedulerState {
+  return { schemaVersion: 1, cursors: {}, failures: {}, pendingDequeues: {}, completedRuns: {} };
+}
+
+function readSchedulerState(raw: unknown): SchedulerState {
+  if (!raw || typeof raw !== 'object') return emptySchedulerState();
+  const candidate = raw as Partial<SchedulerState>;
+  if (candidate.schemaVersion !== 1 || !candidate.cursors || !candidate.failures || !candidate.completedRuns) {
+    return emptySchedulerState();
+  }
   return {
     schemaVersion: 1,
-    cursors,
+    cursors: readSchedulerCursors(candidate.cursors),
     failures: candidate.failures,
-    pendingDequeues: candidate.pendingDequeues ?? {},
+    pendingDequeues: readPendingDequeues(candidate.failures, candidate.pendingDequeues),
     completedRuns: candidate.completedRuns,
     activeRun: candidate.activeRun
   };
@@ -189,14 +230,104 @@ function requestString(raw: unknown, field: string): string | null {
     : null;
 }
 
+function isSchedulerResource(value: unknown): value is SchedulerResource {
+  return value === 'metar' || value === 'airport';
+}
+
+function readDemandBody(raw: unknown): SchedulerDemandBody | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const body = raw as Partial<SchedulerDemandBody>;
+  if (
+    !isSchedulerResource(body.resource) ||
+    typeof body.normalizedKey !== 'string' ||
+    body.normalizedKey.length === 0 ||
+    typeof body.lastAccessedAt !== 'string' ||
+    !Number.isFinite(Date.parse(body.lastAccessedAt)) ||
+    typeof body.expirationTtl !== 'number' ||
+    !Number.isFinite(body.expirationTtl) ||
+    body.expirationTtl <= 0
+  ) {
+    return null;
+  }
+  return body as SchedulerDemandBody;
+}
+
+function hotDemandIdentity(resource: SchedulerResource, normalizedKey: string): string {
+  return `${HOT_DEMAND_KEY_PREFIX}${resource}:${normalizedKey}`;
+}
+
+async function handleDemandTouch(
+  raw: unknown,
+  state: SchedulerState,
+  storage: DurableObjectStorageLike,
+  cache: KvNamespaceLike | undefined
+): Promise<Response> {
+  const body = readDemandBody(raw);
+  if (!body) return Response.json({ error: 'Invalid request body.' }, { status: 400 });
+  if (!cache) return Response.json({ error: 'Cache binding unavailable.' }, { status: 503 });
+  const identity = hotDemandIdentity(body.resource, body.normalizedKey);
+
+  // Persist the newer demand generation before writing its KV projection. A later
+  // dequeue request is serialized behind this transition and cannot remove it.
+  delete state.pendingDequeues[identity];
+  delete state.failures[identity];
+  await storage.put(SCHEDULER_STATE_KEY, state);
+  try {
+    await cache.put(
+      identity,
+      JSON.stringify({
+        schemaVersion: HOT_DEMAND_SCHEMA_VERSION,
+        resource: body.resource,
+        normalizedKey: body.normalizedKey,
+        lastAccessedAt: body.lastAccessedAt
+      }),
+      { expirationTtl: body.expirationTtl as number }
+    );
+  } catch {
+    return Response.json({ error: 'Demand write failed.' }, { status: 503 });
+  }
+  return new Response(null, { status: 204 });
+}
+
+async function handlePendingDequeues(
+  state: SchedulerState,
+  storage: DurableObjectStorageLike,
+  cache: KvNamespaceLike | undefined
+): Promise<Response> {
+  if (!cache?.delete) return Response.json({ error: 'Cache delete unavailable.' }, { status: 503 });
+  for (const identity of Object.keys(state.pendingDequeues)) {
+    try {
+      await cache.delete(identity);
+    } catch {
+      await storage.put(SCHEDULER_STATE_KEY, state);
+      return Response.json({ error: 'Demand deletion failed.' }, { status: 503 });
+    }
+    delete state.pendingDequeues[identity];
+    delete state.failures[identity];
+  }
+  await storage.put(SCHEDULER_STATE_KEY, state);
+  return new Response(null, { status: 204 });
+}
+
 // The Durable Object serializes this protocol; keeping request validation here makes its atomic state transition explicit.
 // eslint-disable-next-line complexity
-async function handleSchedulerRequest(request: Request, storage: DurableObjectStorageLike, pathname: string): Promise<Response> {
+async function handleSchedulerRequest(
+  request: Request,
+  storage: DurableObjectStorageLike,
+  pathname: string,
+  cache: KvNamespaceLike | undefined
+): Promise<Response> {
   const raw = await parseRequestBody(request);
   const state = readSchedulerState(await storage.get<SchedulerState>(SCHEDULER_STATE_KEY));
   const now = Date.now();
   if (state.activeRun && state.activeRun.expiresAtMs <= now) {
     delete state.activeRun;
+  }
+  if (pathname === '/scheduler/touch-demand') {
+    return handleDemandTouch(raw, state, storage, cache);
+  }
+  if (pathname === '/scheduler/process-dequeues') {
+    return handlePendingDequeues(state, storage, cache);
   }
   if (pathname === '/scheduler/begin') {
     const holdSeconds = readHoldSeconds(raw);
@@ -256,7 +387,7 @@ async function handleSchedulerRequest(request: Request, storage: DurableObjectSt
       const next = (state.failures[outcome.identity]?.consecutiveFailures ?? 0) + 1;
       if (next >= 3) {
         state.failures[outcome.identity] = { consecutiveFailures: next, lastAccessedAt: outcome.lastAccessedAt };
-        state.pendingDequeues[outcome.identity] = true;
+        state.pendingDequeues[outcome.identity] = state.failures[outcome.identity];
         if (!dequeueIdentities.includes(outcome.identity)) dequeueIdentities.push(outcome.identity);
       } else {
         state.failures[outcome.identity] = { consecutiveFailures: next, lastAccessedAt: outcome.lastAccessedAt };
@@ -276,7 +407,10 @@ async function handleSchedulerRequest(request: Request, storage: DurableObjectSt
 }
 
 export class CacheSingleFlightCoordinator {
-  constructor(private readonly state: DurableObjectStateLike) {}
+  constructor(
+    private readonly state: DurableObjectStateLike,
+    private readonly env?: Pick<CacheEngineEnv, 'METAR_CACHE'>
+  ) {}
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -294,7 +428,7 @@ export class CacheSingleFlightCoordinator {
     }
 
     if (url.pathname.startsWith('/scheduler/')) {
-      return handleSchedulerRequest(request, this.state.storage, url.pathname);
+      return handleSchedulerRequest(request, this.state.storage, url.pathname, this.env?.METAR_CACHE);
     }
 
     return Response.json({ error: 'Not found.' }, { status: 404 });
@@ -359,6 +493,38 @@ export async function acknowledgeSchedulerDequeues(namespace: DurableObjectNames
     });
     return response.ok;
   } catch { return false; }
+}
+
+async function schedulerMutation(
+  namespace: DurableObjectNamespaceLike | undefined,
+  path: string,
+  body: unknown
+): Promise<boolean> {
+  const stub = schedulerStub(namespace);
+  if (!stub) return false;
+  try {
+    const response = await stub.fetch(`https://cache-coordinator.internal${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function recordSchedulerDemand(
+  namespace: DurableObjectNamespaceLike | undefined,
+  body: SchedulerDemandBody
+): Promise<boolean> {
+  return schedulerMutation(namespace, '/scheduler/touch-demand', body);
+}
+
+export async function processSchedulerDequeues(
+  namespace: DurableObjectNamespaceLike | undefined
+): Promise<boolean> {
+  return schedulerMutation(namespace, '/scheduler/process-dequeues', {});
 }
 
 export async function acquireSingleFlightLease(

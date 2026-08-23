@@ -418,6 +418,7 @@ export async function deleteHotCacheEntryAndPayload(
 ): Promise<void> {
   if (env.METAR_CACHE.delete) {
     await env.METAR_CACHE.delete(entry.metadataKey);
+    await env.METAR_CACHE.delete(entry.cacheKey);
   }
 }
 

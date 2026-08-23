@@ -1,64 +1,89 @@
 # Cache Refresh Operations Runbook
 
-This runbook covers day-2 operations for the scheduled hot-cache refresher in `workers/metar-proxy`.
+This runbook covers the scheduled demand refresh system in
+`workers/metar-proxy`. For data ownership and safety guarantees, see
+[cache-architecture.md](./cache-architecture.md).
 
-## Scheduler behavior
+## Normal behavior
 
-- Worker cron trigger runs every `15` minutes (`*/15 * * * *`).
-- Every successful `/api/metar` and `/api/airport` response updates a hot-entry key:
-  - `v2:hot:metar:{ICAO}`
-  - `v2:hot:airport:{ICAO}`
-- Queue metadata contains only the resource and normalized ICAO. The worker derives the payload cache key, so queue metadata cannot redirect a refresh to another resource or payload variant. Legacy `v1:hot:*` entries are not scanned and expire using their already-written inactivity TTL; no manual migration or cleanup is required.
-- Each resource is scanned independently (`v2:hot:metar:` and `v2:hot:airport:`). Scheduler ownership, opaque continuations, and scheduled-refresh failure counts live in the existing `CACHE_COORDINATOR` Durable Object's specially named scheduler record. KV hot entries are demand/identity only; they never contain cursors, payload freshness, or failure counters.
-- `/api/airport-location` is deliberately not hot-refreshed. It is long-lived reference data and has its own normal cache policy, so it cannot be accidentally refreshed as a runway profile.
-- Scheduled runs:
-  1. Scan bounded pages for each resource. The global scan cap is ten times the effective refresh capacity, split between resources; unused budget from a short page is available to the other resource without exceeding that cap.
-  2. Load and validate every listed metadata record before any entry is processed.
-  3. Evict entries inactive longer than inactivity TTL (also purges cache payload key), then refresh due entries oldest-first within each resource and round-robin, up to the effective refresh capacity. When both resource types have due work, the first two refreshes are one METAR and one airport entry. A missing resource or lack of due work never creates work.
-  4. Atomically commit each next cursor (or clear it after wrap) with the run's typed refresh outcomes. A metadata, eviction, coordinator, or checkpoint failure aborts the run and leaves its prior cursor in place for retry; an individual upstream failure is recorded without pinning the scan.
-  5. A scheduled refresh failure increments that entry's consecutive failure count. A successful scheduled refresh resets it. On the third consecutive scheduled failure, the worker removes only the hot-entry metadata; the payload cache remains subject to its normal TTL and a later client request can re-enqueue the ICAO.
-- If KV specifically rejects a coordinator-provided cursor as invalid, that resource retries once from the beginning and commits the recovered continuation only with a successful run. Transient KV/list communication failures abort without changing coordinator state. Legacy KV cursor records are deleted only after the first successful coordinator commit. Cursor recovery never deletes hot entries or cache payloads.
-
-- Scheduler runs fail closed if `CACHE_COORDINATOR` is unavailable or already leased. Actual upstream refresh attempts use a 10-second abortable timeout, shorter than the 20-second single-flight lease and 60-second scheduler-run lease. Cache hits and contention are neutral outcomes and do not consume the refresh-attempt budget. A third consecutive upstream failure removes only the KV demand entry; the payload remains under its normal cache policy.
-- A scheduled refresh resets its failure count only after a real upstream refresh. A stale-on-error fallback is recorded as a failed refresh; client access updates demand time only and never changes scheduled refresh outcome state.
-- METAR payloads at or beyond 90 minutes from trusted `fetchedAt` are purged and never delivered. This payload safety cleanup does not remove hot demand metadata.
+- Cloudflare runs the Worker cron every 15 minutes.
+- Successful METAR and airport responses record a short demand record in KV:
+  `v2:hot:metar:{ICAO}` or `v2:hot:airport:{ICAO}`.
+- `CACHE_COORDINATOR` owns the scheduler cursor, active lease, failure count,
+  and pending-dequeue intent. Do not attempt to reconstruct or edit that state
+  in KV.
+- Each run scans no more than ten times its effective refresh capacity and
+  makes no more than `CACHE_REFRESH_MAX_ITEMS_PER_RUN` real upstream attempts.
+  The default is 25 attempts per run.
+- METAR and airport demand are scanned separately and selected in alternating
+  order when both have work. This prevents one resource type from starving the
+  other.
+- A request touch updates demand only. It does not make an entry fresh or reset
+  a scheduler failure count.
 
 ## Runtime controls
 
 Configured in [`workers/metar-proxy/wrangler.jsonc`](../workers/metar-proxy/wrangler.jsonc):
 
-- `CACHE_REFRESH_ENABLED` (`true`/`false`)
-- `CACHE_REFRESH_METAR_INTERVAL_SECONDS` (default `1800`)
-- `CACHE_REFRESH_AIRPORT_INTERVAL_SECONDS` (default `86400`)
-- `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` (default `432000`)
-- `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (default `25`; configured values below `2` are normalized to an effective capacity of `2`)
+| Variable | Default | Effect |
+| --- | ---: | --- |
+| `CACHE_REFRESH_ENABLED` | `true` | Enables scheduled scanning and refresh. |
+| `CACHE_REFRESH_METAR_INTERVAL_SECONDS` | `1800` | METAR refresh interval. |
+| `CACHE_REFRESH_AIRPORT_INTERVAL_SECONDS` | `86400` | Airport refresh interval. |
+| `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` | `432000` | Demand-record TTL and inactivity eviction interval. |
+| `CACHE_REFRESH_MAX_ITEMS_PER_RUN` | `25` | Maximum real upstream attempts; values below 2 become 2. |
 
-Emergency stop:
+Change one control at a time and observe metrics for at least 24 hours before
+making another tuning change. Changes require a Worker deployment.
 
-1. Set `CACHE_REFRESH_ENABLED=false`.
-2. Deploy worker.
-3. Re-enable after upstream/provider stability is restored.
+## Failure behavior
 
-   > Note: Disabling the refresher also stops inactivity-based eviction (eviction runs inside the scheduled job). During an extended emergency stop, hot-entry keys will not be purged for inactivity and the hot queue/KV usage can grow over time. Consider ensuring hot-entry keys have an appropriate KV TTL and monitor hot-set size while the refresher is disabled.
-> **Note:** Disabling the refresher also stops inactivity-based eviction (eviction runs inside the scheduled job). During an extended emergency stop, hot-entry keys will not be purged for inactivity by the scheduler. Hot-entry keys do carry a KV TTL aligned to `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` so they will eventually self-expire, but monitor hot-set size via KV list counts while the refresher is disabled to avoid unexpected growth.
+- Each upstream attempt has a 10-second abortable timeout, including METAR
+  station validation.
+- The scheduler starts with a 300-second lease and renews a token-bound
+  60-second lease after each processed entry. A lost renewal aborts the run
+  without committing progress.
+- A cache hit or contention result is neutral. A true upstream refresh clears
+  that entry's failure count; stale-on-error and failed upstream work increment
+  it.
+- On the third consecutive failure, the demand record is queued for removal.
+  Its payload remains under normal cache policy. The coordinator performs the
+  KV deletion itself, retains the removal intent until KV confirms it, and
+  serializes a later client re-enqueue ahead of any stale removal attempt.
+  A transient delete failure is retried rather than resetting the count.
+- Invalid JSON or malformed demand metadata is removed/skipped. A genuine KV
+  list/read failure stops the run and leaves the prior cursor in place.
+- An invalid opaque cursor is retried once from the resource prefix. A
+  transient KV failure is not a cursor-reset condition.
+- METAR data at or beyond the 90-minute hard payload age is never returned.
 
 ## Monitoring checklist
 
-Use Cloudflare dashboard metrics for `runway-picker-metar-api`:
+Use the Cloudflare dashboard for `runway-picker-metar-api`:
 
-- `Cron Trigger Invocations`: should run every 15 minutes.
-- `Worker Errors`: indicates unexpected worker or runtime faults; individual cache refresh failures are caught and logged (not surfaced as Worker Errors — check Worker logs for `Scheduled cache refresh failed` entries instead).
-- `CPU Time`: monitor spikes when hot set grows.
-- `KV Operations` (`METAR_CACHE`): watch read/write/delete trends after releases and correlate with `X-Runway-Cache-Status` patterns to infer refresh health.
+- `Cron Trigger Invocations`: one roughly every 15 minutes.
+- `Worker Errors`: unexpected runtime/coordinator errors. Individual provider
+  failures are caught and logged; check logs for scheduled-refresh messages.
+- `CPU Time`: unexpected growth can indicate a large or malformed hot set.
+- `KV Operations` for `METAR_CACHE`: compare reads/writes/deletes with release
+  timing and the active demand set.
+- `X-Runway-Cache-Status`: healthy traffic normally contains mostly `edge_hit`
+  and `kv_hit`, with fewer `upstream_refresh` responses.
 
-Operational API signal:
+Investigate repeated messages such as:
 
-- Track `X-Runway-Cache-Status` distribution for `/api/metar` and `/api/airport`.
-- A healthy pattern includes frequent `kv_hit`/`edge_hit`, with lower `upstream_refresh`.
+- `Scheduled cache refresh coordinator unavailable or busy.`
+- `Scheduled cache refresh coordinator lease renewal failed.`
+- `Scheduled cache refresh demand deletion will retry.`
+- `Malformed hot cache demand entry removed.`
+- `Scheduled cache refresh cursor checkpoint reset.`
 
-## Manual inspection commands
+The logs intentionally include resource/category context but not opaque cursor
+values or payload contents.
 
-List hot queue entries:
+## Manual inspection
+
+List active demand records:
 
 ```bash
 npx wrangler kv key list \
@@ -67,7 +92,7 @@ npx wrangler kv key list \
   --config workers/metar-proxy/wrangler.jsonc
 ```
 
-Inspect one hot-entry payload:
+Inspect one demand record:
 
 ```bash
 npx wrangler kv key get "v2:hot:metar:KJFK" \
@@ -75,7 +100,7 @@ npx wrangler kv key get "v2:hot:metar:KJFK" \
   --config workers/metar-proxy/wrangler.jsonc
 ```
 
-Inspect one cache payload:
+Inspect one payload:
 
 ```bash
 npx wrangler kv key get "v1:metar:KJFK" \
@@ -83,15 +108,27 @@ npx wrangler kv key get "v1:metar:KJFK" \
   --config workers/metar-proxy/wrangler.jsonc
 ```
 
-Inspect a resource scan cursor (normally absent immediately after a full scan):
+Do not manually create, edit, or delete scheduler cursors, leases, or failure
+records. Those live in `CACHE_COORDINATOR` and are intentionally not a KV
+operator interface.
 
-```bash
-npx wrangler kv key get "v2:control:hot-refresh-cursor:metar" \
-  --binding METAR_CACHE \
-  --config workers/metar-proxy/wrangler.jsonc
-```
+## Safe interventions
 
-Remove a stuck hot-entry key (surgical cleanup):
+### Disable refresh during a provider incident
+
+1. Set `CACHE_REFRESH_ENABLED=false`.
+2. Deploy the Worker through the normal release process.
+3. Continue serving requests according to the normal cache policy.
+4. Monitor `v2:hot:` count and provider recovery.
+5. Re-enable the refresher and deploy after stability is restored.
+
+Demand records have a KV TTL matching the inactivity setting, so they will
+eventually expire while the refresher is disabled. The scheduler's inactivity
+eviction is also disabled, however, so do not leave it off longer than needed.
+
+### Remove one abusive or obsolete demand entry
+
+Only when there is a specific, confirmed key:
 
 ```bash
 npx wrangler kv key delete "v2:hot:metar:KJFK" \
@@ -99,42 +136,19 @@ npx wrangler kv key delete "v2:hot:metar:KJFK" \
   --config workers/metar-proxy/wrangler.jsonc
 ```
 
-## Troubleshooting playbook
-
-### Cron not running
-
-- Confirm `triggers.crons` exists in Worker config.
-- Confirm latest deploy succeeded.
-- Check dashboard invocation chart for gaps.
-
-### High upstream traffic / higher cost than expected
-
-- Reduce `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (first lever; `1` is still an effective capacity of `2`).
-- Increase `CACHE_REFRESH_METAR_INTERVAL_SECONDS` and/or `CACHE_REFRESH_AIRPORT_INTERVAL_SECONDS`.
-- Temporarily set `CACHE_REFRESH_ENABLED=false` during provider incidents.
-
-### Queue growth without cleanup
-
-- Verify `CACHE_REFRESH_INACTIVITY_TTL_SECONDS` is set and positive.
-- Sample `v2:hot:*` keys and validate `lastAccessedAt` and scheduled failure fields.
-- Ensure deployment includes recent scheduler code and env vars.
+This stops scheduled refresh for that key. It does not delete the payload; a
+later successful client request can re-enqueue it. Do not bulk-delete the hot
+prefix or the whole KV namespace as a response to a scheduler incident.
 
 ## Cost guardrails
 
-Baseline scheduled invocations:
+There are about 2,880 scheduled invocations in a 30-day month. Refresh cost is
+primarily controlled by active demand count, per-resource intervals, and the
+per-run attempt cap. As a rough upper bound for `N` continuously active ICAOs
+at default intervals:
 
-- `4` runs/hour * `24` hours/day * `30` days/month = `2,880` cron runs/month.
+`N × (48 METAR refreshes/day + 1 airport refresh/day) × 30 days`.
 
-Approximate monthly refresh attempts for `N` continuously active ICAOs:
-
-- `N * (METAR refreshes/day + Airport refreshes/day) * 30`
-- Default intervals: `N * (48 + 1) * 30`
-- Example (`N=100`): `100 * 49 * 30 = 147,000` refresh attempts/month
-
-Primary cost levers:
-
-1. `CACHE_REFRESH_MAX_ITEMS_PER_RUN` (minimum effective value: `2`)
-2. METAR/airport refresh intervals
-3. Inactivity TTL
-
-When tuning, change one lever at a time and compare Cloudflare metrics over at least 24 hours.
+For 100 continuously active ICAOs, that is roughly 147,000 upstream refresh
+attempts per month. Start tuning with `CACHE_REFRESH_MAX_ITEMS_PER_RUN`, then
+refresh intervals, and finally inactivity TTL.

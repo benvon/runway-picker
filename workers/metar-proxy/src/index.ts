@@ -17,10 +17,11 @@ import {
 import { getAdapterOrThrow } from './cache/registry';
 import {
   abortSchedulerRun,
-  acknowledgeSchedulerDequeues,
   beginSchedulerRun,
   CacheSingleFlightCoordinator,
   commitSchedulerRun,
+  processSchedulerDequeues,
+  recordSchedulerDemand,
   renewSchedulerRun,
   type SchedulerMaintenanceOutcome
 } from './cache/singleFlight';
@@ -294,8 +295,7 @@ async function noteSuccessfulCacheAccess(
 ): Promise<void> {
   try {
     const config = parseCacheRefresherConfig(env);
-    await touchHotCacheEntry({
-      env,
+    await recordSchedulerDemand(env.CACHE_COORDINATOR, {
       resource,
       normalizedKey,
       lastAccessedAt: new Date().toISOString(),
@@ -641,18 +641,9 @@ export async function runScheduledCacheRefresh(env: CacheEngineEnv, now = new Da
     inactivityTtlSeconds: config.inactivityTtlSeconds
   });
   if (!committed) throw new Error('Scheduled cache refresh coordinator commit failed.');
-  const acknowledgedDequeues: string[] = [];
-  for (const identity of committed.dequeueIdentities) {
-    try {
-      if (env.METAR_CACHE.delete) {
-        await env.METAR_CACHE.delete(identity);
-        acknowledgedDequeues.push(identity);
-      }
-    } catch (error) {
-      console.error('Scheduled cache refresh demand deletion will retry.', { error });
-    }
+  if (committed.dequeueIdentities.length > 0 && !(await processSchedulerDequeues(env.CACHE_COORDINATOR))) {
+    console.error('Scheduled cache refresh demand deletion will retry.');
   }
-  if (acknowledgedDequeues.length > 0) await acknowledgeSchedulerDequeues(env.CACHE_COORDINATOR, lease.runId, acknowledgedDequeues);
   if (env.METAR_CACHE.delete) {
     await Promise.allSettled([
       env.METAR_CACHE.delete('v2:control:hot-refresh-cursor:metar'),

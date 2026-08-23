@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getOrRefreshCached } from './engine';
+import { getOrRefreshCached, inspectCachedPayloadForMaintenance } from './engine';
 import type {
   CacheEnvelope,
   CacheEngineEnv,
@@ -33,8 +33,12 @@ class MemoryKv implements KvNamespaceLike {
   private values = new Map<string, unknown>();
   private writeOptions = new Map<string, { expirationTtl?: number } | undefined>();
 
-  async get(key: string): Promise<unknown> {
-    return this.values.get(key) ?? null;
+  async get(key: string, type: 'json' | 'text' = 'json'): Promise<unknown> {
+    const value = this.values.get(key) ?? null;
+    if (type === 'text' && value !== null) {
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    }
+    return value;
   }
 
   async put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
@@ -235,6 +239,16 @@ function buildEnvelope(cacheKey: string, value: string, fetchedAt: string, ttlSe
 }
 
 describe('cache engine', () => {
+  it('purges malformed maintenance payload text without turning it into a KV failure', async () => {
+    const kv = new MemoryKv();
+    kv.seed('v1:demo:alpha', '{invalid-json');
+
+    await expect(inspectCachedPayloadForMaintenance({
+      adapter: buildAdapter(), input: { key: 'alpha' }, env: { METAR_CACHE: kv }, now: new Date('2026-03-03T12:00:00.000Z')
+    })).resolves.toEqual({ kind: 'missing' });
+    expect(kv.has('v1:demo:alpha')).toBe(false);
+  });
+
   it('returns edge cache hit when edge entry is fresh', async () => {
     const adapter = buildAdapter({
       fetchUpstream: vi.fn().mockResolvedValue('not-used')

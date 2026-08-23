@@ -487,13 +487,20 @@ export async function inspectCachedPayloadForMaintenance<TInput, TUpstream, TDat
 }): Promise<CacheMaintenanceInspection> {
   const cacheKey = buildCacheKey(params.adapter.resource, params.adapter.normalizeKey(params.input));
   const now = params.now ?? new Date();
-  let raw: unknown;
+  let text: unknown;
   try {
-    raw = await params.env.METAR_CACHE.get(cacheKey, 'json');
+    text = await params.env.METAR_CACHE.get(cacheKey, 'text');
   } catch (error) {
     throw new CacheEngineError(error instanceof Error ? error.message : 'Cache payload inspection failed.', 503);
   }
-  if (raw === null) {
+  if (text === null) {
+    return { kind: 'missing' };
+  }
+  let raw: unknown;
+  try {
+    raw = typeof text === 'string' ? JSON.parse(text) : text;
+  } catch {
+    await purgeInvalidPayloadCopies(params.env, undefined, cacheKey, true, false);
     return { kind: 'missing' };
   }
   const record = toCachedRecord(raw, params.adapter, cacheKey, now);

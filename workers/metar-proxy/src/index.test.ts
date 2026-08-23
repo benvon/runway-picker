@@ -24,14 +24,14 @@ class CoordinatorStorage {
 
 const schedulerCoordinators = new WeakMap<object, CacheEngineEnv['CACHE_COORDINATOR']>();
 
-function schedulerCoordinator(): NonNullable<CacheEngineEnv['CACHE_COORDINATOR']> {
+function schedulerCoordinator(env: CacheEngineEnv): NonNullable<CacheEngineEnv['CACHE_COORDINATOR']> {
   const storage = new CoordinatorStorage();
   return {
     idFromName: (name: string) => name,
     get: () => ({
       fetch: async (input, init) => {
         const request = input instanceof Request ? input : new Request(input.toString(), init);
-        return new CacheSingleFlightCoordinator({ storage }).fetch(request);
+        return new CacheSingleFlightCoordinator({ storage }, env).fetch(request);
       }
     })
   };
@@ -41,7 +41,7 @@ function withSchedulerCoordinator(env: CacheEngineEnv): CacheEngineEnv {
   const key = env.METAR_CACHE as object;
   let coordinator = schedulerCoordinators.get(key);
   if (!coordinator) {
-    coordinator = schedulerCoordinator();
+    coordinator = schedulerCoordinator(env);
     schedulerCoordinators.set(key, coordinator);
   }
   return { ...env, CACHE_COORDINATOR: coordinator };
@@ -151,11 +151,11 @@ function withHealthyRateLimiter(env: CacheEngineEnv): CacheEngineEnv {
 }
 
 function handleMetarRequest(request: Request, env: CacheEngineEnv, ctx?: { waitUntil(promise: Promise<unknown>): void }) {
-  return handleMetarRequestFromWorker(request, withHealthyRateLimiter(env), ctx);
+  return handleMetarRequestFromWorker(request, withSchedulerCoordinator(withHealthyRateLimiter(env)), ctx);
 }
 
 function handleAirportRequest(request: Request, env: CacheEngineEnv, ctx?: { waitUntil(promise: Promise<unknown>): void }) {
-  return handleAirportRequestFromWorker(request, withHealthyRateLimiter(env), ctx);
+  return handleAirportRequestFromWorker(request, withSchedulerCoordinator(withHealthyRateLimiter(env)), ctx);
 }
 
 function handleAirportLocationRequest(request: Request, env: CacheEngineEnv) {
@@ -382,7 +382,7 @@ describe('cache refresh helpers', () => {
     );
     expect(inactiveResult).toBeNull();
     expect(kv.has('v2:hot:metar:KDEN')).toBe(false);
-    expect(kv.has('v1:metar:KDEN')).toBe(true);
+    expect(kv.has('v1:metar:KDEN')).toBe(false);
   });
 });
 
@@ -1830,7 +1830,7 @@ describe('airport worker', () => {
     await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
 
     expect(kv.has('v2:hot:metar:KDEN')).toBe(false);
-    expect(kv.has('v1:metar:KDEN')).toBe(true);
+    expect(kv.has('v1:metar:KDEN')).toBe(false);
   });
 
   it('scheduled refresh does not extend lastAccessedAt timestamps', async () => {
