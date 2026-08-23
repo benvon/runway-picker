@@ -1510,6 +1510,8 @@ describe('airport worker', () => {
   });
 
   it('retries a rejected saved cursor from the prefix without deleting queue or payload data', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-06T12:00:00.000Z'));
     const kv = new MemoryKv();
     kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'stale' });
     seedHotQueueEntry(kv, {
@@ -1519,7 +1521,17 @@ describe('airport worker', () => {
       lastAccessedAt: '2026-03-06T11:59:00.000Z',
       lastRefreshedAt: '2026-03-06T11:59:00.000Z'
     });
-    kv.seed('v1:metar:KJFK', { cached: true });
+    kv.seed('v1:metar:KJFK', {
+      schemaVersion: 5,
+      resource: 'metar',
+      key: 'v1:metar:KJFK',
+      data: {
+        icao: 'KJFK', metarRaw: 'METAR KJFK 061130Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
+        wind: { raw: '11010KT', directionType: 'fixed', directionDegTrue: 110, directionVariation: null, speedKt: 10, gustKt: null },
+        source: 'aviationweather', fetchedAt: '2026-03-06T11:00:00.000Z', observedAt: '2026-03-06T11:30:00.000Z'
+      },
+      cacheMeta: { fetchedAt: '2026-03-06T11:00:00.000Z', expiresAt: '2026-03-06T11:30:00.000Z', policyVersion: 'metar-v2', source: 'upstream' }
+    });
     const originalList = kv.list.bind(kv);
     const listSpy = vi.spyOn(kv, 'list').mockImplementation(async (options) => {
       if (options?.prefix === 'v2:hot:metar:' && options.cursor === 'stale') {
@@ -1535,9 +1547,10 @@ describe('airport worker', () => {
       undefined
     ]);
     expect(kv.has('v2:hot:metar:KJFK')).toBe(true);
-    expect(kv.has('v1:metar:KJFK')).toBe(false);
+    expect(kv.has('v1:metar:KJFK')).toBe(true);
     expect(warning).not.toHaveBeenCalled();
     warning.mockRestore();
+    vi.useRealTimers();
   });
 
   it('preserves a valid saved cursor when KV list fails transiently', async () => {
