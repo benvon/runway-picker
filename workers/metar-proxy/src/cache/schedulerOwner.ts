@@ -1,0 +1,191 @@
+import type { DurableObjectNamespaceLike, DurableObjectStub } from './types';
+
+export type OwnedSchedulerResource = 'metar' | 'airport';
+export type OwnedSchedulerOutcome = 'refreshed' | 'upstream_failed' | 'neutral';
+
+export interface OwnedSchedulerCandidate {
+  resource: OwnedSchedulerResource;
+  normalizedKey: string;
+  lastAccessedAt: string;
+}
+
+interface SqlStorageLike {
+  exec<T = Record<string, unknown>>(query: string, ...bindings: unknown[]): Iterable<T>;
+  transactionSync<T>(closure: () => T): T;
+}
+
+interface StorageLike {
+  get<T>(key: string): Promise<T | undefined>;
+  put(key: string, value: unknown): Promise<void>;
+  sql?: SqlStorageLike;
+  getAlarm?(): Promise<number | null>;
+  setAlarm?(scheduledTime: number | Date): Promise<void>;
+}
+
+interface StateLike { storage: StorageLike; }
+interface Demand {
+  resource: OwnedSchedulerResource;
+  normalizedKey: string;
+  lastAccessedAt: string;
+  expiresAtMs: number;
+  failures: number;
+  suppressedAtMs?: number;
+}
+interface Run {
+  expiresAtMs: number;
+  status: 'active' | 'completed';
+  candidates: OwnedSchedulerCandidate[];
+  applied: Record<string, true>;
+  completedAtMs?: number;
+}
+interface FallbackState { schemaVersion: 1; demands: Record<string, Demand>; runs: Record<string, Run>; }
+interface DemandRow { resource: string; normalized_key: string; last_accessed_at: string; }
+interface RunRow { expires_at_ms: number; status: string; }
+interface ItemRow { applied: number; }
+
+const OBJECT_NAME = '__cache-refresh-scheduler-v1__';
+const FALLBACK_KEY = 'owned-scheduler-test-fallback';
+const RUN_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+function token(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function resource(value: unknown): value is OwnedSchedulerResource { return value === 'metar' || value === 'airport'; }
+function identity(entry: Pick<OwnedSchedulerCandidate, 'resource' | 'normalizedKey'>): string { return `${entry.resource}:${entry.normalizedKey}`; }
+function numberField(body: unknown, name: string): number {
+  return body && typeof body === 'object' ? Number((body as Record<string, unknown>)[name]) : Number.NaN;
+}
+function stringField(body: unknown, name: string): string { return body && typeof body === 'object' && typeof (body as Record<string, unknown>)[name] === 'string' ? (body as Record<string, string>)[name] : ''; }
+function validPositive(value: number): boolean { return Number.isFinite(value) && value > 0; }
+
+class SchedulerState {
+  constructor(private readonly storage: StorageLike) {}
+  private get sql(): SqlStorageLike | undefined { return this.storage.sql; }
+  private rows<T>(query: string, ...bindings: unknown[]): T[] { return [...(this.sql?.exec<T>(query, ...bindings) ?? [])]; }
+  private setup(): void {
+    const sql = this.sql;
+    if (!sql) return;
+    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_demands (resource TEXT NOT NULL, normalized_key TEXT NOT NULL, last_accessed_at TEXT NOT NULL, expires_at_ms INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0, suppressed_at_ms INTEGER, PRIMARY KEY(resource, normalized_key))');
+    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_runs (id TEXT PRIMARY KEY, expires_at_ms INTEGER NOT NULL, status TEXT NOT NULL, completed_at_ms INTEGER)');
+    sql.exec('CREATE TABLE IF NOT EXISTS scheduler_run_items (run_id TEXT NOT NULL, resource TEXT NOT NULL, normalized_key TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, resource, normalized_key))');
+    sql.exec('CREATE INDEX IF NOT EXISTS scheduler_demand_candidates ON scheduler_demands(resource, suppressed_at_ms, last_accessed_at)');
+  }
+  private async fallback(): Promise<FallbackState> {
+    const state = await this.storage.get<Partial<FallbackState>>(FALLBACK_KEY);
+    return state?.schemaVersion === 1 && state.demands && state.runs ? state as FallbackState : { schemaVersion: 1, demands: {}, runs: {} };
+  }
+  private async save(state: FallbackState): Promise<void> { await this.storage.put(FALLBACK_KEY, state); }
+  private cleanFallback(state: FallbackState, now: number): void {
+    for (const [key, demand] of Object.entries(state.demands)) if (demand.expiresAtMs <= now) delete state.demands[key];
+    for (const [key, run] of Object.entries(state.runs)) if (run.status === 'completed' && (run.completedAtMs ?? now) <= now - RUN_RETENTION_MS) delete state.runs[key];
+  }
+  private cleanSql(now: number): void {
+    this.rows('DELETE FROM scheduler_demands WHERE expires_at_ms <= ?', now);
+    this.rows('DELETE FROM scheduler_run_items WHERE run_id IN (SELECT id FROM scheduler_runs WHERE status = ? AND completed_at_ms <= ?)', 'completed', now - RUN_RETENTION_MS);
+    this.rows('DELETE FROM scheduler_runs WHERE status = ? AND completed_at_ms <= ?', 'completed', now - RUN_RETENTION_MS);
+    this.rows('DELETE FROM scheduler_runs WHERE status = ? AND expires_at_ms <= ?', 'active', now);
+  }
+  async touch(entry: Pick<Demand, 'resource' | 'normalizedKey'>, ttlSeconds: number, reactivated: boolean, now: number): Promise<void> {
+    const expiresAtMs = now + ttlSeconds * 1000;
+    const lastAccessedAt = new Date(now).toISOString();
+    if (this.sql) {
+      this.sql.transactionSync(() => {
+        this.setup();
+        this.rows('INSERT INTO scheduler_demands(resource, normalized_key, last_accessed_at, expires_at_ms) VALUES (?, ?, ?, ?) ON CONFLICT(resource, normalized_key) DO UPDATE SET last_accessed_at = excluded.last_accessed_at, expires_at_ms = excluded.expires_at_ms, failures = CASE WHEN ? THEN 0 ELSE failures END, suppressed_at_ms = CASE WHEN ? THEN NULL ELSE suppressed_at_ms END', entry.resource, entry.normalizedKey, lastAccessedAt, expiresAtMs, reactivated ? 1 : 0, reactivated ? 1 : 0);
+      });
+      return;
+    }
+    const state = await this.fallback(); this.cleanFallback(state, now);
+    const previous = state.demands[identity(entry)];
+    state.demands[identity(entry)] = { ...entry, lastAccessedAt, expiresAtMs, failures: reactivated ? 0 : previous?.failures ?? 0, suppressedAtMs: reactivated ? undefined : previous?.suppressedAtMs };
+    await this.save(state);
+  }
+  // The transaction deliberately contains selection, claim, and run-item
+  // creation so no candidate can be completed without an owned run.
+  async begin(holdSeconds: number, maxCandidates: number, now: number): Promise<{ runId: string; candidates: OwnedSchedulerCandidate[] } | null> {
+    const runId = token(); const max = Math.max(2, Math.floor(maxCandidates)); const metarLimit = Math.ceil(max / 2); const airportLimit = Math.floor(max / 2);
+    if (this.sql) {
+      return this.sql.transactionSync(() => {
+      this.setup(); this.cleanSql(now);
+      if (this.rows<RunRow>('SELECT expires_at_ms, status FROM scheduler_runs WHERE status = ? AND expires_at_ms > ? LIMIT 1', 'active', now).length) return null;
+      const select = (kind: OwnedSchedulerResource, limit: number, offset = 0): OwnedSchedulerCandidate[] => this.rows<DemandRow>('SELECT resource, normalized_key, last_accessed_at FROM scheduler_demands WHERE resource = ? AND suppressed_at_ms IS NULL ORDER BY last_accessed_at ASC, normalized_key ASC LIMIT ? OFFSET ?', kind, limit, offset).map((row) => ({ resource: row.resource as OwnedSchedulerResource, normalizedKey: row.normalized_key, lastAccessedAt: row.last_accessed_at }));
+      const metar = select('metar', metarLimit); const airport = select('airport', airportLimit); const remaining = max - metar.length - airport.length;
+      if (remaining > 0) { const kind: OwnedSchedulerResource = metar.length < metarLimit ? 'airport' : 'metar'; (kind === 'metar' ? metar : airport).push(...select(kind, remaining, kind === 'metar' ? metar.length : airport.length)); }
+      const candidates = [...metar, ...airport];
+      this.rows('INSERT INTO scheduler_runs(id, expires_at_ms, status) VALUES (?, ?, ?)', runId, now + holdSeconds * 1000, 'active');
+      for (const candidate of candidates) this.rows('INSERT INTO scheduler_run_items(run_id, resource, normalized_key) VALUES (?, ?, ?)', runId, candidate.resource, candidate.normalizedKey);
+        return { runId, candidates };
+      });
+    }
+    const state = await this.fallback(); this.cleanFallback(state, now);
+    if (Object.values(state.runs).some((run) => run.status === 'active' && run.expiresAtMs > now)) return null;
+    const select = (kind: OwnedSchedulerResource, limit: number, offset = 0) => Object.values(state.demands).filter((demand) => demand.resource === kind && !demand.suppressedAtMs).sort((left, right) => left.lastAccessedAt.localeCompare(right.lastAccessedAt) || left.normalizedKey.localeCompare(right.normalizedKey)).slice(offset, offset + limit).map(({ resource: candidateResource, normalizedKey, lastAccessedAt }) => ({ resource: candidateResource, normalizedKey, lastAccessedAt }));
+    const metar = select('metar', metarLimit); const airport = select('airport', airportLimit); const remaining = max - metar.length - airport.length;
+    if (remaining > 0) { const kind: OwnedSchedulerResource = metar.length < metarLimit ? 'airport' : 'metar'; (kind === 'metar' ? metar : airport).push(...select(kind, remaining, kind === 'metar' ? metar.length : airport.length)); }
+    const candidates = [...metar, ...airport]; state.runs[runId] = { expiresAtMs: now + holdSeconds * 1000, status: 'active', candidates, applied: {} }; await this.save(state); return { runId, candidates };
+  }
+  async renew(runId: string, holdSeconds: number, now: number): Promise<boolean> {
+    if (this.sql) return this.sql.transactionSync(() => { this.setup(); const run = this.rows<RunRow>('SELECT expires_at_ms, status FROM scheduler_runs WHERE id = ? LIMIT 1', runId)[0]; if (!run || run.status !== 'active' || run.expires_at_ms <= now) return false; this.rows('UPDATE scheduler_runs SET expires_at_ms = ? WHERE id = ?', now + holdSeconds * 1000, runId); return true; });
+    const state = await this.fallback(); const run = state.runs[runId]; if (!run || run.status !== 'active' || run.expiresAtMs <= now) return false; run.expiresAtMs = now + holdSeconds * 1000; await this.save(state); return true;
+  }
+  async abort(runId: string): Promise<void> {
+    if (this.sql) { this.sql.transactionSync(() => { this.setup(); this.rows('DELETE FROM scheduler_run_items WHERE run_id = ?', runId); this.rows('DELETE FROM scheduler_runs WHERE id = ? AND status = ?', runId, 'active'); }); return; }
+    const state = await this.fallback(); if (state.runs[runId]?.status === 'active') delete state.runs[runId]; await this.save(state);
+  }
+  async complete(runId: string, outcomes: Array<OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }>, now: number): Promise<string[] | null> {
+    if (this.sql) {
+      // The claimed-item check and state transition must share one transaction.
+      // eslint-disable-next-line complexity
+      return this.sql.transactionSync(() => {
+      this.setup(); this.cleanSql(now); const run = this.rows<RunRow>('SELECT expires_at_ms, status FROM scheduler_runs WHERE id = ? LIMIT 1', runId)[0]; if (!run || run.status !== 'active' || run.expires_at_ms <= now) return null;
+      const suppressed: string[] = [];
+      for (const outcome of outcomes) {
+        if (!resource(outcome.resource) || !outcome.normalizedKey || !['refreshed', 'upstream_failed', 'neutral'].includes(outcome.outcome)) continue;
+        const item = this.rows<ItemRow>('SELECT applied FROM scheduler_run_items WHERE run_id = ? AND resource = ? AND normalized_key = ? LIMIT 1', runId, outcome.resource, outcome.normalizedKey)[0]; if (!item || item.applied !== 0) continue;
+        this.rows('UPDATE scheduler_run_items SET applied = 1 WHERE run_id = ? AND resource = ? AND normalized_key = ?', runId, outcome.resource, outcome.normalizedKey);
+        if (outcome.outcome === 'refreshed') this.rows('UPDATE scheduler_demands SET failures = 0, suppressed_at_ms = NULL WHERE resource = ? AND normalized_key = ?', outcome.resource, outcome.normalizedKey);
+        if (outcome.outcome === 'upstream_failed') { const demand = this.rows<{ failures: number }>('SELECT failures FROM scheduler_demands WHERE resource = ? AND normalized_key = ? LIMIT 1', outcome.resource, outcome.normalizedKey)[0]; if (demand) { const failures = demand.failures + 1; this.rows('UPDATE scheduler_demands SET failures = ?, suppressed_at_ms = CASE WHEN ? >= 3 THEN ? ELSE suppressed_at_ms END WHERE resource = ? AND normalized_key = ?', failures, failures, now, outcome.resource, outcome.normalizedKey); if (failures >= 3) suppressed.push(identity(outcome)); } }
+      }
+        this.rows('UPDATE scheduler_runs SET status = ?, completed_at_ms = ? WHERE id = ?', 'completed', now, runId); return suppressed;
+      });
+    }
+    const state = await this.fallback(); this.cleanFallback(state, now); const run = state.runs[runId]; if (!run || run.status !== 'active' || run.expiresAtMs <= now) return null;
+    const candidates = new Set(run.candidates.map(identity)); const suppressed: string[] = [];
+    for (const outcome of outcomes) { const key = identity(outcome); if (!candidates.has(key) || run.applied[key]) continue; run.applied[key] = true; const demand = state.demands[key]; if (!demand) continue; if (outcome.outcome === 'refreshed') { demand.failures = 0; delete demand.suppressedAtMs; } else if (outcome.outcome === 'upstream_failed') { demand.failures += 1; if (demand.failures >= 3) { demand.suppressedAtMs = now; suppressed.push(key); } } }
+    run.status = 'completed'; run.completedAtMs = now; await this.save(state); return suppressed;
+  }
+  async cleanup(now: number): Promise<number | null> {
+    if (this.sql) return this.sql.transactionSync(() => { this.setup(); this.cleanSql(now); return this.rows<{ expires_at_ms: number }>('SELECT expires_at_ms FROM scheduler_demands ORDER BY expires_at_ms ASC LIMIT 1')[0]?.expires_at_ms ?? null; });
+    const state = await this.fallback(); this.cleanFallback(state, now); const next = Object.values(state.demands).reduce<number | null>((earliest, demand) => earliest === null || demand.expiresAtMs < earliest ? demand.expiresAtMs : earliest, null); await this.save(state); return next;
+  }
+}
+
+export class OwnedSchedulerCoordinator {
+  private readonly state: SchedulerState;
+  constructor(private readonly durableState: StateLike) { this.state = new SchedulerState(durableState.storage); }
+  private async schedule(expiry: number): Promise<void> { const storage = this.durableState.storage; if (!storage.setAlarm) return; const existing = await storage.getAlarm?.(); if (existing === undefined || existing === null || expiry < existing) await storage.setAlarm(expiry); }
+  // Route validation is kept at the coordinator trust boundary.
+  // eslint-disable-next-line complexity
+  async fetch(request: Request, path: string): Promise<Response> {
+    const body = await request.json().catch(() => null) as unknown; const now = Date.now();
+    if (path === '/scheduler/v2/touch') { const kind = body && typeof body === 'object' ? (body as Record<string, unknown>).resource : undefined; const normalizedKey = stringField(body, 'normalizedKey'); const ttl = numberField(body, 'inactivityTtlSeconds'); const reactivated = Boolean(body && typeof body === 'object' && (body as Record<string, unknown>).reactivated === true); if (!resource(kind) || !normalizedKey || !validPositive(ttl)) return Response.json({ error: 'Invalid request body.' }, { status: 400 }); await this.state.touch({ resource: kind, normalizedKey }, ttl, reactivated, now); await this.schedule(now + ttl * 1000); return Response.json({ ok: true }); }
+    if (path === '/scheduler/v2/begin') { const hold = numberField(body, 'holdSeconds'); const max = numberField(body, 'maxCandidates'); if (!validPositive(hold) || !validPositive(max)) return Response.json({ error: 'Invalid request body.' }, { status: 400 }); const lease = await this.state.begin(hold, max, now); return Response.json(lease ? { acquired: true, ...lease } : { acquired: false }); }
+    const runId = stringField(body, 'runId'); if (!runId) return Response.json({ error: 'Invalid request body.' }, { status: 400 });
+    if (path === '/scheduler/v2/abort') { await this.state.abort(runId); return Response.json({ ok: true }); }
+    if (path === '/scheduler/v2/renew') { const hold = numberField(body, 'holdSeconds'); if (!validPositive(hold) || !(await this.state.renew(runId, hold, now))) return Response.json({ error: 'Run is not active.' }, { status: 409 }); return Response.json({ ok: true }); }
+    if (path === '/scheduler/v2/complete') { const outcomes = body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>).outcomes) ? (body as { outcomes: Array<OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }> }).outcomes : null; if (!outcomes) return Response.json({ error: 'Invalid request body.' }, { status: 400 }); const suppressedIdentities = await this.state.complete(runId, outcomes, now); return suppressedIdentities === null ? Response.json({ error: 'Run is not active.' }, { status: 409 }) : Response.json({ suppressedIdentities }); }
+    return Response.json({ error: 'Not found.' }, { status: 404 });
+  }
+  async alarm(): Promise<void> { const next = await this.state.cleanup(Date.now()); if (next !== null && this.durableState.storage.setAlarm) await this.durableState.storage.setAlarm(next); }
+}
+
+function stub(namespace: DurableObjectNamespaceLike | undefined): DurableObjectStub | null { return namespace ? namespace.get(namespace.idFromName(OBJECT_NAME)) : null; }
+async function request<T>(namespace: DurableObjectNamespaceLike | undefined, path: string, body: unknown): Promise<T | null> { const target = stub(namespace); if (!target) return null; try { const response = await target.fetch(`https://cache-coordinator.internal${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return response.ok ? await response.json() as T : null; } catch { return null; } }
+export async function recordOwnedSchedulerDemand(namespace: DurableObjectNamespaceLike | undefined, resource: OwnedSchedulerResource, normalizedKey: string, inactivityTtlSeconds: number, reactivated = false): Promise<boolean> { return Boolean(await request(namespace, '/scheduler/v2/touch', { resource, normalizedKey, inactivityTtlSeconds, reactivated })); }
+export async function beginOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, holdSeconds: number, maxCandidates: number): Promise<{ runId: string; candidates: OwnedSchedulerCandidate[] } | null> { const result = await request<{ acquired?: boolean; runId?: string; candidates?: OwnedSchedulerCandidate[] }>(namespace, '/scheduler/v2/begin', { holdSeconds, maxCandidates }); return result?.acquired && typeof result.runId === 'string' && Array.isArray(result.candidates) ? { runId: result.runId, candidates: result.candidates } : null; }
+export async function renewOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string, holdSeconds: number): Promise<boolean> { return Boolean(await request(namespace, '/scheduler/v2/renew', { runId, holdSeconds })); }
+export async function abortOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string): Promise<void> { await request(namespace, '/scheduler/v2/abort', { runId }); }
+export async function completeOwnedSchedulerRun(namespace: DurableObjectNamespaceLike | undefined, runId: string, outcomes: Array<OwnedSchedulerCandidate & { outcome: OwnedSchedulerOutcome }>): Promise<string[] | null> { const result = await request<{ suppressedIdentities?: unknown }>(namespace, '/scheduler/v2/complete', { runId, outcomes }); return result && Array.isArray(result.suppressedIdentities) && result.suppressedIdentities.every((value) => typeof value === 'string') ? result.suppressedIdentities : null; }

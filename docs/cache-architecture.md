@@ -7,8 +7,8 @@ two deliberately separate concerns:
 2. refresh recently requested data fairly, without allowing cache bookkeeping to
    corrupt request behavior.
 
-The boundary is important: cached payloads and client demand live in KV, while
-the Durable Object owns the small amount of state that needs atomic updates.
+The boundary is important: cached payloads live in KV, while the Durable Object
+owns the complete demand-record lifecycle and all scheduler state.
 
 ## Design goals
 
@@ -27,8 +27,8 @@ the Durable Object owns the small amount of state that needs atomic updates.
 | Component | Owns | Does not own |
 | --- | --- | --- |
 | Edge cache (`caches.default`) | Disposable local copy of a validated payload | Scheduler state or source of truth |
-| KV (`METAR_CACHE`) | Versioned payload envelopes and hot-demand records | Cursors, leases, or refresh failure counters |
-| `CACHE_COORDINATOR` Durable Object | Per-key single-flight locks and one durable scheduler state machine | Cached payload bodies or client demand |
+| KV (`METAR_CACHE`) | Versioned payload envelopes | Demand records, cursors, leases, or refresh failure counters |
+| `CACHE_COORDINATOR` Durable Object | Per-key single-flight locks and the transactional demand/scheduler state machine | Cached payload bodies |
 | Resource adapter | Input normalization, provider access, data validation, and resource policy | Cross-resource scheduling |
 
 This split is intentional. KV is excellent for read-heavy payload data and
@@ -51,8 +51,8 @@ For a cacheable request, the Worker:
 5. lets only the lease owner call the provider and write the new envelope;
 6. lets other requests wait briefly for the fresh KV entry or use stale data
    only when the resource policy permits it; and
-7. records successful client access as a best-effort, independent hot-demand
-   update. A demand-write failure never fails the user request.
+7. records successful client access as a best-effort coordinator demand touch.
+   A demand-write failure never fails the user request.
 
 The cache engine, rather than a resource adapter, writes authoritative envelope
 metadata. On both edge and KV reads it checks envelope identity, resource,
@@ -81,38 +81,25 @@ are defined by their adapter and are independent of METAR's hard limit.
 ## Hot demand and scheduled refresh
 
 Only successful `/api/metar` and `/api/airport` responses enter the hot set.
-The KV record is a schema-5 demand record at:
-
-- `v2:hot:metar:{ICAO}`
-- `v2:hot:airport:{ICAO}`
-
-It contains only the resource identity, `lastAccessedAt`, and a coordinator-
-issued demand version. It does **not** contain a payload timestamp, refresh
-cursor, lease, or failure count. The scheduler carries that version through an
-attempt and ignores a stale failed outcome after a newer client touch. Older
-hot-record shapes are accepted only for lazy migration and are rewritten on
-their next safe demand update.
+The named `CACHE_COORDINATOR` owns each demand row in its SQLite storage. A row
+contains the canonical resource/key, a coordinator-stamped access time and
+expiry, consecutive upstream-failure count, and optional suppression state.
+It does **not** contain a payload body. There are no `v2:hot:*` demand keys in
+the current design; old keys are ignored and expire naturally.
 
 A cron runs every 15 minutes. It obtains the named scheduler lease from
 `CACHE_COORDINATOR`, then:
 
-1. scans bounded pages for METAR and airport demand independently, using the
-   durable per-resource cursor held by the Durable Object;
-2. validates raw-text metadata defensively; malformed metadata is removed or
-   skipped, while a real KV operation failure aborts the run without advancing
-   its cursor;
-3. rechecks inactivity before eviction to avoid racing a client touch;
-4. derives due state from the validated payload envelope—not from demand
+1. atomically expires inactive demand rows, claims a token-bound run, and
+   returns bounded METAR and airport candidates from coordinator storage;
+2. derives due state from the validated payload envelope—not from demand
    metadata—treating a valid negative envelope as non-due until its expiry,
    and selects the oldest due work in alternating resource order;
-5. performs at most the configured number of real upstream attempts (25 by
+3. performs at most the configured number of real upstream attempts (25 by
    default); cache hits and contention are neutral and do not consume this
    budget;
-6. renews its token-bound scheduler lease after each processed entry, commits
-   cursor movement and typed outcomes atomically, then releases ownership; and
-7. asks the Durable Object to process pending demand removals. The coordinator
-   serializes the full scheduler protocol, including KV demand deletion, with
-   later client demand writes.
+4. renews its token-bound scheduler lease after each processed entry and
+   transactionally applies each claimed outcome exactly once.
 
 The initial lease is 300 seconds, which covers the default maximum of 25
 sequential ten-second attempts. Each processed entry renews a 60-second lease
@@ -130,32 +117,25 @@ single-flight coordination, and other scheduler infrastructure failures abort
 the run instead: they do not increment a provider-failure count or advance its
 cursors.
 
-A failed outcome is applied only when its demand version still matches the
-latest coordinator touch. This prevents an already-scanned failure from
-dequeueing demand that a client refreshed while the scheduler was working.
+Client touches are neutral: they update expiry but cannot erase failure history
+or reactivate a stuck background entry. After three consecutive upstream
+failures, the coordinator suppresses that row. Cache-hit and stale traffic
+cannot recreate it; only a newer successful payload refresh clears suppression.
+This is a true sink for a stuck entry, unlike deleting a record that the next
+cache hit immediately recreates. An idempotent Durable Object alarm removes
+expired rows and completed-run records even when refresh is disabled.
 
-After three consecutive upstream failures, the Durable Object persists a
-pending-dequeue intent while retaining the failure state. The coordinator itself
-deletes only the KV demand entry (not the payload) and clears that intent only
-after KV confirms the deletion. If deletion fails, a later scheduled run
-retries it with the same durable intent. A new client access is also serialized
-through the coordinator: it clears an older pending intent before writing its
-new demand projection, so a stale removal can never delete newly re-enqueued
-demand.
-
-The scheduler also fails closed when its coordinator is unavailable or already
-owned. An invalid opaque KV cursor is retried once from the resource prefix;
-transient KV/list errors leave the old cursor intact. Cursor recovery never
-deletes a payload or demand record.
+The scheduler fails closed when its coordinator is unavailable or already
+owned. Payload KV read/write failures abort a run without failure-accounting
+mutation. Demand bookkeeping never relies on eventually consistent KV reads.
 
 ## Why this approach is sound
 
 The architecture uses Cloudflare primitives for the responsibilities they are
-good at: KV provides inexpensive cache data and the Durable Object serializes
-the small authoritative control plane. Keeping those roles separate prevents
-the lost-update and stale-checkpoint failures that arise when client touches,
-cursor movement, and failure accounting share one eventually consistent KV
-record.
+good at: KV provides inexpensive payload data and the Durable Object's SQLite
+storage owns the authoritative control plane. A demand transition never spans
+two storage systems, preventing the lost-update and ambiguous rollback failures
+that occur when client touches and failure accounting depend on KV projections.
 
 The scheduler has explicit bounds (scan cap, attempt cap, per-attempt timeout,
 lease renewal, and completed-run retention), typed outcomes, and serialized

@@ -7,20 +7,19 @@ This runbook covers the scheduled demand refresh system in
 ## Normal behavior
 
 - Cloudflare runs the Worker cron every 15 minutes.
-- Successful METAR and airport responses record a short demand record in KV:
-  `v2:hot:metar:{ICAO}` or `v2:hot:airport:{ICAO}`.
-- `CACHE_COORDINATOR` owns the scheduler cursor, active lease, failure count,
-  and pending-dequeue intent. Do not attempt to reconstruct or edit that state
-  in KV.
+- Successful METAR and airport responses make a best-effort demand touch to
+  `CACHE_COORDINATOR`; KV holds payloads only.
+- `CACHE_COORDINATOR` owns demand expiry, active leases, failure counts, run
+  claims, and suppression state in its SQLite storage. Do not attempt to
+  reconstruct or edit this state in KV.
 - Each run scans no more than ten times its effective refresh capacity and
   makes no more than `CACHE_REFRESH_MAX_ITEMS_PER_RUN` real upstream attempts.
   The default is 25 attempts per run.
 - METAR and airport demand are scanned separately and selected in alternating
   order when both have work. This prevents one resource type from starving the
   other.
-- A request touch updates demand only. It does not make an entry fresh or reset
-  a scheduler failure count. Each touch receives a new coordinator-owned
-  version, so an older failed scheduler outcome cannot remove the newer demand.
+- A request touch updates demand expiry only. It does not make an entry fresh,
+  reset a scheduler failure count, or reactivate a suppressed entry.
 
 ## Runtime controls
 
@@ -45,21 +44,18 @@ making another tuning change. Changes require a Worker deployment.
   60-second lease after each processed entry. A lost renewal aborts the run
   without committing progress.
 - A cache hit or contention result is neutral. A true upstream refresh clears
-  that entry's failure count; stale-on-error and failed upstream work increment
-  it. Cache/KV and coordinator failures abort the run without incrementing the
-  count or advancing its cursor.
+  failure and suppression state; stale-on-error and failed upstream work
+  increment the count. Cache/KV and coordinator failures abort the run without
+  mutating failure state.
 - A valid negative-cache entry (for example, an airport 404) is not due for a
   scheduled refresh before its recorded expiry. It is retained rather than
   treated as malformed cache data.
-- On the third consecutive failure, the demand record is queued for removal.
-  Its payload remains under normal cache policy. The coordinator performs the
-  KV deletion itself, retains the removal intent until KV confirms it, and
-  serializes the deletion transition with later client re-enqueues.
-  A transient delete failure is retried rather than resetting the count.
-- Invalid JSON or malformed demand metadata is removed/skipped. A genuine KV
-  list/read failure stops the run and leaves the prior cursor in place.
-- An invalid opaque cursor is retried once from the resource prefix. A
-  transient KV failure is not a cursor-reset condition.
+- On the third consecutive failure, the coordinator suppresses the demand.
+  The payload remains under normal cache policy, while cache-hit traffic cannot
+  immediately re-enqueue the stuck background work. A later successful payload
+  refresh reactivates it.
+- An idempotent Durable Object alarm removes inactive demand rows and old run
+  records, including while refresh is disabled.
 - METAR data at or beyond the 90-minute hard payload age is never returned.
 
 ## Monitoring checklist
@@ -88,23 +84,6 @@ values or payload contents.
 
 ## Manual inspection
 
-List active demand records:
-
-```bash
-npx wrangler kv key list \
-  --binding METAR_CACHE \
-  --prefix "v2:hot:" \
-  --config workers/metar-proxy/wrangler.jsonc
-```
-
-Inspect one demand record:
-
-```bash
-npx wrangler kv key get "v2:hot:metar:KJFK" \
-  --binding METAR_CACHE \
-  --config workers/metar-proxy/wrangler.jsonc
-```
-
 Inspect one payload:
 
 ```bash
@@ -113,8 +92,8 @@ npx wrangler kv key get "v1:metar:KJFK" \
   --config workers/metar-proxy/wrangler.jsonc
 ```
 
-Do not manually create, edit, or delete scheduler cursors, leases, or failure
-records. Those live in `CACHE_COORDINATOR` and are intentionally not a KV
+Do not manually create, edit, or delete demand, lease, failure, or suppression
+records. They live in `CACHE_COORDINATOR` and are intentionally not a KV
 operator interface.
 
 ## Safe interventions
@@ -124,26 +103,17 @@ operator interface.
 1. Set `CACHE_REFRESH_ENABLED=false`.
 2. Deploy the Worker through the normal release process.
 3. Continue serving requests according to the normal cache policy.
-4. Monitor `v2:hot:` count and provider recovery.
+4. Monitor provider recovery and Worker errors; existing inactive demand rows
+   are removed by the coordinator alarm.
 5. Re-enable the refresher and deploy after stability is restored.
 
 Demand records have a KV TTL matching the inactivity setting, so they will
 eventually expire while the refresher is disabled. The scheduler's inactivity
 eviction is also disabled, however, so do not leave it off longer than needed.
 
-### Remove one abusive or obsolete demand entry
-
-Only when there is a specific, confirmed key:
-
-```bash
-npx wrangler kv key delete "v2:hot:metar:KJFK" \
-  --binding METAR_CACHE \
-  --config workers/metar-proxy/wrangler.jsonc
-```
-
-This stops scheduled refresh for that key. It does not delete the payload; a
-later successful client request can re-enqueue it. Do not bulk-delete the hot
-prefix or the whole KV namespace as a response to a scheduler incident.
+There is no manual per-demand deletion procedure. If a specific demand must be
+suppressed operationally, disable refresh while investigating the provider or
+deploy a narrowly reviewed policy change; do not bulk-delete payload KV.
 
 ## Cost guardrails
 

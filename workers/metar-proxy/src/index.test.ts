@@ -109,6 +109,21 @@ class MemoryKv {
   }
 }
 
+function setCacheTimestamps(kv: MemoryKv, key: string, fetchedAt: Date, expiresAt: Date): void {
+  const cached = kv.read<{ cacheMeta?: Record<string, unknown> }>(key);
+  if (!cached?.cacheMeta) {
+    throw new Error(`Expected cached payload for ${key}.`);
+  }
+  kv.seed(key, {
+    ...cached,
+    cacheMeta: {
+      ...cached.cacheMeta,
+      fetchedAt: fetchedAt.toISOString(),
+      expiresAt: expiresAt.toISOString()
+    }
+  });
+}
+
 function alwaysBlockedRateLimiter() {
   return {
     idFromName: (name: string) => name,
@@ -896,7 +911,7 @@ describe('metar worker', () => {
     expect(secondPayload.cache.source).toBe('kv');
   });
 
-  it('tracks successful metar lookups in the hot queue metadata', async () => {
+  it('records successful metar lookups with the coordinator, not a KV hot key', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 12 })])));
 
     const kv = new MemoryKv();
@@ -905,24 +920,9 @@ describe('metar worker', () => {
     });
 
     expect(response.status).toBe(200);
-    const queueEntry = kv.read<{
-      resource: string;
-      normalizedKey: string;
-      lastAccessedAt: string;
-      demandVersion?: number;
-      lastRefreshedAt: string;
-      schemaVersion: number;
-    }>('v2:hot:metar:KMCI');
-
-    expect(queueEntry).toMatchObject({
-      schemaVersion: 5,
-      resource: 'metar',
-      normalizedKey: 'KMCI'
-    });
-    expect(queueEntry).not.toHaveProperty('cacheKey');
-    expect(typeof queueEntry?.lastAccessedAt).toBe('string');
-    expect(queueEntry?.demandVersion).toBe(1);
-    expect(queueEntry).not.toHaveProperty('lastRefreshedAt');
+    expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
+    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date(Date.now() + 31 * 60 * 1000));
+    expect(kv.has('v1:metar:KMCI')).toBe(true);
   });
 
   it('hard-cuts legacy cache entry shapes and refreshes upstream', async () => {
@@ -1164,7 +1164,7 @@ describe('metar worker', () => {
     expect(waitUntilCalls).toHaveLength(1);
   });
 
-  it('writes hot queue metadata with the inactivity TTL as expirationTtl on metar success', async () => {
+  it('does not write legacy hot metadata on metar success', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 10 })])));
 
     const kv = new MemoryKv();
@@ -1172,9 +1172,7 @@ describe('metar worker', () => {
 
     await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), { METAR_CACHE: kv });
 
-    const hotQueuePut = putSpy.mock.calls.find(([key]) => key.startsWith('v2:hot:'));
-    expect(hotQueuePut).toBeDefined();
-    expect(hotQueuePut?.[2]).toEqual({ expirationTtl: 432000 });
+    expect(putSpy.mock.calls.some(([key]) => key.startsWith('v2:hot:'))).toBe(false);
   });
 });
 
@@ -1318,7 +1316,7 @@ describe('airport worker', () => {
     expect('upstreamPayload' in payload).toBe(false);
   });
 
-  it('tracks successful airport lookups in the hot queue metadata', async () => {
+  it('records successful airport lookups without legacy hot metadata', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
 
     const kv = new MemoryKv();
@@ -1328,22 +1326,7 @@ describe('airport worker', () => {
     });
 
     expect(response.status).toBe(200);
-    const queueEntry = kv.read<{
-      resource: string;
-      normalizedKey: string;
-      lastAccessedAt: string;
-      lastRefreshedAt: string;
-      schemaVersion: number;
-    }>('v2:hot:airport:KJFK');
-
-    expect(queueEntry).toMatchObject({
-      schemaVersion: 5,
-      resource: 'airport',
-      normalizedKey: 'KJFK'
-    });
-    expect(queueEntry).not.toHaveProperty('cacheKey');
-    expect(typeof queueEntry?.lastAccessedAt).toBe('string');
-    expect(queueEntry).not.toHaveProperty('lastRefreshedAt');
+    expect(kv.has('v2:hot:airport:KJFK')).toBe(false);
   });
 
   it('uses an independent long-lived location cache without enrolling it in the hot queue', async () => {
@@ -1481,568 +1464,82 @@ describe('airport worker', () => {
     });
   });
 
-  it('scheduled refresh is a no-op when queue is empty', async () => {
-    const kv = new MemoryKv();
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
-    expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
-  });
-
-  it('does not refresh or purge a hot airport with a valid negative cache entry', async () => {
-    const fetchUpstream = vi.fn().mockRejectedValue(new Error('scheduler should not fetch a cached miss'));
+  it('uses coordinator-owned demand records and never scans legacy hot keys', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 12 })]));
     vi.stubGlobal('fetch', fetchUpstream);
     const kv = new MemoryKv();
-    const now = new Date('2026-03-06T12:00:00.000Z');
-    kv.seed('v2:hot:airport:KORD', {
-      schemaVersion: 5,
-      resource: 'airport',
-      normalizedKey: 'KORD',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      demandVersion: 1
-    });
-    kv.seed('v1:airport:KORD', {
-      schemaVersion: 9,
-      resource: 'airport',
-      key: 'v1:airport:KORD',
-      negative: { status: 404, code: 'ICAO_NOT_FOUND' },
-      cacheMeta: {
-        fetchedAt: '2026-03-06T11:30:00.000Z',
-        expiresAt: '2026-03-06T12:30:00.000Z',
-        policyVersion: 'airport-v6',
-        source: 'upstream'
-      }
-    });
-
-    await expect(runScheduledCacheRefresh({ METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' }, now)).resolves.toBeUndefined();
-
-    expect(fetchUpstream).not.toHaveBeenCalled();
-    expect(kv.has('v1:airport:KORD')).toBe(true);
-  });
-
-  it('does not re-list a resource that completed exactly at its initial scan budget', async () => {
-    const kv = new MemoryKv();
     const listSpy = vi.spyOn(kv, 'list');
-    for (let index = 0; index < 10; index++) {
-      const normalizedKey = `K${String(index).padStart(3, '0')}`;
-      seedHotQueueEntry(kv, {
-        resource: 'airport',
-        normalizedKey,
-        cacheKey: `v1:airport:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:59:00.000Z',
-        lastRefreshedAt: '2026-03-06T11:59:00.000Z'
-      });
-    }
-
-    await runScheduledCacheRefresh(
-      { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
-      new Date('2026-03-06T12:00:00.000Z')
-    );
-
-    expect(listSpy).toHaveBeenCalledTimes(2);
-    expect(listSpy.mock.calls.map(([options]) => options?.prefix).sort()).toEqual([
-      'v2:hot:airport:',
-      'v2:hot:metar:'
-    ]);
-  });
-
-  it('retries a rejected saved cursor from the prefix without deleting queue or payload data', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-03-06T12:00:00.000Z'));
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-    const kv = new MemoryKv();
-    kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: 'stale' });
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KJFK',
-      cacheKey: 'v1:metar:KJFK',
-      lastAccessedAt: '2026-03-06T11:59:00.000Z',
-      lastRefreshedAt: '2026-03-06T11:59:00.000Z'
-    });
-    kv.seed('v1:metar:KJFK', {
-      schemaVersion: 5,
-      resource: 'metar',
-      key: 'v1:metar:KJFK',
-      data: {
-        icao: 'KJFK', metarRaw: 'METAR KJFK 061130Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
-        wind: { raw: '11010KT', directionType: 'fixed', directionDegTrue: 110, directionVariation: null, speedKt: 10, gustKt: null },
-        source: 'aviationweather', fetchedAt: '2026-03-06T11:00:00.000Z', observedAt: '2026-03-06T11:30:00.000Z'
-      },
-      cacheMeta: { fetchedAt: '2026-03-06T11:00:00.000Z', expiresAt: '2026-03-06T11:30:00.000Z', policyVersion: 'metar-v2', source: 'upstream' }
-    });
-    const originalList = kv.list.bind(kv);
-    const listSpy = vi.spyOn(kv, 'list').mockImplementation(async (options) => {
-      if (options?.prefix === 'v2:hot:metar:' && options.cursor === 'stale') {
-        throw new Error('invalid cursor');
-      }
-      return originalList(options);
-    });
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
-
-    expect(listSpy.mock.calls.filter(([options]) => options?.prefix === 'v2:hot:metar:').map(([options]) => options?.cursor)).toEqual([
-      undefined
-    ]);
-    expect(kv.has('v2:hot:metar:KJFK')).toBe(true);
-    expect(kv.has('v1:metar:KJFK')).toBe(true);
-    expect(warning).not.toHaveBeenCalled();
-    warning.mockRestore();
-    vi.useRealTimers();
-  });
-
-  it('preserves a valid saved cursor when KV list fails transiently', async () => {
-    const kv = new MemoryKv();
-    kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: '0' });
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KJFK',
-      cacheKey: 'v1:metar:KJFK',
-      lastAccessedAt: '2026-03-06T11:59:00.000Z',
-      lastRefreshedAt: '2026-03-06T11:59:00.000Z'
-    });
-    const originalList = kv.list.bind(kv);
-    const listSpy = vi.spyOn(kv, 'list').mockImplementation(async (options) => {
-      if (options?.prefix === 'v2:hot:metar:' && options.cursor === '0') {
-        throw new Error('network timeout');
-      }
-      return originalList(options);
-    });
-
-    await expect(runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'))).resolves.toBeUndefined();
-
-    expect(listSpy.mock.calls.filter(([options]) => options?.prefix === 'v2:hot:metar:').map(([options]) => options?.cursor)).toEqual([undefined]);
-    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toBeNull();
-  });
-
-  it('keeps the prior cursor when metadata loading fails before page processing', async () => {
-    const kv = new MemoryKv();
-    kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: '0' });
-    for (let index = 0; index < 21; index++) {
-      const normalizedKey = `K${String(index).padStart(3, '0')}`;
-      seedHotQueueEntry(kv, {
-        resource: 'metar',
-        normalizedKey,
-        cacheKey: `v1:metar:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:59:00.000Z',
-        lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-      });
-    }
-    const fetchStub = vi.fn();
-    vi.stubGlobal('fetch', fetchStub);
-    const originalGet = kv.get.bind(kv);
-    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
-      if (key === 'v2:hot:metar:K000') {
-        throw new Error('temporary KV read failure');
-      }
-      return originalGet(key, type);
-    });
-
-    await expect(
-      runScheduledCacheRefresh(
-        { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
-        new Date('2026-03-06T12:00:00.000Z')
-      )
-    ).rejects.toThrow('temporary KV read failure');
-
-    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '0' });
-    expect(fetchStub).not.toHaveBeenCalled();
-  });
-
-  it('keeps the prior cursor when eviction fails', async () => {
-    const kv = new MemoryKv();
-    kv.seed('v2:control:hot-refresh-cursor:metar', { schemaVersion: 1, cursor: '0' });
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KDEN',
-      cacheKey: 'v1:metar:KDEN',
-      lastAccessedAt: '2026-02-27T12:00:00.000Z',
-      lastRefreshedAt: '2026-03-01T12:00:00.000Z'
-    });
-    kv.seed('v1:metar:KDEN', { cached: true });
-    const originalDelete = kv.delete.bind(kv);
-    vi.spyOn(kv, 'delete').mockImplementation(async (key) => {
-      if (key === 'v2:hot:metar:KDEN') {
-        throw new Error('temporary KV delete failure');
-      }
-      return originalDelete(key);
-    });
-
-    await expect(runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'))).rejects.toThrow(
-      'temporary KV delete failure'
-    );
-
-    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toEqual({ schemaVersion: 1, cursor: '0' });
-    expect(kv.has('v1:metar:KDEN')).toBe(true);
-  });
-
-  it('repeats a page from its prior cursor when checkpoint commit fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-    const kv = new MemoryKv();
-    for (let index = 0; index < 21; index++) {
-      const normalizedKey = `K${String(index).padStart(3, '0')}`;
-      seedHotQueueEntry(kv, {
-        resource: 'metar',
-        normalizedKey,
-        cacheKey: `v1:metar:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:59:00.000Z',
-        lastRefreshedAt: '2026-03-06T11:59:00.000Z'
-      });
-    }
-    const originalPut = kv.put.bind(kv);
-    const putSpy = vi.spyOn(kv, 'put').mockImplementation(async (key, value, options) => {
-      if (key === 'v2:control:hot-refresh-cursor:metar') {
-        throw new Error('temporary checkpoint write failure');
-      }
-      return originalPut(key, value, options);
-    });
-
-    await expect(
-      runScheduledCacheRefresh(
-        { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
-        new Date('2026-03-06T12:00:00.000Z')
-      )
-    ).resolves.toBeUndefined();
-
-    putSpy.mockRestore();
-    const listSpy = vi.spyOn(kv, 'list');
-    await runScheduledCacheRefresh(
-      { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
-      new Date('2026-03-06T12:00:00.000Z')
-    );
-    expect(listSpy.mock.calls.find(([options]) => options?.prefix === 'v2:hot:metar:')?.[0]?.cursor).toBe('20');
-  });
-
-  it('keeps scans bounded per resource and never exceeds the global scan cap', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-    const kv = new MemoryKv();
-    const listSpy = vi.spyOn(kv, 'list');
-    for (let index = 0; index < 20; index++) {
-      const normalizedKey = `K${String(index).padStart(3, '0')}`;
-      seedHotQueueEntry(kv, {
-        resource: 'metar',
-        normalizedKey,
-        cacheKey: `v1:metar:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:59:00.000Z',
-        lastRefreshedAt: '2026-03-06T11:59:00.000Z'
-      });
-      seedHotQueueEntry(kv, {
-        resource: 'airport',
-        normalizedKey,
-        cacheKey: `v1:airport:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:59:00.000Z',
-        lastRefreshedAt: '2026-03-06T11:59:00.000Z'
-      });
-    }
-
-    await runScheduledCacheRefresh(
-      { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
-      new Date('2026-03-06T12:00:00.000Z')
-    );
-
-    expect(listSpy).toHaveBeenCalledTimes(2);
-    expect(listSpy.mock.calls.map(([options]) => options?.prefix).sort()).toEqual([
-      'v2:hot:airport:',
-      'v2:hot:metar:'
-    ]);
-    expect(listSpy.mock.calls.reduce((total, [options]) => total + (options?.limit ?? 0), 0)).toBe(20);
-  });
-
-  it('eventually refreshes a key beyond the initial bounded scan prefix', async () => {
-    const fetchStub = vi.fn().mockImplementation((input: RequestInfo | URL) => {
-      const requestUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-      const icao = new URL(requestUrl).searchParams.get('ids') ?? 'KAAA';
-      return Promise.resolve(Response.json([buildMetarReport(icao, { wdir: 220, wspd: 9 })]));
-    });
-    vi.stubGlobal('fetch', fetchStub);
-
-    const kv = new MemoryKv();
-    for (let index = 0; index < 21; index++) {
-      const normalizedKey = `K${String(index).padStart(3, '0')}`;
-      seedHotQueueEntry(kv, {
-        resource: 'metar',
-        normalizedKey,
-        cacheKey: `v1:metar:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:50:00.000Z',
-        lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-      });
-    }
-
-    const now = new Date('2026-03-06T12:00:00.000Z');
-    await runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now);
-    await runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now);
-
-    expect(kv.read('v2:hot:metar:K020')).not.toHaveProperty('lastRefreshedAt');
-  });
-
-  it('advances a resource cursor after a page read even when its selected refresh fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const kv = new MemoryKv();
-    for (let index = 0; index < 21; index++) {
-      const normalizedKey = `K${String(index).padStart(3, '0')}`;
-      seedHotQueueEntry(kv, {
-        resource: 'metar',
-        normalizedKey,
-        cacheKey: `v1:metar:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:50:00.000Z',
-        lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-      });
-    }
-
-    await runScheduledCacheRefresh(
-      { METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
-      new Date('2026-03-06T12:00:00.000Z')
-    );
-
-    expect(kv.read('v2:control:hot-refresh-cursor:metar')).toBeNull();
-    expect(kv.has('v2:hot:metar:K000')).toBe(true);
-    consoleErrorSpy.mockRestore();
-  });
-
-  it('routes scheduled events through the worker entrypoint', async () => {
-    const kv = new MemoryKv();
-    await workerEntrypoint.scheduled({}, { METAR_CACHE: kv });
+    await expect(handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), { METAR_CACHE: kv })).resolves.toMatchObject({ status: 200 });
+    setCacheTimestamps(kv, 'v1:metar:KMCI', new Date(Date.now() - 31 * 60 * 1000), new Date(Date.now() - 60 * 1000));
     expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
+    await runScheduledCacheRefresh({ METAR_CACHE: kv });
+    expect(fetchUpstream).toHaveBeenCalledTimes(2);
+    expect(listSpy).not.toHaveBeenCalled();
   });
 
-  it('scheduled refresh updates due metar entries', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMCI', { wdir: 150, wspd: 14 })])));
-
-    const kv = new MemoryKv();
-    const now = new Date('2026-03-06T12:00:00.000Z');
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KMCI',
-      cacheKey: 'v1:metar:KMCI',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-06T11:00:00.000Z'
+  it('refreshes bounded work fairly across METAR and airport demand', async () => {
+    const fetchUpstream = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      return Promise.resolve(url.includes('airportdb') || url.includes('/api/airport') ? Response.json(buildAirportReport('KJFK')) : Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 12 })]));
     });
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-
-    const queueEntry = kv.read('v2:hot:metar:KMCI');
-    expect(queueEntry).not.toBeNull();
-    expect(queueEntry).not.toHaveProperty('lastRefreshedAt');
-    expect(kv.has('v1:metar:KMCI')).toBe(true);
+    vi.stubGlobal('fetch', fetchUpstream);
+    const kv = new MemoryKv();
+    const env = { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token', CACHE_REFRESH_MAX_ITEMS_PER_RUN: '2' };
+    await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), env);
+    await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), env);
+    setCacheTimestamps(kv, 'v1:metar:KMCI', new Date(Date.now() - 31 * 60 * 1000), new Date(Date.now() - 60 * 1000));
+    setCacheTimestamps(kv, 'v1:airport:KJFK', new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), new Date(Date.now() - 60 * 1000));
+    await runScheduledCacheRefresh(env);
+    expect(fetchUpstream).toHaveBeenCalledTimes(4);
+    expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
+    expect(kv.has('v2:hot:airport:KJFK')).toBe(false);
   });
 
-  it('scheduled refresh updates due airport entries', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
-
+  it('does not refresh a valid negative airport payload', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue(Response.json(buildAirportReport('KJFK')));
+    vi.stubGlobal('fetch', fetchUpstream);
     const kv = new MemoryKv();
-    const now = new Date('2026-03-06T12:00:00.000Z');
-    seedHotQueueEntry(kv, {
-      resource: 'airport',
-      normalizedKey: 'KJFK',
-      cacheKey: 'v1:airport:KJFK',
-      lastAccessedAt: '2026-03-06T11:00:00.000Z',
-      lastRefreshedAt: '2026-03-05T10:00:00.000Z'
-    });
-
-    await runScheduledCacheRefresh(
-      {
-        METAR_CACHE: kv,
-        AIRPORTDB_API_TOKEN: 'token'
-      },
-      now
-    );
-
-    const queueEntry = kv.read('v2:hot:airport:KJFK');
-    expect(queueEntry).not.toBeNull();
-    expect(queueEntry).not.toHaveProperty('lastRefreshedAt');
+    const env = { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' };
+    await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), env);
+    kv.seed('v1:airport:KJFK', { schemaVersion: 9, resource: 'airport', key: 'v1:airport:KJFK', negative: { status: 404, code: 'ICAO_NOT_FOUND' }, cacheMeta: { fetchedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), policyVersion: 'airport-v6', source: 'upstream' } });
+    await runScheduledCacheRefresh(env);
+    expect(fetchUpstream).toHaveBeenCalledTimes(1);
     expect(kv.has('v1:airport:KJFK')).toBe(true);
   });
 
-  it('scheduled refresh evicts inactive queue entries and payload cache keys', async () => {
+  it('suppresses a demand after three upstream failures without deleting its payload', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 12 })]));
+    vi.stubGlobal('fetch', fetchUpstream);
     const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KDEN',
-      cacheKey: 'v1:metar:KDEN',
-      lastAccessedAt: '2026-02-27T12:00:00.000Z',
-      lastRefreshedAt: '2026-03-01T12:00:00.000Z'
-    });
-    kv.seed('v1:metar:KDEN', { cached: true });
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
-
-    expect(kv.has('v2:hot:metar:KDEN')).toBe(false);
-    expect(kv.has('v1:metar:KDEN')).toBe(false);
-  });
-
-  it('scheduled refresh does not extend lastAccessedAt timestamps', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json([buildMetarReport('KMSN', { wdir: 200, wspd: 11 })])));
-
-    const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KMSN',
-      cacheKey: 'v1:metar:KMSN',
-      lastAccessedAt: '2026-03-05T12:00:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-    });
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
-
-    const queueEntry = kv.read<{ lastAccessedAt: string }>('v2:hot:metar:KMSN');
-    expect(queueEntry?.lastAccessedAt).toBe('2026-03-05T12:00:00.000Z');
-  });
-
-  it('uses the effective floor without manufacturing work for an unavailable resource', async () => {
-    const fetchStub = vi.fn().mockImplementation((input: RequestInfo | URL) => {
-      const requestUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-      const icao = new URL(requestUrl).searchParams.get('ids') ?? 'KAAA';
-      return Promise.resolve(Response.json([buildMetarReport(icao, { wdir: 220, wspd: 9 })]));
-    });
-    vi.stubGlobal('fetch', fetchStub);
-
-    const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KAAA',
-      cacheKey: 'v1:metar:KAAA',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-    });
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KBBB',
-      cacheKey: 'v1:metar:KBBB',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:30:00.000Z'
-    });
-
-    await runScheduledCacheRefresh(
-      {
-        METAR_CACHE: kv,
-        CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1'
-      },
-      new Date('2026-03-06T12:00:00.000Z')
-    );
-
-    expect(fetchStub).toHaveBeenCalledTimes(2);
-    expect(kv.read('v2:hot:metar:KAAA')).not.toHaveProperty('lastRefreshedAt');
-    expect(kv.read('v2:hot:metar:KBBB')).not.toHaveProperty('lastRefreshedAt');
-  });
-
-  it('uses resource-distinct first two refreshes when the configured cap is below the floor', async () => {
-    const fetchStub = vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 }));
-    vi.stubGlobal('fetch', fetchStub);
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KAAA',
-      cacheKey: 'v1:metar:KAAA',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-    });
-    seedHotQueueEntry(kv, {
-      resource: 'airport',
-      normalizedKey: 'KJFK',
-      cacheKey: 'v1:airport:KJFK',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-05T10:00:00.000Z'
-    });
-
-    await runScheduledCacheRefresh(
-      { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token', CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' },
-      new Date('2026-03-06T12:00:00.000Z')
-    );
-
-    expect(fetchStub).toHaveBeenCalledTimes(2);
-    expect(kv.read('v2:hot:metar:KAAA')).not.toHaveProperty('consecutiveRefreshFailures');
-    expect(kv.read('v2:hot:airport:KJFK')).not.toHaveProperty('consecutiveRefreshFailures');
-    consoleErrorSpy.mockRestore();
-  });
-
-  it('scheduled refresh keeps entries queued when refresh fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('Service Unavailable', { status: 503 })));
-
-    const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KPHL',
-      cacheKey: 'v1:metar:KPHL',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-    });
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
-
-    const queueEntry = kv.read('v2:hot:metar:KPHL');
-    expect(queueEntry).not.toBeNull();
-    expect(queueEntry).not.toHaveProperty('lastRefreshedAt');
-  });
-
-  it('counts stale-on-error scheduler results as failures and drops hot metadata on the third', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-03-06T12:00:00.000Z'));
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('provider unavailable')));
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar', normalizedKey: 'KMCI', cacheKey: 'v1:metar:KMCI',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z', lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-    });
-    kv.seed('v1:metar:KMCI', {
-      schemaVersion: 5, resource: 'metar', key: 'v1:metar:KMCI',
-      data: {
-        icao: 'KMCI', metarRaw: 'METAR KMCI 061130Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
-        wind: { raw: '11010KT', directionType: 'fixed', directionDegTrue: 110, directionVariation: null, speedKt: 10, gustKt: null },
-        source: 'aviationweather', fetchedAt: '2026-03-06T11:00:00.000Z', observedAt: '2026-03-06T11:30:00.000Z'
-      },
-      cacheMeta: { fetchedAt: '2026-03-06T11:00:00.000Z', expiresAt: '2026-03-06T11:30:00.000Z', policyVersion: 'metar-v2', source: 'upstream' }
-    });
-    const now = new Date('2026-03-06T12:00:00.000Z');
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-    expect(kv.read('v2:hot:metar:KMCI')).not.toHaveProperty('consecutiveRefreshFailures');
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-
-    expect(kv.has('v2:hot:metar:KMCI')).toBe(false);
+    const env = { METAR_CACHE: kv };
+    await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), env);
+    setCacheTimestamps(kv, 'v1:metar:KMCI', new Date(Date.now() - 31 * 60 * 1000), new Date(Date.now() - 60 * 1000));
+    fetchUpstream.mockRejectedValue(new Error('provider unavailable'));
+    await runScheduledCacheRefresh(env);
+    await runScheduledCacheRefresh(env);
+    await runScheduledCacheRefresh(env);
+    await runScheduledCacheRefresh(env);
+    expect(fetchUpstream).toHaveBeenCalledTimes(4);
     expect(kv.has('v1:metar:KMCI')).toBe(true);
-    consoleErrorSpy.mockRestore();
   });
 
-  it('drops only hot metadata after the third consecutive scheduled refresh failure', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-03-06T12:00:00.000Z'));
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('aborts safely when cache infrastructure fails during a scheduled refresh', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 12 })]));
+    vi.stubGlobal('fetch', fetchUpstream);
     const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KBOS',
-      cacheKey: 'v1:metar:KBOS',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:00:00.000Z'
+    const env = { METAR_CACHE: kv };
+    await handleMetarRequest(new Request('https://metar.internal/api/metar?icao=KMCI'), env);
+    setCacheTimestamps(kv, 'v1:metar:KMCI', new Date(Date.now() - 31 * 60 * 1000), new Date(Date.now() - 60 * 1000));
+    const originalGet = kv.get.bind(kv);
+    const getSpy = vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
+      if (key === 'v1:metar:KMCI') throw new Error('temporary KV read failure');
+      return originalGet(key, type);
     });
-    kv.seed('v1:metar:KBOS', {
-      schemaVersion: 5,
-      resource: 'metar',
-      key: 'v1:metar:KBOS',
-      data: {
-        icao: 'KBOS', metarRaw: 'METAR KBOS 061130Z 11010KT 7SM OVC008 04/02 A3014 RMK AO2',
-        wind: { raw: '11010KT', directionType: 'fixed', directionDegTrue: 110, directionVariation: null, speedKt: 10, gustKt: null },
-        source: 'aviationweather', fetchedAt: '2026-03-06T11:00:00.000Z', observedAt: '2026-03-06T11:30:00.000Z'
-      },
-      cacheMeta: { fetchedAt: '2026-03-06T11:00:00.000Z', expiresAt: '2026-03-06T11:30:00.000Z', policyVersion: 'metar-v2', source: 'upstream' }
-    });
-    const now = new Date('2026-03-06T12:00:00.000Z');
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-    expect(kv.read('v2:hot:metar:KBOS')).not.toHaveProperty('consecutiveRefreshFailures');
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-    expect(kv.read('v2:hot:metar:KBOS')).not.toHaveProperty('consecutiveRefreshFailures');
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, now);
-
-    expect(kv.has('v2:hot:metar:KBOS')).toBe(false);
-    expect(kv.read('v1:metar:KBOS')).not.toBeNull();
-    consoleErrorSpy.mockRestore();
-    vi.useRealTimers();
+    await expect(runScheduledCacheRefresh(env)).rejects.toThrow('temporary KV read failure');
+    getSpy.mockRestore();
+    expect(kv.has('v1:metar:KMCI')).toBe(true);
   });
+
 
   it('routes airport and metar requests through the worker entrypoint', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 10 })])));
@@ -2075,7 +1572,7 @@ describe('airport worker', () => {
     expect(waitUntilCalls).toHaveLength(1);
   });
 
-  it('writes hot queue metadata with the inactivity TTL as expirationTtl on airport success', async () => {
+  it('does not write legacy hot metadata on airport success', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(Response.json(buildAirportReport('KJFK'))));
 
     const kv = new MemoryKv();
@@ -2086,141 +1583,7 @@ describe('airport worker', () => {
       { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' }
     );
 
-    const hotQueuePut = putSpy.mock.calls.find(([key]) => key.startsWith('v2:hot:'));
-    expect(hotQueuePut).toBeDefined();
-    expect(hotQueuePut?.[2]).toEqual({ expirationTtl: 432000 });
+    expect(putSpy.mock.calls.some(([key]) => key.startsWith('v2:hot:'))).toBe(false);
   });
 
-  it('scheduled refresh does not evict entry that was recently accessed concurrently', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-    const kv = new MemoryKv();
-    // Entry appears inactive in the initial snapshot (lastAccessedAt > inactivity TTL ago)…
-    kv.seed('v2:hot:metar:KORD', {
-      schemaVersion: 2,
-      resource: 'metar',
-      normalizedKey: 'KORD',
-      cacheKey: 'v1:metar:KORD',
-      lastAccessedAt: '2026-02-27T12:00:00.000Z',
-      lastRefreshedAt: '2026-03-06T11:55:00.000Z' // recently refreshed, not due for another refresh
-    });
-    kv.seed('v1:metar:KORD', { cached: true });
-
-    // …but the re-read before eviction sees a fresh lastAccessedAt from a concurrent request.
-    const originalGet = kv.get.bind(kv);
-    let hotKeyGetCount = 0;
-    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
-      if (key === 'v2:hot:metar:KORD') {
-        hotKeyGetCount++;
-        if (hotKeyGetCount > 1) {
-          return {
-            schemaVersion: 2,
-            resource: 'metar',
-            normalizedKey: 'KORD',
-            cacheKey: 'v1:metar:KORD',
-            lastAccessedAt: '2026-03-06T11:58:00.000Z',
-            lastRefreshedAt: '2026-03-06T11:55:00.000Z'
-          };
-        }
-      }
-      return originalGet(key, type);
-    });
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
-
-    expect(kv.has('v2:hot:metar:KORD')).toBe(true);
-    expect(kv.has('v1:metar:KORD')).toBe(true);
-  });
-
-  it('aborts the scheduler run without advancing its cursor when the cache path fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Service Unavailable', { status: 503 })));
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const kv = new MemoryKv();
-    for (let index = 0; index < 21; index += 1) {
-      const normalizedKey = `K${String(index).padStart(3, '0')}`;
-      seedHotQueueEntry(kv, {
-        resource: 'metar',
-        normalizedKey,
-        cacheKey: `v1:metar:${normalizedKey}`,
-        lastAccessedAt: '2026-03-06T11:50:00.000Z',
-        lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-      });
-    }
-    const now = new Date('2026-03-06T12:00:00.000Z');
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now);
-
-    const originalGet = kv.get.bind(kv);
-    const getSpy = vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
-      if (key === 'v1:metar:K020') {
-        throw new Error('temporary payload read failure');
-      }
-      return originalGet(key, type);
-    });
-
-    await expect(
-      runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now)
-    ).rejects.toThrow('temporary payload read failure');
-
-    getSpy.mockRestore();
-    const listSpy = vi.spyOn(kv, 'list');
-    await runScheduledCacheRefresh({ METAR_CACHE: kv, CACHE_REFRESH_MAX_ITEMS_PER_RUN: '1' }, now);
-    expect(listSpy.mock.calls.find(([options]) => options?.prefix === 'v2:hot:metar:')?.[0]?.cursor).toBe('20');
-    consoleErrorSpy.mockRestore();
-  });
-
-  it('scheduled refresh skips eviction when entry was already deleted before the re-read', async () => {
-    const kv = new MemoryKv();
-    kv.seed('v2:hot:metar:KORD', {
-      schemaVersion: 2,
-      resource: 'metar',
-      normalizedKey: 'KORD',
-      cacheKey: 'v1:metar:KORD',
-      lastAccessedAt: '2026-02-27T12:00:00.000Z',
-      lastRefreshedAt: '2026-03-01T12:00:00.000Z'
-    });
-    kv.seed('v1:metar:KORD', { cached: true });
-
-    // Simulate concurrent deletion: re-read returns null.
-    const originalGet = kv.get.bind(kv);
-    let hotKeyGetCount = 0;
-    vi.spyOn(kv, 'get').mockImplementation(async (key, type) => {
-      if (key === 'v2:hot:metar:KORD') {
-        hotKeyGetCount++;
-        if (hotKeyGetCount > 1) {
-          return null;
-        }
-      }
-      return originalGet(key, type);
-    });
-
-    await expect(
-      runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'))
-    ).resolves.not.toThrow();
-    // The payload must not be deleted since the scheduler aborted after the null re-read.
-    expect(kv.has('v1:metar:KORD')).toBe(true);
-    expect(hotKeyGetCount).toBe(2);
-  });
-
-  it('scheduled refresh logs error via console.error when refresh fails', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('Service Unavailable', { status: 503 })));
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const kv = new MemoryKv();
-    seedHotQueueEntry(kv, {
-      resource: 'metar',
-      normalizedKey: 'KBOS',
-      cacheKey: 'v1:metar:KBOS',
-      lastAccessedAt: '2026-03-06T11:50:00.000Z',
-      lastRefreshedAt: '2026-03-06T10:00:00.000Z'
-    });
-
-    await runScheduledCacheRefresh({ METAR_CACHE: kv }, new Date('2026-03-06T12:00:00.000Z'));
-
-    expect(consoleErrorSpy).toHaveBeenCalled();
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Scheduled cache refresh upstream attempt failed.',
-      expect.objectContaining({ resource: 'metar' })
-    );
-    consoleErrorSpy.mockRestore();
-  });
 });

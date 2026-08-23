@@ -1,4 +1,5 @@
 import type { CacheEngineEnv, DurableObjectNamespaceLike, DurableObjectStub, KvNamespaceLike } from './types';
+import { OwnedSchedulerCoordinator } from './schedulerOwner';
 
 interface AcquireLockBody {
   key: string;
@@ -453,11 +454,14 @@ export class CacheSingleFlightCoordinator {
   // KV and opens the input gate while awaited. Serialize the scheduler protocol
   // explicitly so a later request cannot overwrite a transition in progress.
   private schedulerRequestTail: Promise<void> = Promise.resolve();
+  private readonly ownedScheduler: OwnedSchedulerCoordinator;
 
   constructor(
     private readonly state: DurableObjectStateLike,
     private readonly env?: Pick<CacheEngineEnv, 'METAR_CACHE'>
-  ) {}
+  ) {
+    this.ownedScheduler = new OwnedSchedulerCoordinator(state);
+  }
 
   private async runSerializedSchedulerRequest(operation: () => Promise<Response>): Promise<Response> {
     const previous = this.schedulerRequestTail;
@@ -489,6 +493,10 @@ export class CacheSingleFlightCoordinator {
       return handleRelease(request, this.state.storage);
     }
 
+    if (url.pathname.startsWith('/scheduler/v2/')) {
+      return this.ownedScheduler.fetch(request, url.pathname);
+    }
+
     if (url.pathname.startsWith('/scheduler/')) {
       return this.runSerializedSchedulerRequest(() =>
         handleSchedulerRequest(request, this.state.storage, url.pathname, this.env?.METAR_CACHE)
@@ -496,6 +504,10 @@ export class CacheSingleFlightCoordinator {
     }
 
     return Response.json({ error: 'Not found.' }, { status: 404 });
+  }
+
+  async alarm(): Promise<void> {
+    await this.ownedScheduler.alarm();
   }
 }
 
