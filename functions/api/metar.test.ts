@@ -1,5 +1,33 @@
 import { describe, expect, it, vi } from 'vitest';
 import { onRequestGet } from './metar';
+import { handleMetarRequest } from '../../workers/metar-proxy/src/index';
+import { ApiRateLimiter } from '../../workers/metar-proxy/src/security/rateLimiter';
+import type { CacheEngineEnv, DurableObjectNamespaceLike } from '../../workers/metar-proxy/src/cache/types';
+
+class MemoryStorage {
+  private readonly values = new Map<string, unknown>();
+
+  async get<T>(key: string): Promise<T | undefined> {
+    return this.values.get(key) as T | undefined;
+  }
+
+  async put(key: string, value: unknown): Promise<void> {
+    this.values.set(key, value);
+  }
+}
+
+function createRateLimiterNamespace(): DurableObjectNamespaceLike {
+  const limiter = new ApiRateLimiter({ storage: new MemoryStorage() });
+  return {
+    idFromName: (name: string) => name,
+    get: () => ({
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input.toString(), init);
+        return limiter.fetch(request);
+      }
+    })
+  };
+}
 
 describe('pages metar proxy', () => {
   it('returns 500 when METAR_API binding is missing', async () => {
@@ -105,11 +133,18 @@ describe('pages metar proxy', () => {
     expect(response.headers.get('X-Runway-Cache-Status')).toBe('stale_on_error');
   });
 
-  it('returns INVALID_ICAO for malformed input before proxying', async () => {
-    const fetch = vi.fn();
+  it('forwards malformed input to the trusted Worker so invalid attempts are rate limited', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json(
+        { error: 'Invalid ICAO code. Expected 4 alphanumeric characters.', code: 'INVALID_ICAO' },
+        { status: 400 }
+      )
+    );
 
     const response = await onRequestGet({
-      request: new Request('https://example.com/api/metar?icao=ABC'),
+      request: new Request('https://example.com/api/metar?icao=ABC', {
+        headers: { 'CF-Connecting-IP': '203.0.113.12' }
+      }),
       env: {
         METAR_API: { fetch }
       },
@@ -121,9 +156,47 @@ describe('pages metar proxy', () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
-      code: 'INVALID_ICAO',
-      requestId: expect.any(String)
+      code: 'INVALID_ICAO'
     });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(response.headers.get('X-Request-Id')).toEqual(expect.any(String));
+    expect(fetch).toHaveBeenCalledOnce();
+    const proxiedRequest = fetch.mock.calls[0]?.[0] as Request;
+    expect(new URL(proxiedRequest.url).searchParams.get('icao')).toBe('ABC');
+    expect(proxiedRequest.headers.get('X-Client-IP')).toBe('203.0.113.12');
+  });
+
+  it('enforces the real Worker invalid-ICAO penalty through the Pages boundary', async () => {
+    const workerEnv: CacheEngineEnv = {
+      METAR_CACHE: {
+        get: async () => null,
+        put: async () => {}
+      },
+      API_RATE_LIMITER: createRateLimiterNamespace()
+    };
+    const serviceBinding = {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input.toString(), init);
+        return handleMetarRequest(request, workerEnv);
+      }
+    };
+    const responses: Response[] = [];
+
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      responses.push(await onRequestGet({
+        request: new Request('https://example.com/api/metar?icao=ABC', {
+          headers: { 'CF-Connecting-IP': '203.0.113.14' }
+        }),
+        env: { METAR_API: serviceBinding },
+        params: {},
+        data: {},
+        waitUntil: () => {},
+        next: async () => new Response('')
+      }));
+    }
+
+    expect(responses.slice(0, 8).every((response) => response.status === 400)).toBe(true);
+    expect(responses[8]?.status).toBe(429);
+    expect(responses[8]?.headers.get('Retry-After')).toEqual(expect.any(String));
+    await expect(responses[8]?.json()).resolves.toMatchObject({ code: 'RATE_LIMITED' });
   });
 });
