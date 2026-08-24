@@ -103,11 +103,18 @@ describe('pages airport proxy', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('returns INVALID_ICAO for malformed input before proxying', async () => {
-    const fetch = vi.fn();
+  it('forwards malformed input to the trusted Worker so invalid attempts are rate limited', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json(
+        { error: 'Invalid ICAO code. Expected 4 alphanumeric characters.', code: 'INVALID_ICAO' },
+        { status: 400 }
+      )
+    );
 
     const response = await onRequestGet({
-      request: new Request('https://example.com/api/airport?icao=A1'),
+      request: new Request('https://example.com/api/airport?icao=A1', {
+        headers: { 'CF-Connecting-IP': '203.0.113.13' }
+      }),
       env: {
         METAR_API: { fetch }
       },
@@ -119,10 +126,13 @@ describe('pages airport proxy', () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
-      code: 'INVALID_ICAO',
-      requestId: expect.any(String)
+      code: 'INVALID_ICAO'
     });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(response.headers.get('X-Request-Id')).toEqual(expect.any(String));
+    expect(fetch).toHaveBeenCalledOnce();
+    const proxiedRequest = fetch.mock.calls[0]?.[0] as Request;
+    expect(new URL(proxiedRequest.url).searchParams.get('icao')).toBe('A1');
+    expect(proxiedRequest.headers.get('X-Client-IP')).toBe('203.0.113.13');
   });
 
   it('rejects an unsupported airport lookup view before proxying', async () => {

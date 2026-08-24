@@ -1,5 +1,4 @@
 import { buildApiError, buildProxyResponse, createRequestId, extractClientIp } from './_shared/http';
-import { validateIcaoParam } from './_shared/validation';
 
 interface MetarProxyEnv {
   METAR_API?: Fetcher;
@@ -14,13 +13,11 @@ export const onRequestGet: PagesFunction<MetarProxyEnv> = async ({ request, env 
     }
 
     const requestUrl = new URL(request.url);
-    const icaoValidation = validateIcaoParam(requestUrl.searchParams.get('icao'));
-    if (!icaoValidation.ok) {
-      return buildApiError(icaoValidation.error, 400, icaoValidation.code, requestId);
-    }
-
     const workerUrl = new URL('https://metar.internal/api/metar');
-    workerUrl.searchParams.set('icao', icaoValidation.icao);
+    const icao = requestUrl.searchParams.get('icao');
+    if (icao !== null) {
+      workerUrl.searchParams.set('icao', icao);
+    }
 
     const headers = new Headers({
       Accept: 'application/json',

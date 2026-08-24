@@ -1,5 +1,4 @@
 import { buildApiError, buildProxyResponse, createRequestId, extractClientIp } from './_shared/http';
-import { validateIcaoParam } from './_shared/validation';
 
 interface AirportProxyEnv {
   METAR_API?: Fetcher;
@@ -14,16 +13,15 @@ export const onRequestGet: PagesFunction<AirportProxyEnv> = async ({ request, en
     }
 
     const requestUrl = new URL(request.url);
-    const icaoValidation = validateIcaoParam(requestUrl.searchParams.get('icao'));
-    if (!icaoValidation.ok) {
-      return buildApiError(icaoValidation.error, 400, icaoValidation.code, requestId);
-    }
     if (requestUrl.searchParams.has('view')) {
       return buildApiError('Airport lookup does not support a view parameter.', 400, 'INVALID_REQUEST', requestId);
     }
 
     const workerUrl = new URL('https://metar.internal/api/airport');
-    workerUrl.searchParams.set('icao', icaoValidation.icao);
+    const icao = requestUrl.searchParams.get('icao');
+    if (icao !== null) {
+      workerUrl.searchParams.set('icao', icao);
+    }
 
     const headers = new Headers({
       Accept: 'application/json',
