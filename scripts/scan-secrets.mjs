@@ -1,17 +1,10 @@
 #!/usr/bin/env node
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const configPath = 'secret-scan.config.json';
-const config = JSON.parse(readFileSync(configPath, 'utf8'));
-
-const ignoreMatchers = (config.ignorePathPatterns ?? []).map((pattern) => new RegExp(pattern));
-const rules = (config.rules ?? []).map((rule) => ({
-  name: rule.name,
-  regex: new RegExp(rule.pattern, 'g')
-}));
-
-function shouldIgnore(path) {
+function shouldIgnore(path, ignoreMatchers) {
   return ignoreMatchers.some((matcher) => matcher.test(path));
 }
 
@@ -24,48 +17,74 @@ function getFiles() {
   return output.split('\n');
 }
 
-const findings = [];
+export function findSecretFindings({ files, readFile, config }) {
+  const ignoreMatchers = (config.ignorePathPatterns ?? []).map((pattern) => new RegExp(pattern));
+  const rules = (config.rules ?? []).map((rule) => ({
+    name: rule.name,
+    regex: new RegExp(rule.pattern, 'g')
+  }));
+  const findings = [];
 
-for (const filePath of getFiles()) {
-  if (shouldIgnore(filePath)) {
-    continue;
-  }
-
-  let content;
-  try {
-    content = readFileSync(filePath, 'utf8');
-  } catch {
-    continue;
-  }
-
-  const lines = content.split(/\r?\n/g);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.includes('secret-scan:allow')) {
+  for (const filePath of files) {
+    if (shouldIgnore(filePath, ignoreMatchers)) {
       continue;
     }
 
-    for (const rule of rules) {
-      rule.regex.lastIndex = 0;
-      const match = rule.regex.exec(line);
-      if (match) {
-        findings.push({
-          filePath,
-          line: index + 1,
-          rule: rule.name,
-          snippet: line.trim().slice(0, 140)
-        });
+    let content;
+    try {
+      content = readFile(filePath);
+    } catch {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/g);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line.includes('secret-scan:allow')) {
+        continue;
+      }
+
+      for (const rule of rules) {
+        rule.regex.lastIndex = 0;
+        if (rule.regex.exec(line)) {
+          findings.push({
+            filePath,
+            line: index + 1,
+            rule: rule.name
+          });
+        }
       }
     }
   }
+
+  return findings;
 }
 
-if (findings.length > 0) {
-  console.error(`Secret scan failed with ${findings.length} finding(s):`);
-  for (const finding of findings) {
-    console.error(`- ${finding.filePath}:${finding.line} [${finding.rule}] ${finding.snippet}`);
+export function formatSecretFinding(finding) {
+  return `- ${finding.filePath}:${finding.line} [${finding.rule}]`;
+}
+
+export function runSecretScan({
+  config = JSON.parse(readFileSync('secret-scan.config.json', 'utf8')),
+  files = getFiles(),
+  readFile = (filePath) => readFileSync(filePath, 'utf8'),
+  writeError = console.error,
+  writeInfo = console.log
+} = {}) {
+  const findings = findSecretFindings({ files, readFile, config });
+  if (findings.length === 0) {
+    writeInfo('Secret scan passed with no findings.');
+    return 0;
   }
-  process.exit(1);
+
+  writeError(`Secret scan failed with ${findings.length} finding(s):`);
+  for (const finding of findings) {
+    writeError(formatSecretFinding(finding));
+  }
+
+  return 1;
 }
 
-console.log('Secret scan passed with no findings.');
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  process.exitCode = runSecretScan();
+}
