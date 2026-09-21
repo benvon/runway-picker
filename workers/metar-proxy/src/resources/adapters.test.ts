@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { airportResourceAdapter, type AirportCacheEnvelope } from './airport/adapter';
 import { airportLocationResourceAdapter } from './airport/locationAdapter';
-import { extractMetarStationIcao, extractObservedAt, metarResourceAdapter } from './metar/adapter';
+import {
+  extractMetarStationIcao,
+  extractObservedAt,
+  metarResourceAdapter,
+  resolveMetarExpiresAt,
+  type MetarResourceData
+} from './metar/adapter';
 
 describe('resource adapters', () => {
   afterEach(() => {
@@ -35,7 +41,7 @@ describe('resource adapters', () => {
     expect(envelope.schemaVersion).toBe(5);
     expect(envelope.resource).toBe('metar');
     expect(envelope.key).toBe('v1:metar:KJFK');
-    expect(envelope.cacheMeta.policyVersion).toBe('metar-v2');
+    expect(envelope.cacheMeta.policyVersion).toBe('metar-v3');
     expect(metarResourceAdapter.deserialize(envelope)?.icao).toBe('KJFK');
     expect(metarResourceAdapter.deserialize(envelope)?.wind.directionType).toBe('fixed');
     expect(
@@ -46,6 +52,48 @@ describe('resource adapters', () => {
         fetchedAt: '2026-03-03T12:00:00.000Z'
       })
     ).toBeNull();
+  });
+
+  it('expires METAR cache entries when the observation ages past the recommendation limit', () => {
+    const fetchedAt = new Date('2026-09-21T19:30:00.000Z');
+    const policy = metarResourceAdapter.policy;
+    const base: Omit<MetarResourceData, 'metarRaw' | 'observedAt'> = {
+      icao: 'KRFD',
+      wind: {
+        raw: '07008KT',
+        directionType: 'fixed',
+        directionDegTrue: 70,
+        directionVariation: null,
+        speedKt: 8,
+        gustKt: null
+      },
+      source: 'aviationweather',
+      fetchedAt: fetchedAt.toISOString()
+    };
+
+    expect(
+      resolveMetarExpiresAt(
+        {
+          ...base,
+          metarRaw: 'METAR KRFD 211900Z 07008KT 10SM CLR',
+          observedAt: '2026-09-21T19:00:00.000Z'
+        },
+        fetchedAt,
+        policy
+      ).toISOString()
+    ).toBe('2026-09-21T20:00:00.000Z');
+
+    expect(
+      resolveMetarExpiresAt(
+        {
+          ...base,
+          metarRaw: 'METAR KRFD 211754Z 07008KT 10SM CLR',
+          observedAt: '2026-09-21T17:54:00.000Z'
+        },
+        fetchedAt,
+        policy
+      ).toISOString()
+    ).toBe('2026-09-21T19:32:00.000Z');
   });
 
   it('derives a UTC observation time from the METAR group and rejects malformed groups', () => {

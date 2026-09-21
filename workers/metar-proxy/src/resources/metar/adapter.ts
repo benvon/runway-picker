@@ -1,4 +1,4 @@
-import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
+import type { CacheEnvelope, CachePolicy, CacheResourceAdapter } from '../../cache/types';
 import { buildCacheKey } from '../../cache/keys';
 
 const AVIATION_WEATHER_METAR_URL = 'https://aviationweather.gov/api/data/metar';
@@ -6,6 +6,15 @@ const AVIATION_WEATHER_STATION_INFO_URL = 'https://aviationweather.gov/api/data/
 const USER_AGENT = 'benvon-runway-picker';
 
 export const METAR_SCHEMA_VERSION = 5;
+
+/** Matches frontend recommendation gating in `src/application/lookup/useCase.ts`. */
+export const METAR_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60;
+/** When an observation is already too old for recommendations, retry upstream soon. */
+export const METAR_STALE_OBSERVATION_RETRY_SECONDS = 120;
+
+function addSeconds(date: Date, seconds: number): Date {
+  return new Date(date.getTime() + seconds * 1000);
+}
 
 export interface MetarResourceInput {
   icao: string;
@@ -249,10 +258,29 @@ function toDateOrNow(value: string): Date {
   return parsed;
 }
 
+export function resolveMetarExpiresAt(
+  data: MetarResourceData,
+  fetchedAt: Date,
+  policy: Pick<CachePolicy, 'ttlSeconds'>
+): Date {
+  const defaultExpiresAt = addSeconds(fetchedAt, policy.ttlSeconds);
+  const observedAtMs = data.observedAt ? Date.parse(data.observedAt) : Number.NaN;
+  if (Number.isNaN(observedAtMs)) {
+    return defaultExpiresAt;
+  }
+
+  const recommendationDeadline = addSeconds(new Date(observedAtMs), METAR_RECOMMENDATION_MAX_AGE_SECONDS);
+  if (recommendationDeadline.getTime() <= fetchedAt.getTime()) {
+    return addSeconds(fetchedAt, METAR_STALE_OBSERVATION_RETRY_SECONDS);
+  }
+
+  return new Date(Math.min(recommendationDeadline.getTime(), defaultExpiresAt.getTime()));
+}
+
 function serializeMetar(data: MetarResourceData, key: string, resource: string): CacheEnvelope<MetarResourceData> {
   const fetchedAtDate = toDateOrNow(data.fetchedAt);
   const fetchedAt = fetchedAtDate.toISOString();
-  const expiresAt = new Date(fetchedAtDate.getTime() + metarResourceAdapter.policy.ttlSeconds * 1000).toISOString();
+  const expiresAt = resolveMetarExpiresAt(data, fetchedAtDate, metarResourceAdapter.policy).toISOString();
 
   return {
     schemaVersion: METAR_SCHEMA_VERSION,
@@ -681,13 +709,14 @@ export const metarResourceAdapter: CacheResourceAdapter<MetarResourceInput, unkn
   },
   serialize: serializeMetar,
   deserialize: deserializeMetar,
+  resolveExpiresAt: resolveMetarExpiresAt,
   policy: {
     ttlSeconds: 1800,
     maxPayloadAgeSeconds: 5400,
     staleWhileRevalidateSeconds: 180,
     staleOnErrorSeconds: 7200,
     negativeCacheTtlSeconds: 180,
-    policyVersion: 'metar-v2'
+    policyVersion: 'metar-v3'
   },
   negativeCache: {
     toEntry: (error) =>

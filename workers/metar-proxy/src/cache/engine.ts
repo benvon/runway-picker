@@ -437,6 +437,24 @@ async function readKvCacheRecords<TInput, TUpstream, TData>(
   return toCacheRecords(raw, adapter, cacheKey, input, clock());
 }
 
+/** Prefer adapter expiry when it falls within `[fetchedAt, fetchedAt + ttl]`. */
+function resolveBoundedExpiresAt(
+  resolvedExpiresAt: Date | undefined,
+  fetchedAt: Date,
+  ttlSeconds: number
+): Date {
+  const defaultExpiresAt = new Date(fetchedAt.getTime() + ttlSeconds * 1000);
+  if (
+    !resolvedExpiresAt ||
+    resolvedExpiresAt.getTime() < fetchedAt.getTime() ||
+    resolvedExpiresAt.getTime() > defaultExpiresAt.getTime()
+  ) {
+    return defaultExpiresAt;
+  }
+
+  return resolvedExpiresAt;
+}
+
 function toEnvelope<TInput, TUpstream, TData>(
   adapter: CacheResourceAdapter<TInput, TUpstream, TData>,
   data: TData,
@@ -447,7 +465,11 @@ function toEnvelope<TInput, TUpstream, TData>(
   const candidate = adapter.serialize(data, cacheKey, adapter.resource, upstream);
   const serializedData = candidate.data;
   const fetchedAt = now;
-  const expiresAt = new Date(fetchedAt.getTime() + adapter.policy.ttlSeconds * 1000);
+  const expiresAt = resolveBoundedExpiresAt(
+    adapter.resolveExpiresAt?.(serializedData, fetchedAt, adapter.policy),
+    fetchedAt,
+    adapter.policy.ttlSeconds
+  );
 
   return {
     ...((candidate as unknown) as Record<string, unknown>),

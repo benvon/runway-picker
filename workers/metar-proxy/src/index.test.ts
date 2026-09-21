@@ -468,7 +468,7 @@ describe('metar worker', () => {
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
         expiresAt: new Date(fetchedAt.getTime() + 30 * 60 * 1000).toISOString(),
-        policyVersion: 'metar-v2',
+        policyVersion: 'metar-v3',
         source: 'upstream'
       }
     });
@@ -520,7 +520,7 @@ describe('metar worker', () => {
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
         expiresAt: new Date(fetchedAt.getTime() + 30 * 60 * 1000).toISOString(),
-        policyVersion: 'metar-v2',
+        policyVersion: 'metar-v3',
         source: 'upstream'
       }
     });
@@ -564,7 +564,7 @@ describe('metar worker', () => {
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
         expiresAt: expiresAt.toISOString(),
-        policyVersion: 'metar-v2',
+        policyVersion: 'metar-v3',
         source: 'upstream'
       }
     });
@@ -610,7 +610,7 @@ describe('metar worker', () => {
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
         expiresAt: '2026-03-03T11:59:00.000Z',
-        policyVersion: 'metar-v2',
+        policyVersion: 'metar-v3',
         source: 'upstream'
       }
     });
@@ -654,7 +654,7 @@ describe('metar worker', () => {
       cacheMeta: {
         fetchedAt: fetchedAt.toISOString(),
         expiresAt: '2026-03-03T12:00:05.000Z',
-        policyVersion: 'metar-v2',
+        policyVersion: 'metar-v3',
         source: 'upstream'
       }
     });
