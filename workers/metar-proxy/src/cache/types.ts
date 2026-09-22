@@ -68,6 +68,11 @@ export interface CacheResourceAdapter<TInput, TUpstream, TData> {
   fetchUpstream: (input: TInput, ctx: CacheAdapterContext) => Promise<TUpstream>;
   validate: (upstream: TUpstream, input: TInput, ctx: CacheAdapterContext) => Promise<TData> | TData;
   serialize: (data: TData, key: string, resource: string, upstream?: TUpstream) => CacheEnvelope<TData>;
+  /**
+   * Optional per-record expiry. Must fall within
+   * `[fetchedAt, fetchedAt + policy.ttlSeconds]`.
+   */
+  resolveExpiresAt?: (data: TData, fetchedAt: Date, policy: CachePolicy) => Date;
   deserialize: (cached: unknown) => TData | null;
   policy: CachePolicy;
   negativeCache?: NegativeCachePolicy<TInput>;

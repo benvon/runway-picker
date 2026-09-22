@@ -144,6 +144,7 @@ function buildAdapter(overrides?: {
   fetchUpstream?: CacheResourceAdapter<DemoInput, string, DemoData>['fetchUpstream'];
   validate?: CacheResourceAdapter<DemoInput, string, DemoData>['validate'];
   serialize?: CacheResourceAdapter<DemoInput, string, DemoData>['serialize'];
+  resolveExpiresAt?: CacheResourceAdapter<DemoInput, string, DemoData>['resolveExpiresAt'];
   ttlSeconds?: number;
   maxPayloadAgeSeconds?: number;
   staleWhileRevalidateSeconds?: number;
@@ -181,6 +182,7 @@ function buildAdapter(overrides?: {
           source: 'upstream'
         }
       })),
+    resolveExpiresAt: overrides?.resolveExpiresAt,
     deserialize: (cached) => {
       if (!cached || typeof cached !== 'object') {
         return null;
@@ -247,6 +249,28 @@ describe('cache engine', () => {
       adapter: buildAdapter(), input: { key: 'alpha' }, env: { METAR_CACHE: kv }, now: new Date('2026-03-03T12:00:00.000Z')
     })).resolves.toEqual({ kind: 'missing' });
     expect(kv.has('v1:demo:alpha')).toBe(false);
+  });
+
+  it('honors an earlier adapter-resolved expiry when refreshing from upstream', async () => {
+    const adapter = buildAdapter({
+      ttlSeconds: 1800,
+      fetchUpstream: vi.fn().mockResolvedValue('fresh-value'),
+      resolveExpiresAt: (_data, fetchedAt) => new Date(fetchedAt.getTime() + 120_000)
+    });
+    const kv = new MemoryKv();
+
+    const result = await getOrRefreshCached({
+      adapter,
+      input: { key: 'alpha' },
+      request: new Request('https://example.com'),
+      env: { METAR_CACHE: kv },
+      edgeCache: new MemoryEdgeCache(),
+      now: new Date('2026-09-21T19:30:00.000Z')
+    });
+
+    expect(result.cache.status).toBe('upstream_refresh');
+    expect(result.cache.expiresAt).toBe('2026-09-21T19:32:00.000Z');
+    expect(result.cache.freshnessRemainingSeconds).toBe(120);
   });
 
   it('returns edge cache hit when edge entry is fresh', async () => {
@@ -663,6 +687,38 @@ describe('cache engine', () => {
       state: 'negative',
       origin: 'already_current',
       upstreamAttempted: false
+    });
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+  });
+
+  it('refreshes during maintenance when a positive record is within the refresh interval but past expiresAt', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue('refreshed-value');
+    const adapter = buildAdapter({
+      fetchUpstream,
+      ttlSeconds: 1800,
+      maxPayloadAgeSeconds: 5400
+    });
+    const kv = new MemoryKv();
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'stale-observation', '2026-09-21T19:30:00.000Z', 120)
+    );
+    const env: CacheEngineEnv = { METAR_CACHE: kv, CACHE_COORDINATOR: createCoordinatorNamespace() };
+
+    await expect(
+      maintainCachedEntry({
+        adapter,
+        input: { key: 'alpha' },
+        request: new Request('https://example.com'),
+        env,
+        refreshIntervalSeconds: 1800,
+        now: new Date('2026-09-21T19:33:00.000Z')
+      })
+    ).resolves.toEqual({
+      kind: 'satisfied',
+      state: 'positive',
+      origin: 'refreshed',
+      upstreamAttempted: true
     });
     expect(fetchUpstream).toHaveBeenCalledOnce();
   });
