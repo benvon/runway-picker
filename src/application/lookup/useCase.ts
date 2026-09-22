@@ -203,6 +203,14 @@ export async function runPrimaryLookup(
     throw error;
   }
 
+  if (primaryIcao.length === 3) {
+    return {
+      type: 'prompt-alternate',
+      state: createAlternateState(primaryIcao, airport),
+      message: `No METAR is currently available for ICAO ${primaryIcao}. Enter an alternate ICAO code for METAR data.`
+    };
+  }
+
   try {
     const metar = await gateway.fetchMetarByIcao(primaryIcao);
     return {
