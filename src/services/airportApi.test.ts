@@ -6,11 +6,48 @@ describe('airportApi service', () => {
     vi.unstubAllGlobals();
   });
 
-  it('rejects invalid ICAO values', async () => {
-    await expect(fetchAirportByIcao('KSF')).rejects.toMatchObject({
+  it('rejects airport codes outside 3–4 alphanumeric characters', async () => {
+    await expect(fetchAirportByIcao('AB')).rejects.toMatchObject({
       status: 400,
       code: 'INVALID_ICAO'
     });
+    await expect(fetchAirportByIcao('ABCDE')).rejects.toMatchObject({
+      status: 400,
+      code: 'INVALID_ICAO'
+    });
+  });
+
+  it('accepts 3-character airport codes and calls the airport API', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({
+        requestedIcao: '1C8',
+        icao: '1C8',
+        name: 'Casey Municipal',
+        municipality: 'Casey',
+        countryCode: 'US',
+        countryName: 'United States',
+        elevationFt: 645,
+        runwayEnds: [{ id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 4000 }],
+        frequencies: [],
+        source: 'airportdb',
+        fetchedAt: '2026-03-02T00:00:00.000Z',
+        cache: {
+          status: 'upstream_refresh',
+          source: 'upstream',
+          ageSeconds: 0,
+          fetchedAt: '2026-03-02T00:00:00.000Z',
+          servedAt: '2026-03-02T00:00:00.000Z',
+          ttlSeconds: 86400,
+          key: 'v1:airport:1C8',
+          resource: 'airport'
+        }
+      })
+    );
+    vi.stubGlobal('fetch', fetch);
+
+    const payload = await fetchAirportByIcao('1c8');
+    expect(payload.icao).toBe('1C8');
+    expect(fetch).toHaveBeenCalledWith('/api/airport?icao=1C8', expect.any(Object));
   });
 
   it('calls local API and returns structured runway and cache metadata', async () => {
@@ -191,6 +228,22 @@ describe('airportApi service', () => {
       message: 'Airport response is missing runway data.',
       status: 502
     });
+  });
+
+  it('accepts 3-character airport codes for coordinate lookup', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({
+        icao: 'C25',
+        coordinates: { latitudeDeg: 41.1234, longitudeDeg: -88.5678 }
+      })
+    );
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(fetchAirportCoordinatesByIcao('c25')).resolves.toEqual({
+      icao: 'C25',
+      coordinates: { latitudeDeg: 41.1234, longitudeDeg: -88.5678 }
+    });
+    expect(fetch).toHaveBeenCalledWith('/api/airport-location?icao=C25', expect.any(Object));
   });
 
   it('loads coordinates without requiring runway data', async () => {

@@ -250,8 +250,12 @@ function normalizeCoordinates(value: unknown): AirportCoordinates | null {
 
 export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
-  if (!/^[A-Z0-9]{4}$/.test(icao)) {
-    throw new AirportLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400, 'INVALID_ICAO');
+  if (!/^[A-Z0-9]{3,4}$/.test(icao)) {
+    throw new AirportLookupError(
+      'Invalid airport code. Expected 3–4 alphanumeric characters.',
+      400,
+      'INVALID_ICAO'
+    );
   }
 
   const response = await fetch(`/api/airport?icao=${encodeURIComponent(icao)}`, {
@@ -292,8 +296,12 @@ export async function fetchAirportByIcao(icaoInput: string): Promise<AirportLook
 
 export async function fetchAirportCoordinatesByIcao(icaoInput: string): Promise<AirportCoordinateLookupResponse> {
   const icao = normalizeIcaoInput(icaoInput);
-  if (!/^[A-Z0-9]{4}$/.test(icao)) {
-    throw new AirportLookupError('Enter a valid 4-character ICAO code, for example KJFK.', 400, 'INVALID_ICAO');
+  if (!/^[A-Z0-9]{3,4}$/.test(icao)) {
+    throw new AirportLookupError(
+      'Invalid airport code. Expected 3–4 alphanumeric characters.',
+      400,
+      'INVALID_ICAO'
+    );
   }
 
   const response = await fetch(`/api/airport-location?icao=${encodeURIComponent(icao)}`, {
