@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { airportResourceAdapter, type AirportCacheEnvelope } from './airport/adapter';
+import {
+  airportResourceAdapter,
+  hasCanonicalAirportIdentity,
+  type AirportCacheEnvelope
+} from './airport/adapter';
 import { airportLocationResourceAdapter } from './airport/locationAdapter';
 import {
   extractMetarStationIcao,
@@ -255,6 +259,18 @@ describe('resource adapters', () => {
         data: { ...envelope.data, metarRaw: 'METAR KORD 021953Z 11010KT 10SM CLR' }
       })
     ).toBeNull();
+  });
+
+  it('accepts matching 3–4 character airport identities and rejects mismatches', () => {
+    expect(hasCanonicalAirportIdentity('1C8', '1C8')).toBe(true);
+    expect(hasCanonicalAirportIdentity('KJFK', 'KJFK')).toBe(true);
+    expect(hasCanonicalAirportIdentity('1C8', 'C25')).toBe(false);
+    expect(hasCanonicalAirportIdentity('KJFK', 'KLGA')).toBe(false);
+    expect(hasCanonicalAirportIdentity('AB', 'AB')).toBe(false);
+    expect(hasCanonicalAirportIdentity('ABCDE', 'ABCDE')).toBe(false);
+    expect(hasCanonicalAirportIdentity('1C8!', '1C8!')).toBe(false);
+    expect(hasCanonicalAirportIdentity(null, '1C8')).toBe(false);
+    expect(hasCanonicalAirportIdentity('1C8', null)).toBe(false);
   });
 
   it('requires airportdb token for airport fetches', async () => {

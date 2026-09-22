@@ -118,7 +118,7 @@ export function hasCanonicalAirportIdentity(requestedIcao: unknown, icao: unknow
   return (
     typeof requestedIcao === 'string' &&
     typeof icao === 'string' &&
-    /^[A-Z0-9]{4}$/.test(requestedIcao) &&
+    /^[A-Z0-9]{3,4}$/.test(requestedIcao) &&
     requestedIcao === icao
   );
 }
