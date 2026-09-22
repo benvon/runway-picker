@@ -864,7 +864,11 @@ function maintenanceCurrentState<TData>(
   now: Date,
   refreshIntervalSeconds: number
 ): CacheMaintenanceOutcome | null {
-  if (records.data && isWithinPayloadAge(records.data, now, policy) && now.getTime() - records.data.fetchedAt.getTime() < refreshIntervalSeconds * 1000) {
+  if (
+    records.data &&
+    isFresh(records.data, now, policy) &&
+    now.getTime() - records.data.fetchedAt.getTime() < refreshIntervalSeconds * 1000
+  ) {
     return { kind: 'satisfied', state: 'positive', origin: 'already_current', upstreamAttempted: false };
   }
   return records.negative && records.negative.expiresAt.getTime() > now.getTime()

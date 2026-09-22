@@ -691,6 +691,38 @@ describe('cache engine', () => {
     expect(fetchUpstream).toHaveBeenCalledOnce();
   });
 
+  it('refreshes during maintenance when a positive record is within the refresh interval but past expiresAt', async () => {
+    const fetchUpstream = vi.fn().mockResolvedValue('refreshed-value');
+    const adapter = buildAdapter({
+      fetchUpstream,
+      ttlSeconds: 1800,
+      maxPayloadAgeSeconds: 5400
+    });
+    const kv = new MemoryKv();
+    kv.seed(
+      'v1:demo:alpha',
+      buildEnvelope('v1:demo:alpha', 'stale-observation', '2026-09-21T19:30:00.000Z', 120)
+    );
+    const env: CacheEngineEnv = { METAR_CACHE: kv, CACHE_COORDINATOR: createCoordinatorNamespace() };
+
+    await expect(
+      maintainCachedEntry({
+        adapter,
+        input: { key: 'alpha' },
+        request: new Request('https://example.com'),
+        env,
+        refreshIntervalSeconds: 1800,
+        now: new Date('2026-09-21T19:33:00.000Z')
+      })
+    ).resolves.toEqual({
+      kind: 'satisfied',
+      state: 'positive',
+      origin: 'refreshed',
+      upstreamAttempted: true
+    });
+    expect(fetchUpstream).toHaveBeenCalledOnce();
+  });
+
   it('reports per-key refresh contention as deferred rather than an infrastructure failure', async () => {
     const kv = new MemoryKv();
     const coordinator = createCoordinatorNamespace();
