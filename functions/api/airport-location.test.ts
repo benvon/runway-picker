@@ -22,6 +22,25 @@ describe('pages airport location proxy', () => {
     expect(new URL(proxiedRequest.url).searchParams.get('icao')).toBe('KLOC');
   });
 
+  it('accepts 3-character airport identifiers', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({ icao: '1C8', coordinates: { latitudeDeg: 41.5, longitudeDeg: -88.0 } })
+    );
+
+    const response = await onRequestGet({
+      request: new Request('https://example.com/api/airport-location?icao=1c8'),
+      env: { METAR_API: { fetch } },
+      params: {},
+      data: {},
+      waitUntil: () => {},
+      next: async () => new Response('')
+    });
+
+    expect(response.status).toBe(200);
+    const proxiedRequest = fetch.mock.calls[0]?.[0] as Request;
+    expect(new URL(proxiedRequest.url).searchParams.get('icao')).toBe('1C8');
+  });
+
   it('rejects malformed ICAO values before proxying', async () => {
     const fetch = vi.fn();
     const response = await onRequestGet({

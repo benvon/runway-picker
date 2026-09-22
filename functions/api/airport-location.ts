@@ -1,5 +1,5 @@
 import { buildApiError, buildProxyResponse, createRequestId, extractClientIp } from './_shared/http';
-import { validateIcaoParam } from './_shared/validation';
+import { validateAirportIdentParam } from './_shared/validation';
 
 interface AirportLocationProxyEnv {
   METAR_API?: Fetcher;
@@ -14,7 +14,7 @@ export const onRequestGet: PagesFunction<AirportLocationProxyEnv> = async ({ req
     }
 
     const requestUrl = new URL(request.url);
-    const icaoValidation = validateIcaoParam(requestUrl.searchParams.get('icao'));
+    const icaoValidation = validateAirportIdentParam(requestUrl.searchParams.get('icao'));
     if (!icaoValidation.ok) {
       return buildApiError(icaoValidation.error, 400, icaoValidation.code, requestId);
     }
