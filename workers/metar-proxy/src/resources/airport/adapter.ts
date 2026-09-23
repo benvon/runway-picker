@@ -118,7 +118,7 @@ export function hasCanonicalAirportIdentity(requestedIcao: unknown, icao: unknow
   return (
     typeof requestedIcao === 'string' &&
     typeof icao === 'string' &&
-    /^[A-Z0-9]{4}$/.test(requestedIcao) &&
+    /^[A-Z0-9]{3,4}$/.test(requestedIcao) &&
     requestedIcao === icao
   );
 }
@@ -141,8 +141,12 @@ export class AirportWorkerError extends Error {
 
 export function normalizeAirportIcao(value: string): string {
   const normalized = value.trim().toUpperCase();
-  if (!/^[A-Z0-9]{4}$/.test(normalized)) {
-    throw new AirportWorkerError('Invalid ICAO code. Expected 4 alphanumeric characters.', 400, 'INVALID_ICAO');
+  if (!/^[A-Z0-9]{3,4}$/.test(normalized)) {
+    throw new AirportWorkerError(
+      'Invalid airport code. Expected 3–4 alphanumeric characters.',
+      400,
+      'INVALID_ICAO'
+    );
   }
 
   return normalized;
@@ -549,7 +553,7 @@ export function resolveAirportPayloadIcao(payload: AirportDbPayload, requestedIc
   const returnedIcao =
     toStringValue(payload.icao_code)?.toUpperCase() ??
     toStringValue(payload.ident)?.toUpperCase();
-  if (!returnedIcao || !/^[A-Z0-9]{4}$/.test(returnedIcao) || returnedIcao !== requestedIcao) {
+  if (!returnedIcao || !/^[A-Z0-9]{3,4}$/.test(returnedIcao) || returnedIcao !== requestedIcao) {
     throw new AirportWorkerError(
       'Airport provider returned a record that does not match the requested ICAO code.',
       502,

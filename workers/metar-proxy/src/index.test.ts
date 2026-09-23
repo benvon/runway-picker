@@ -11,6 +11,10 @@ import {
   normalizeIcao,
   runScheduledCacheRefresh as runScheduledCacheRefreshFromWorker
 } from './index';
+import {
+  AirportWorkerError,
+  resolveAirportPayloadIcao
+} from './resources/airport/adapter';
 import type { CacheRefresherConfig, HotCacheQueueEntry } from './cache/hotQueue';
 import type { CacheEngineEnv } from './cache/types';
 import { CacheSingleFlightCoordinator } from './cache/singleFlight';
@@ -1203,8 +1207,46 @@ describe('airport worker', () => {
     vi.useRealTimers();
   });
 
-  it('normalizes airport ICAO values', () => {
+  it('normalizes airport identifiers including 3-character FAA LIDs', () => {
     expect(normalizeAirportIcao(' kjfk ')).toBe('KJFK');
+    expect(normalizeAirportIcao('1c8')).toBe('1C8');
+    expect(normalizeAirportIcao('c25')).toBe('C25');
+  });
+
+  it('rejects airport identifiers that are not 3–4 alphanumeric characters', () => {
+    expect(() => normalizeAirportIcao('AB')).toThrow(AirportWorkerError);
+    expect(() => normalizeAirportIcao('ABCDE')).toThrow(AirportWorkerError);
+    expect(() => normalizeAirportIcao('')).toThrow(AirportWorkerError);
+  });
+
+  it('resolves airport payload identity for matching 3-character ident without icao_code', () => {
+    expect(
+      resolveAirportPayloadIcao({ ident: '1C8', icao_code: null }, '1C8')
+    ).toBe('1C8');
+    expect(
+      resolveAirportPayloadIcao({ ident: 'C25', icao_code: '' }, 'C25')
+    ).toBe('C25');
+  });
+
+  it('returns airport payload for 3-character FAA LID when ident matches and icao_code is absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        Response.json({
+          ...buildAirportReport('1C8'),
+          icao_code: null
+        })
+      )
+    );
+
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=1C8'), {
+      METAR_CACHE: new MemoryKv(),
+      AIRPORTDB_API_TOKEN: 'token'
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { icao: string };
+    expect(payload.icao).toBe('1C8');
   });
 
   it('returns airport payload with runway ends and cache metadata', async () => {
@@ -1412,7 +1454,7 @@ describe('airport worker', () => {
   });
 
   it('returns INVALID_ICAO code when airport ICAO format is invalid', async () => {
-    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=ABC'), {
+    const response = await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=AB'), {
       METAR_CACHE: new MemoryKv(),
       AIRPORTDB_API_TOKEN: 'token'
     });
@@ -1579,7 +1621,7 @@ describe('airport worker', () => {
   it('routes airport and metar requests through the worker entrypoint', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json([buildMetarReport('KMCI', { wdir: 180, wspd: 10 })])));
 
-    const airportResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/airport?icao=ABC'), withHealthyRateLimiter({
+    const airportResponse = await workerEntrypoint.fetch(new Request('https://metar.internal/api/airport?icao=AB'), withHealthyRateLimiter({
       METAR_CACHE: new MemoryKv(),
       AIRPORTDB_API_TOKEN: 'token'
     }));

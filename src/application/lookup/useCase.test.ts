@@ -205,6 +205,41 @@ describe('lookup use case', () => {
     });
   });
 
+  it('prompts for alternate METAR without calling METAR when primary airport code is 3 characters', async () => {
+    let metarCalls = 0;
+    const gateway = buildGateway({
+      fetchMetarByIcao: async () => {
+        metarCalls += 1;
+        throw new Error('METAR should not be requested for 3-character airport codes');
+      }
+    });
+
+    const result = await runPrimaryLookup('1C8', gateway);
+
+    expect(result.type).toBe('prompt-alternate');
+    expect(metarCalls).toBe(0);
+    if (result.type === 'prompt-alternate') {
+      expect(result.state.stage).toBe('alternate-metar');
+      expect(result.state.primaryIcao).toBe('1C8');
+      expect(result.state.primaryAirport?.icao).toBe('1C8');
+      expect(result.message).toContain('1C8');
+    }
+  });
+
+  it('still attempts METAR for 4-character primary codes', async () => {
+    let metarCalls = 0;
+    const gateway = buildGateway({
+      fetchMetarByIcao: async (icao) => {
+        metarCalls += 1;
+        return buildGateway().fetchMetarByIcao(icao);
+      }
+    });
+
+    const result = await runPrimaryLookup('KJFK', gateway);
+    expect(result.type).toBe('success');
+    expect(metarCalls).toBe(1);
+  });
+
   it('returns alternate prompt when METAR is unavailable', async () => {
     const gateway = buildGateway({
       fetchMetarByIcao: async () => {

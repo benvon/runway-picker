@@ -100,7 +100,7 @@ export function buildAppUi(root: HTMLElement, buildMetadata: BuildMetadata): App
     }
   });
 
-  const primaryIcaoLabel = createElement('label', { textContent: 'Primary ICAO code' });
+  const primaryIcaoLabel = createElement('label', { textContent: 'Airport code' });
   primaryIcaoLabel.htmlFor = 'icao';
 
   const icaoInput = createElement('input', {
@@ -109,7 +109,7 @@ export function buildAppUi(root: HTMLElement, buildMetadata: BuildMetadata): App
       id: 'icao',
       name: 'icao',
       type: 'text',
-      placeholder: 'Example: KJFK',
+      placeholder: 'KJFK or 1C8',
       autocomplete: 'off'
     }
   });

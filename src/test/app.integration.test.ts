@@ -566,6 +566,76 @@ describe('app integration', () => {
     });
   });
 
+  it('looks up a 3-character airport code and prompts for alternate METAR without requesting METAR for the primary', async () => {
+    document.body.innerHTML = '<main id="app"></main>';
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url === '/api/airport?icao=1C8') {
+        return Promise.resolve(Response.json(airportPayload('1C8')));
+      }
+
+      if (url === '/api/metar?icao=1C8') {
+        return Promise.reject(new Error('METAR must not be requested for 1C8'));
+      }
+
+      if (url === '/api/metar?icao=KMCI') {
+        return Promise.resolve(
+          Response.json(
+            metarPayload('KMCI', {
+              raw: '18008KT',
+              directionType: 'fixed',
+              directionDegTrue: 180,
+              speedKt: 8,
+              gustKt: null
+            })
+          )
+        );
+      }
+
+      if (url === '/api/airport-location?icao=KMCI') {
+        return Promise.resolve(
+          Response.json({ icao: 'KMCI', coordinates: { latitudeDeg: 39.1, longitudeDeg: -94.6 } })
+        );
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const root = document.querySelector<HTMLElement>('#app');
+    if (!root) {
+      throw new Error('Expected #app root element in test.');
+    }
+
+    mountApp(root);
+
+    const icaoInput = root.querySelector<HTMLInputElement>('#icao');
+    const alternateGroup = root.querySelector<HTMLElement>('#alternate-group');
+    const alternateInput = root.querySelector<HTMLInputElement>('#alternate-icao');
+    const form = root.querySelector<HTMLFormElement>('#calculator-form');
+    if (!icaoInput || !alternateGroup || !alternateInput || !form) {
+      throw new Error('Expected form elements not found.');
+    }
+
+    expect(root.textContent).toContain('Airport code');
+    expect(icaoInput.placeholder).toContain('1C8');
+
+    icaoInput.value = '1C8';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => alternateGroup.hidden === false);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/airport?icao=1C8', expect.any(Object));
+    expect(fetchMock.mock.calls.some(([request]) => {
+      const url = typeof request === 'string' ? request : request instanceof URL ? request.toString() : request.url;
+      return url.includes('/api/metar?icao=1C8');
+    })).toBe(false);
+
+    alternateInput.value = 'KMCI';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => (root.textContent?.includes('Weather airport: KMCI') ?? false));
+  });
+
   it('reveals alternate METAR flow only when METAR API returns fallback code', async () => {
     document.body.innerHTML = '<main id="app"></main>';
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
