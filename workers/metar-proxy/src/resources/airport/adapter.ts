@@ -1,9 +1,12 @@
 import type { CacheEnvelope, CacheResourceAdapter } from '../../cache/types';
+import { initialBearingDegTrue, type GeographicCoordinate } from './heading';
 
 const AIRPORT_DB_BASE_URL = 'https://airportdb.io/api/v1/airport';
 const USER_AGENT = 'benvon-runway-picker';
 
-export const AIRPORT_SCHEMA_VERSION = 9;
+export const AIRPORT_SCHEMA_VERSION = 10;
+
+export type AirportHeadingSource = 'surveyed' | 'computed';
 
 export interface AirportResourceInput {
   icao: string;
@@ -11,8 +14,13 @@ export interface AirportResourceInput {
 
 export interface AirportRunwayEnd {
   id: string;
-  /** Physical runway heading from AirportDB, referenced to true north. */
+  /** Physical runway heading referenced to true north. */
   headingDegTrue: number;
+  /**
+   * `surveyed` when AirportDB provided a true heading; `computed` when the
+   * heading was derived from runway-end coordinates.
+   */
+  headingSource: AirportHeadingSource;
   isClosed: boolean;
   lengthFt: number | null;
 }
@@ -95,6 +103,10 @@ interface AirportDbRunway {
   he_ident?: unknown;
   le_heading_degT?: unknown;
   he_heading_degT?: unknown;
+  le_latitude_deg?: unknown;
+  le_longitude_deg?: unknown;
+  he_latitude_deg?: unknown;
+  he_longitude_deg?: unknown;
   [key: string]: unknown;
 }
 
@@ -237,12 +249,7 @@ function isRunwayClosed(value: unknown): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
-function toRunwayEnd(
-  identCandidate: unknown,
-  headingDegTrueCandidate: unknown,
-  isClosed: boolean,
-  lengthFt: number | null
-): AirportRunwayEnd | null {
+function parseRunwayIdent(identCandidate: unknown): { id: string } | null {
   const ident = toStringValue(identCandidate)?.toUpperCase() ?? null;
   if (!ident) {
     return null;
@@ -255,14 +262,75 @@ function toRunwayEnd(
 
   const runwayNumber = Number.parseInt(match[1], 10);
   const suffix = match[2] ?? '';
+  return { id: `${String(runwayNumber).padStart(2, '0')}${suffix}` };
+}
+
+function toSurveyedHeading(headingDegTrueCandidate: unknown): number | null {
   const headingDegTrue = toFiniteNumberValue(headingDegTrueCandidate);
   if (headingDegTrue === null || headingDegTrue < 0 || headingDegTrue > 360) {
     return null;
   }
 
+  return headingDegTrue;
+}
+
+function toRunwayCoordinate(latitudeCandidate: unknown, longitudeCandidate: unknown): GeographicCoordinate | null {
+  const latitudeDeg = toCoordinateValue(latitudeCandidate);
+  const longitudeDeg = toCoordinateValue(longitudeCandidate);
+  if (latitudeDeg === null || longitudeDeg === null || Math.abs(latitudeDeg) > 90 || Math.abs(longitudeDeg) > 180) {
+    return null;
+  }
+
+  return { latitudeDeg, longitudeDeg };
+}
+
+function resolveRunwayHeading(
+  surveyedHeading: number | null,
+  from: GeographicCoordinate | null,
+  to: GeographicCoordinate | null
+): { headingDegTrue: number; headingSource: AirportHeadingSource } | null {
+  if (surveyedHeading !== null) {
+    return { headingDegTrue: surveyedHeading, headingSource: 'surveyed' };
+  }
+
+  if (!from || !to) {
+    return null;
+  }
+
+  const computed = initialBearingDegTrue(from, to);
+  if (computed === null) {
+    return null;
+  }
+
+  return { headingDegTrue: computed, headingSource: 'computed' };
+}
+
+function toRunwayEnd(
+  identCandidate: unknown,
+  headingDegTrueCandidate: unknown,
+  fromCoordinate: GeographicCoordinate | null,
+  toCoordinate: GeographicCoordinate | null,
+  isClosed: boolean,
+  lengthFt: number | null
+): AirportRunwayEnd | null {
+  const parsedIdent = parseRunwayIdent(identCandidate);
+  if (!parsedIdent) {
+    return null;
+  }
+
+  const resolved = resolveRunwayHeading(
+    toSurveyedHeading(headingDegTrueCandidate),
+    fromCoordinate,
+    toCoordinate
+  );
+  if (!resolved) {
+    return null;
+  }
+
   return {
-    id: `${String(runwayNumber).padStart(2, '0')}${suffix}`,
-    headingDegTrue,
+    id: parsedIdent.id,
+    headingDegTrue: resolved.headingDegTrue,
+    headingSource: resolved.headingSource,
     isClosed,
     lengthFt
   };
@@ -302,6 +370,9 @@ function isAirportRunwayEndCandidate(runway: unknown): runway is AirportRunwayEn
     typeof runway === 'object' &&
     typeof (runway as { id?: unknown }).id === 'string' &&
     typeof (runway as { headingDegTrue?: unknown }).headingDegTrue === 'number' &&
+    ((runway as { headingSource?: unknown }).headingSource === 'surveyed' ||
+      (runway as { headingSource?: unknown }).headingSource === 'computed' ||
+      typeof (runway as { headingSource?: unknown }).headingSource === 'undefined') &&
     typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' &&
     ((runway as { lengthFt?: unknown }).lengthFt === null ||
       typeof (runway as { lengthFt?: unknown }).lengthFt === 'number')
@@ -324,6 +395,7 @@ function normalizeCachedRunways(runways: AirportResourceData['runwayEnds']): Air
     .map((runway) => ({
       id: runway.id,
       headingDegTrue: runway.headingDegTrue,
+      headingSource: runway.headingSource === 'computed' ? 'computed' : 'surveyed',
       isClosed: runway.isClosed,
       lengthFt: runway.lengthFt
     }));
@@ -491,8 +563,24 @@ function collectRunwayEnds(payload: AirportDbPayload): AirportRunwayEnd[] {
     const runwayClosed = isRunwayClosed(runway.closed);
     const lengthFtCandidate = toIntegerValue(runway.length_ft);
     const lengthFt = lengthFtCandidate !== null && lengthFtCandidate > 0 ? lengthFtCandidate : null;
-    const lowEnd = toRunwayEnd(runway.le_ident, runway.le_heading_degT, runwayClosed, lengthFt);
-    const highEnd = toRunwayEnd(runway.he_ident, runway.he_heading_degT, runwayClosed, lengthFt);
+    const lowCoordinate = toRunwayCoordinate(runway.le_latitude_deg, runway.le_longitude_deg);
+    const highCoordinate = toRunwayCoordinate(runway.he_latitude_deg, runway.he_longitude_deg);
+    const lowEnd = toRunwayEnd(
+      runway.le_ident,
+      runway.le_heading_degT,
+      lowCoordinate,
+      highCoordinate,
+      runwayClosed,
+      lengthFt
+    );
+    const highEnd = toRunwayEnd(
+      runway.he_ident,
+      runway.he_heading_degT,
+      highCoordinate,
+      lowCoordinate,
+      runwayClosed,
+      lengthFt
+    );
     if (!lowEnd || !highEnd) {
       continue;
     }
