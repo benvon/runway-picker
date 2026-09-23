@@ -38,6 +38,19 @@ describe('lookup presentation safety', () => {
     expect(panels.bestRunway.textContent).not.toContain('Direction variable');
   });
 
+  it('labels computed runway headings as not surveyed in lookup details', () => {
+    const resolution = buildResolution();
+    resolution.airport.runwayEnds = [
+      { id: '18', headingDegTrue: 180, headingSource: 'computed', isClosed: false, lengthFt: 2540 },
+      { id: '36', headingDegTrue: 360, headingSource: 'computed', isClosed: false, lengthFt: 2540 }
+    ];
+
+    const panels = renderLookupPanels(resolution);
+    expect(panels.details.textContent).toContain('Runway heading source:');
+    expect(panels.details.textContent).toContain('Computed from runway-end coordinates (not surveyed)');
+    expect(panels.details.textContent).toContain('Heading computed from runway-end coordinates (not surveyed).');
+  });
+
   it('names the best runway only when eligibility is satisfied', () => {
     const panels = renderLookupPanels(buildResolution());
     expect(panels.bestRunway.textContent).toContain('Best runway: 18');

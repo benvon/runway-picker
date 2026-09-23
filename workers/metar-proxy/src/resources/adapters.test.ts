@@ -421,10 +421,10 @@ describe('resource adapters', () => {
     expect(validated.elevationFt).toBe(13);
     expect(validated.coordinates).toEqual({ latitudeDeg: 40.6413, longitudeDeg: -73.7781 });
     expect(validated.runwayEnds).toEqual([
-      { id: '04L', headingDegTrue: 47.4, isClosed: false, lengthFt: 12079 },
-      { id: '13R', headingDegTrue: 137, isClosed: true, lengthFt: 14511 },
-      { id: '22R', headingDegTrue: 227.6, isClosed: false, lengthFt: 12079 },
-      { id: '31L', headingDegTrue: 317, isClosed: true, lengthFt: 14511 }
+      { id: '04L', headingSource: 'surveyed', headingDegTrue: 47.4, isClosed: false, lengthFt: 12079 },
+      { id: '13R', headingSource: 'surveyed', headingDegTrue: 137, isClosed: true, lengthFt: 14511 },
+      { id: '22R', headingSource: 'surveyed', headingDegTrue: 227.6, isClosed: false, lengthFt: 12079 },
+      { id: '31L', headingSource: 'surveyed', headingDegTrue: 317, isClosed: true, lengthFt: 14511 }
     ]);
     expect(validated.frequencies).toEqual([
       { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
@@ -522,12 +522,12 @@ describe('resource adapters', () => {
     );
 
     expect(validated.runwayEnds).toEqual([
-      { id: '13', headingDegTrue: 130, isClosed: true, lengthFt: null },
-      { id: '31', headingDegTrue: 310, isClosed: true, lengthFt: null }
+      { id: '13', headingSource: 'surveyed', headingDegTrue: 130, isClosed: true, lengthFt: null },
+      { id: '31', headingSource: 'surveyed', headingDegTrue: 310, isClosed: true, lengthFt: null }
     ]);
   });
 
-  it('rejects runway data without true headings instead of deriving a magnetic designator heading', async () => {
+  it('rejects runway data without surveyed headings or end coordinates instead of deriving a magnetic designator heading', async () => {
     expect(() =>
       airportResourceAdapter.validate(
         {
@@ -544,6 +544,51 @@ describe('resource adapters', () => {
         }
       )
     ).toThrow(expect.objectContaining({ code: 'RUNWAY_DATA_UNAVAILABLE' }));
+  });
+
+  it('computes true headings from runway-end coordinates when surveyed headings are missing', async () => {
+    const validated = await airportResourceAdapter.validate(
+      {
+        ident: '1C8',
+        name: 'Cottonwood Airport',
+        municipality: 'Rockford',
+        iso_country: 'US',
+        country: { name: 'United States' },
+        elevation_ft: '741',
+        latitude_deg: '42.29169845581055',
+        longitude_deg: '-89.13619995117188',
+        runways: [
+          {
+            closed: '0',
+            length_ft: '2540',
+            le_ident: '18',
+            he_ident: '36',
+            le_latitude_deg: '42.295501708984375',
+            le_longitude_deg: '-89.13610076904297',
+            he_latitude_deg: '42.28850173950195',
+            he_longitude_deg: '-89.13610076904297'
+          }
+        ]
+      },
+      { icao: '1C8' },
+      {
+        request: new Request('https://example.com'),
+        env: {
+          METAR_CACHE: { get: async () => null, put: async () => {} },
+          AIRPORTDB_API_TOKEN: 'token'
+        }
+      }
+    );
+
+    expect(validated.runwayEnds).toHaveLength(2);
+    const runway18 = validated.runwayEnds.find((end) => end.id === '18');
+    const runway36 = validated.runwayEnds.find((end) => end.id === '36');
+    expect(runway18?.headingSource).toBe('computed');
+    expect(runway36?.headingSource).toBe('computed');
+    expect(runway18?.headingDegTrue).toBeGreaterThan(170);
+    expect(runway18?.headingDegTrue).toBeLessThan(190);
+    expect(runway36?.headingDegTrue).toBeGreaterThanOrEqual(350);
+    expect(runway36?.headingDegTrue).toBeLessThanOrEqual(360);
   });
 
   it('keeps runway profiles strict while the location resource accepts an airport without runways', async () => {
@@ -624,7 +669,7 @@ describe('resource adapters', () => {
         countryName: 'United States',
         elevationFt: 13,
         runwayEnds: [
-          { id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12079 }
+          { id: '04L', headingSource: 'surveyed', headingDegTrue: 47, isClosed: false, lengthFt: 12079 }
         ],
         frequencies: [
           { type: 'TWR', description: 'KENNEDY TWR', frequencyMhz: '119.1' }
@@ -654,7 +699,7 @@ describe('resource adapters', () => {
         countryCode: 'US',
         countryName: 'United States',
         elevationFt: 841,
-        runwayEnds: [{ id: '12L', headingDegTrue: 120, isClosed: false, lengthFt: 10000 }],
+        runwayEnds: [{ id: '12L', headingSource: 'surveyed', headingDegTrue: 120, isClosed: false, lengthFt: 10000 }],
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
       }
@@ -675,7 +720,7 @@ describe('resource adapters', () => {
         countryCode: 'US',
         countryName: 'United States',
         elevationFt: 21,
-        runwayEnds: [{ id: '04', headingDegTrue: 44, isClosed: false, lengthFt: 7000 }],
+        runwayEnds: [{ id: '04', headingSource: 'surveyed', headingDegTrue: 44, isClosed: false, lengthFt: 7000 }],
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
       }
@@ -711,8 +756,8 @@ describe('resource adapters', () => {
     );
 
     expect(validated.runwayEnds).toEqual([
-      { id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 5000 },
-      { id: '36', headingDegTrue: 360, isClosed: false, lengthFt: 5000 }
+      { id: '18', headingSource: 'surveyed', headingDegTrue: 180, isClosed: false, lengthFt: 5000 },
+      { id: '36', headingSource: 'surveyed', headingDegTrue: 360, isClosed: false, lengthFt: 5000 }
     ]);
     expect(validated.countryName).toBe('');
 
@@ -745,8 +790,8 @@ describe('resource adapters', () => {
     );
 
     expect(validated.runwayEnds).toEqual([
-      { id: '09', headingDegTrue: 90, isClosed: false, lengthFt: 5000 },
-      { id: '27', headingDegTrue: 270, isClosed: false, lengthFt: 5000 }
+      { id: '09', headingSource: 'surveyed', headingDegTrue: 90, isClosed: false, lengthFt: 5000 },
+      { id: '27', headingSource: 'surveyed', headingDegTrue: 270, isClosed: false, lengthFt: 5000 }
     ]);
   });
 });

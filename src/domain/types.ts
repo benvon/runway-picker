@@ -1,9 +1,16 @@
 export type WindDirectionType = 'fixed' | 'variable' | 'calm';
 
+export type HeadingSource = 'surveyed' | 'computed';
+
 export interface RunwayEnd {
   id: string;
   /** Physical runway heading referenced to true north. */
   headingDegTrue: number;
+  /**
+   * `surveyed` when the provider supplied a true heading; `computed` when the
+   * heading was derived from runway-end coordinates.
+   */
+  headingSource?: HeadingSource;
   isClosed?: boolean;
   lengthFt?: number | null;
 }

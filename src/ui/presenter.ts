@@ -163,6 +163,19 @@ function renderBestRunway(resolution: LookupResolution, result: EvaluationResult
   return section;
 }
 
+function formatHeadingSourceSummary(runwayEnds: LookupResolution['airport']['runwayEnds']): string {
+  const computedIds = runwayEnds.filter((end) => end.headingSource === 'computed').map((end) => end.id);
+  if (computedIds.length === 0) {
+    return 'Surveyed (provider true headings)';
+  }
+
+  if (computedIds.length === runwayEnds.length) {
+    return 'Computed from runway-end coordinates (not surveyed)';
+  }
+
+  return `Mixed — computed for ${computedIds.join(', ')} from runway-end coordinates (not surveyed)`;
+}
+
 function renderLookupSummary(resolution: LookupResolution): HTMLElement {
   const runwaySourceLabel =
     resolution.runwaySourceIcao === resolution.airport.requestedIcao
@@ -187,7 +200,8 @@ function renderLookupSummary(resolution: LookupResolution): HTMLElement {
     ...(resolution.recommendation.alternateDistanceNm === null
       ? []
       : [createTextParagraph('Alternate METAR distance:', `${Math.round(resolution.recommendation.alternateDistanceNm)} NM`)]),
-    createTextParagraph('Runway ends loaded:', `${resolution.airport.runwayEnds.length}`)
+    createTextParagraph('Runway ends loaded:', `${resolution.airport.runwayEnds.length}`),
+    createTextParagraph('Runway heading source:', formatHeadingSourceSummary(resolution.airport.runwayEnds))
   ]);
 
   return section;
@@ -207,7 +221,8 @@ function variableWindLabels(result: EvaluationResult): { sustained: string; gust
 
 function formatRunwayCell(
   runway: RunwayWindComponent,
-  labels: { sustained: string; gust: string }
+  labels: { sustained: string; gust: string },
+  headingSource: LookupResolution['airport']['runwayEnds'][number]['headingSource']
 ): { sustained: string; gust: string; notes: string } {
   const sustained = runway.isClosed
     ? 'Closed runway'
@@ -223,11 +238,15 @@ function formatRunwayCell(
           runway.gustRange ? ` | ${formatComponentRange(runway.gustRange)}` : ''
         }`
       : labels.gust;
-  const notes = runway.notes.length ? runway.notes.join(' ') : 'None';
+  const noteParts = [...runway.notes];
+  if (headingSource === 'computed') {
+    noteParts.push('Heading computed from runway-end coordinates (not surveyed).');
+  }
+  const notes = noteParts.length ? noteParts.join(' ') : 'None';
   return { sustained, gust, notes };
 }
 
-function renderRunwayTable(result: EvaluationResult): HTMLElement {
+function renderRunwayTable(result: EvaluationResult, resolution: LookupResolution): HTMLElement {
   const section = createElement('section', {
     className: 'panel panel-subtle',
     attributes: { 'aria-labelledby': 'components-title' }
@@ -247,9 +266,12 @@ function renderRunwayTable(result: EvaluationResult): HTMLElement {
   }
   thead.appendChild(headerRow);
 
+  const headingSourceById = new Map(
+    resolution.airport.runwayEnds.map((end) => [end.id, end.headingSource] as const)
+  );
   const labels = variableWindLabels(result);
   for (const runway of result.runwayResults) {
-    const formatted = formatRunwayCell(runway, labels);
+    const formatted = formatRunwayCell(runway, labels, headingSourceById.get(runway.runwayId));
     const row = createElement('tr');
     appendChildren(row, [
       createElement('th', { textContent: runway.runwayId, attributes: { scope: 'row' } }),
@@ -339,7 +361,7 @@ function renderDetailsPanel(resolution: LookupResolution, evaluation: Evaluation
 
   appendChildren(detailsStack, [
     renderLookupSummary(resolution),
-    renderRunwayTable(evaluation),
+    renderRunwayTable(evaluation, resolution),
     renderCalculationInfo(evaluation),
     renderTechnicalDetails(resolution)
   ]);

@@ -1,4 +1,4 @@
-import type { AirportFrequency, RunwayEnd } from '../domain/types';
+import type { AirportFrequency, HeadingSource, RunwayEnd } from '../domain/types';
 import {
   normalizeCacheMetadata as normalizeSharedCacheMetadata,
   type NormalizedCacheMetadata
@@ -189,15 +189,21 @@ function normalizeRunwayEnds(runwayCandidate: unknown): RunwayEnd[] {
         typeof (runway as { headingDegTrue?: unknown }).headingDegTrue === 'number'
       );
     })
-    .map((runway) => ({
-      id: runway.id,
-      headingDegTrue: runway.headingDegTrue,
-      isClosed: typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' ? runway.isClosed : false,
-      lengthFt:
-        typeof (runway as { lengthFt?: unknown }).lengthFt === 'number'
-          ? runway.lengthFt
-          : null
-    }));
+    .map((runway) => {
+      const rawHeadingSource = (runway as { headingSource?: unknown }).headingSource;
+      const headingSource: HeadingSource | undefined =
+        rawHeadingSource === 'computed' || rawHeadingSource === 'surveyed' ? rawHeadingSource : undefined;
+      return {
+        id: runway.id,
+        headingDegTrue: runway.headingDegTrue,
+        ...(headingSource ? { headingSource } : {}),
+        isClosed: typeof (runway as { isClosed?: unknown }).isClosed === 'boolean' ? runway.isClosed : false,
+        lengthFt:
+          typeof (runway as { lengthFt?: unknown }).lengthFt === 'number'
+            ? runway.lengthFt
+            : null
+      };
+    });
 
   if (parsed.length === 0) {
     throw new AirportLookupError('Airport response does not contain usable runway ends.', 502, 'UNEXPECTED');

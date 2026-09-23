@@ -1278,10 +1278,10 @@ describe('airport worker', () => {
     expect(payload.source).toBe('airportdb');
     expect(payload.coordinates).toEqual({ latitudeDeg: 39.0997, longitudeDeg: -94.5786 });
     expect(payload.runwayEnds).toEqual([
-      { id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12000 },
-      { id: '13', headingDegTrue: 137, isClosed: true, lengthFt: 10000 },
-      { id: '22R', headingDegTrue: 227, isClosed: false, lengthFt: 12000 },
-      { id: '31', headingDegTrue: 317, isClosed: true, lengthFt: 10000 }
+      { id: '04L', headingSource: 'surveyed', headingDegTrue: 47, isClosed: false, lengthFt: 12000 },
+      { id: '13', headingSource: 'surveyed', headingDegTrue: 137, isClosed: true, lengthFt: 10000 },
+      { id: '22R', headingSource: 'surveyed', headingDegTrue: 227, isClosed: false, lengthFt: 12000 },
+      { id: '31', headingSource: 'surveyed', headingDegTrue: 317, isClosed: true, lengthFt: 10000 }
     ]);
     expect(payload.frequencies).toEqual([
       { type: 'APP', description: 'NORTH APP', frequencyMhz: '125.7' },
@@ -1343,7 +1343,7 @@ describe('airport worker', () => {
         countryCode: 'US',
         countryName: 'United States',
         elevationFt: 13,
-        runwayEnds: [{ id: '04L', headingDegTrue: 47, isClosed: false, lengthFt: 12079 }],
+        runwayEnds: [{ id: '04L', headingSource: 'surveyed', headingDegTrue: 47, isClosed: false, lengthFt: 12079 }],
         frequencies: [],
         source: 'airportdb',
         fetchedAt: '2026-03-03T12:00:00.000Z'
@@ -1578,7 +1578,7 @@ describe('airport worker', () => {
     const kv = new MemoryKv();
     const env = { METAR_CACHE: kv, AIRPORTDB_API_TOKEN: 'token' };
     await handleAirportRequest(new Request('https://metar.internal/api/airport?icao=KJFK'), env);
-    kv.seed('v1:airport:KJFK', { schemaVersion: 9, resource: 'airport', key: 'v1:airport:KJFK', negative: { status: 404, code: 'ICAO_NOT_FOUND' }, cacheMeta: { fetchedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), policyVersion: 'airport-v6', source: 'upstream' } });
+    kv.seed('v1:airport:KJFK', { schemaVersion: 10, resource: 'airport', key: 'v1:airport:KJFK', negative: { status: 404, code: 'ICAO_NOT_FOUND' }, cacheMeta: { fetchedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), policyVersion: 'airport-v6', source: 'upstream' } });
     await runScheduledCacheRefresh(env);
     expect(fetchUpstream).toHaveBeenCalledTimes(1);
     expect(kv.has('v1:airport:KJFK')).toBe(true);
