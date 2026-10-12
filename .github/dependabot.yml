@@ -17,7 +17,12 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
-      npm-all:
+      # Majors stay ungrouped so one incompatible major cannot fail the weekly patch and minor updates.
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
         patterns:
           - "*"
 

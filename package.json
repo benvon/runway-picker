@@ -47,5 +47,8 @@
     "vite": "^8.3.0",
     "vitest": "^4.1.11",
     "wrangler": "^4.136.2"
+  },
+  "overrides": {
+    "brace-expansion": "^5.0.12"
   }
 }
