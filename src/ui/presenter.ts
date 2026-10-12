@@ -96,17 +96,36 @@ function renderAirportInfo(resolution: LookupResolution, bestRunwayId: string | 
   return section;
 }
 
+function formatRunwayLengthFt(lengthFt: number | null | undefined): string {
+  if (typeof lengthFt !== 'number' || !Number.isFinite(lengthFt) || lengthFt <= 0) {
+    return 'Length unavailable';
+  }
+
+  const formatted = new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: 20,
+    useGrouping: true
+  }).format(lengthFt);
+  return `Length: ${formatted} ft`;
+}
+
 function renderBestRunwayRow(
   runwayDisplay: string | null,
-  componentRunway: RunwayWindComponent | null
+  componentRunway: RunwayWindComponent | null,
+  lengthFt: number | null | undefined
 ): HTMLElement {
   const displayedRunway = runwayDisplay ?? 'Not determinable';
   const headwindSummary = formatBestHeadwindSummary(componentRunway?.sustained ?? null, componentRunway?.gust ?? null);
   const crosswindSummary = formatBestCrosswindSummary(componentRunway?.sustained ?? null, componentRunway?.gust ?? null);
   const row = createElement('div', { className: 'best-runway-row' });
 
-  const bestRunwayCell = createElement('p', { className: 'best-runway-cell' });
-  bestRunwayCell.append(strongLabel('Best runway:'), document.createTextNode(` ${displayedRunway}`));
+  const bestRunwayCell = createElement('div', { className: 'best-runway-cell' });
+  const identifier = createElement('span', { className: 'best-runway-identifier' });
+  identifier.append(strongLabel('Best runway:'), document.createTextNode(` ${displayedRunway}`));
+  const length = createElement('span', {
+    className: 'best-runway-length',
+    textContent: formatRunwayLengthFt(lengthFt)
+  });
+  appendChildren(bestRunwayCell, [identifier, length]);
 
   const headwindCell = createElement('p', { className: 'best-runway-cell', textContent: headwindSummary });
   const crosswindCell = createElement('p', { className: 'best-runway-cell', textContent: crosswindSummary });
@@ -132,6 +151,17 @@ function recommendationWarning(reason: RecommendationBlockReason): string {
   }
 }
 
+function lengthFtForRunway(
+  runwayEnds: LookupResolution['airport']['runwayEnds'],
+  runwayId: string | null
+): number | null | undefined {
+  if (!runwayId) {
+    return null;
+  }
+
+  return runwayEnds.find((end) => end.id === runwayId)?.lengthFt;
+}
+
 function renderBestRunway(resolution: LookupResolution, result: EvaluationResult): HTMLElement {
   const componentRunway = findBestRunway(result);
   const recommendedRunway = resolution.recommendation.allowed ? componentRunway : null;
@@ -154,8 +184,13 @@ function renderBestRunway(resolution: LookupResolution, result: EvaluationResult
           textContent: `Using METAR from ${resolution.weatherSourceIcao}, ${Math.round(resolution.recommendation.alternateDistanceNm)} NM from ${resolution.runwaySourceIcao}.`
         })
       : null;
+  const selectedRunwayId = recommendedRunway?.runwayId ?? null;
   appendChildren(section, [
-    renderBestRunwayRow(recommendedRunway?.runwayId ?? null, componentRunway),
+    renderBestRunwayRow(
+      selectedRunwayId,
+      componentRunway,
+      lengthFtForRunway(resolution.airport.runwayEnds, selectedRunwayId)
+    ),
     ...(warning ? [warning] : []),
     ...(alternateSource ? [alternateSource] : []),
     renderAirportInfo(resolution, recommendedRunway?.runwayId ?? null)
