@@ -123,6 +123,23 @@ describe('pull request audit diff', () => {
     expect(calls).toEqual(['git', 'git', 'npm']);
   });
 
+  it('compares against the fetched base commit instead of the live branch tip', () => {
+    const baseSha = 'a'.repeat(40);
+    const commands: string[][] = [];
+    const result = comparePullRequestAudits({
+      baseRef: baseSha,
+      readAudit: () => reportWith('brace-expansion', 'GHSA-base'),
+      run: (command: string, args: string[]) => {
+        commands.push([command, ...args]);
+        return { status: 0 };
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(commands[0]).toEqual(['git', 'fetch', '--depth=1', 'origin', baseSha]);
+    expect(commands[1]).toEqual(['git', 'checkout', 'FETCH_HEAD', '--', 'package.json', 'package-lock.json']);
+  });
+
   it('stops when the base ref is missing or the base branch cannot be fetched', () => {
     const missing = comparePullRequestAudits({
       baseRef: '',
@@ -145,11 +162,17 @@ describe('pull request audit diff', () => {
     expect(fetchFailed.messages[0]).toMatch(/fetch/);
   });
 
-  it('reads the base branch from the pull request event when BASE_REF is unset', () => {
+  it('reads the base commit from the pull request event when BASE_REF is unset', () => {
+    const baseSha = 'b'.repeat(40);
+    expect(resolveBaseRef({
+      env: { GITHUB_EVENT_PATH: 'event.json' },
+      readEvent: () => ({ pull_request: { base: { ref: 'main', sha: baseSha } } })
+    })).toBe(baseSha);
+
     expect(resolveBaseRef({
       env: { GITHUB_EVENT_PATH: 'event.json' },
       readEvent: () => ({ pull_request: { base: { ref: 'main' } } })
-    })).toBe('main');
+    })).toBe('');
 
     expect(resolveBaseRef({
       env: { BASE_REF: 'release' },

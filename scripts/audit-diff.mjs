@@ -117,8 +117,8 @@ export function resolveBaseRef({ env = process.env, readEvent = (filePath) => JS
 
   try {
     const event = readEvent(env.GITHUB_EVENT_PATH);
-    const ref = event?.pull_request?.base?.ref;
-    return typeof ref === 'string' ? ref : '';
+    const sha = event?.pull_request?.base?.sha;
+    return typeof sha === 'string' ? sha : '';
   } catch {
     return '';
   }
@@ -161,7 +161,7 @@ function auditComparisonResult(baseReport, headReport) {
   if (added.length === 0) {
     return {
       exitCode: 0,
-      messages: ['No new high or critical advisories compared with the base branch.']
+      messages: ['No new high or critical advisories compared with the base commit.']
     };
   }
 
@@ -176,7 +176,7 @@ function auditComparisonResult(baseReport, headReport) {
 
 export function comparePullRequestAudits({ baseRef, run, readAudit }) {
   if (!isBranchName(baseRef)) {
-    return { exitCode: 1, messages: ['BASE_REF must be a branch name.'] };
+    return { exitCode: 1, messages: ['BASE_REF must be a branch name or commit SHA.'] };
   }
 
   const head = readReport(readAudit);
@@ -188,7 +188,7 @@ export function comparePullRequestAudits({ baseRef, run, readAudit }) {
     run,
     'git',
     ['fetch', '--depth=1', 'origin', baseRef],
-    'Failed to fetch the base branch.'
+    'Failed to fetch the base commit.'
   );
   if (fetchFailure) {
     return fetchFailure;
@@ -197,14 +197,14 @@ export function comparePullRequestAudits({ baseRef, run, readAudit }) {
   const checkoutFailure = runStep(
     run,
     'git',
-    ['checkout', `origin/${baseRef}`, '--', 'package.json', 'package-lock.json'],
-    'Failed to check out the base branch manifests.'
+    ['checkout', 'FETCH_HEAD', '--', 'package.json', 'package-lock.json'],
+    'Failed to check out the base commit manifests.'
   );
   if (checkoutFailure) {
     return checkoutFailure;
   }
 
-  const installFailure = runStep(run, 'npm', ['ci'], 'Failed to install base branch dependencies.');
+  const installFailure = runStep(run, 'npm', ['ci'], 'Failed to install base commit dependencies.');
   if (installFailure) {
     return installFailure;
   }
