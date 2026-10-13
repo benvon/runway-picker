@@ -18,6 +18,14 @@ updates:
         patterns:
           - "*"
       # Majors stay ungrouped so one incompatible major cannot fail the weekly patch and minor updates.
+      # @vitest/coverage-v8 peers an exact vitest version, so those majors have to land in one pull request.
+      vitest-major:
+        applies-to: version-updates
+        update-types:
+          - major
+        patterns:
+          - vitest
+          - "@vitest/*"
       npm-minor-patch:
         applies-to: version-updates
         update-types:
@@ -25,6 +33,12 @@ updates:
           - patch
         patterns:
           - "*"
+    ignore:
+      # TypeScript 7 has no JavaScript API. The compiler is @typescript/native;
+      # the typescript alias stays on @typescript/typescript6 for typescript-eslint.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
