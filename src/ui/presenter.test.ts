@@ -32,6 +32,8 @@ describe('lookup presentation safety', () => {
     }));
 
     expect(panels.bestRunway.textContent).toContain('Best runway: Not determinable');
+    expect(panels.bestRunway.textContent).toContain('Length unavailable');
+    expect(panels.bestRunway.textContent).not.toContain('8,000');
     expect(panels.bestRunway.textContent).toContain('Runway recommendation suppressed');
     expect(panels.bestRunway.textContent).toContain('more than 60 minutes old');
     expect(panels.bestRunway.textContent).toContain('↓ 10 kt');
@@ -55,6 +57,61 @@ describe('lookup presentation safety', () => {
     const panels = renderLookupPanels(buildResolution());
     expect(panels.bestRunway.textContent).toContain('Best runway: 18');
     expect(panels.bestRunway.textContent).not.toContain('Runway recommendation suppressed');
+  });
+
+  it('shows the selected runway length beneath its identifier', () => {
+    const panels = renderLookupPanels(buildResolution());
+    const identifier = panels.bestRunway.querySelector('.best-runway-identifier');
+    const length = panels.bestRunway.querySelector('.best-runway-length');
+
+    expect(identifier?.textContent).toBe('Best runway: 18');
+    expect(length?.textContent).toBe('Length: 8,000 ft');
+    expect(identifier?.compareDocumentPosition(length as Node)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it('shows Length unavailable when the selected runway length is missing or invalid', () => {
+    const missing = buildResolution();
+    missing.airport.runwayEnds = [{ id: '18', headingDegTrue: 180, isClosed: false, lengthFt: null }];
+    expect(renderLookupPanels(missing).bestRunway.querySelector('.best-runway-length')?.textContent).toBe(
+      'Length unavailable'
+    );
+
+    const invalid = buildResolution();
+    invalid.airport.runwayEnds = [{ id: '18', headingDegTrue: 180, isClosed: false, lengthFt: Number.NaN }];
+    const invalidLength = renderLookupPanels(invalid).bestRunway.querySelector('.best-runway-length');
+    expect(invalidLength?.textContent).toBe('Length unavailable');
+    expect(invalidLength?.textContent).not.toContain('NaN');
+
+    const nonPositive = buildResolution();
+    nonPositive.airport.runwayEnds = [{ id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 0 }];
+    expect(renderLookupPanels(nonPositive).bestRunway.querySelector('.best-runway-length')?.textContent).toBe(
+      'Length unavailable'
+    );
+  });
+
+  it('updates the displayed length when the selected runway changes', () => {
+    const first = renderLookupPanels(buildResolution());
+    expect(first.bestRunway.querySelector('.best-runway-length')?.textContent).toBe('Length: 8,000 ft');
+
+    const next = buildResolution();
+    next.airport.runwayEnds = [
+      { id: '18', headingDegTrue: 180, isClosed: false, lengthFt: 8000 },
+      { id: '36', headingDegTrue: 360, isClosed: false, lengthFt: 6500 }
+    ];
+    next.metar.wind = {
+      raw: '36012KT',
+      directionType: 'fixed',
+      directionDegTrue: 360,
+      directionVariation: null,
+      speedKt: 12,
+      gustKt: null
+    };
+    next.metar.metarRaw = 'METAR KJFK 010000Z 36012KT 10SM CLR 10/05 A3000';
+
+    const second = renderLookupPanels(next);
+    expect(second.bestRunway.querySelector('.best-runway-identifier')?.textContent).toBe('Best runway: 36');
+    expect(second.bestRunway.querySelector('.best-runway-length')?.textContent).toBe('Length: 6,500 ft');
+    expect(second.bestRunway.textContent).not.toContain('8,000');
   });
 
   it('shows unavailable METAR cache provenance without presenting it as a timestamp', () => {

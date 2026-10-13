@@ -43,7 +43,7 @@
 - Security gates include:
   - secret scanning (`scripts/scan-secrets.mjs`)
   - workflow linting (`scripts/lint-workflows.mjs`)
-  - dependency audit (`npm audit --audit-level=high` via `scripts/run-audit.mjs`)
+  - dependency audit (`npm audit --audit-level=high` via `scripts/run-audit.mjs` on `main` and locally; pull requests fail only when they add a high or critical advisory compared with the base branch)
   - CodeQL analysis in GitHub Actions
 
 ## Operational notes

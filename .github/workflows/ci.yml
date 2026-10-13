@@ -119,9 +119,16 @@ jobs:
         run: npm run lint:workflows
 
       - name: Dependency audit
+        if: github.event_name != 'pull_request'
         env:
           CI: true
         run: npm run security:audit
+
+      - name: Dependency audit against base branch
+        if: github.event_name == 'pull_request'
+        env:
+          CI: true
+        run: node scripts/audit-diff.mjs
 
   codeql:
     runs-on: ubuntu-latest
