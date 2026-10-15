@@ -57,6 +57,7 @@ flowchart TD
   soe{"Stale-on-error allows fallback?"}
   serve["Serve fresh payload"]
   serveStale["Serve retained stale copy"]
+  hot{"METAR or airport?"}
   touch["Best-effort demand touch"]
 
   normalize --> edge --> edgeFresh
@@ -74,8 +75,9 @@ flowchart TD
   freshReady -->|no| soe
   soe -->|yes| serveStale
   soe -->|no| failClosed["Do not serve an unusable copy"]
-  serve --> touch
-  serveStale --> touch
+  serve --> hot
+  serveStale --> hot
+  hot -->|yes| touch
 ```
 
 A validated envelope is served immediately only while it is still fresh. A stale copy is retained as a fallback and does not skip refresh. METAR stays fresh for 30 minutes and is not served at or beyond 90 minutes from trusted `fetchedAt`. Airport freshness follows its adapter and is independent of that hard limit. A demand-write failure never fails the user request.
@@ -92,8 +94,9 @@ For a cacheable request, the Worker:
 6. lets other requests serve a policy-allowed stale copy while refresh is in
    progress, or wait briefly for the fresh KV entry and use stale data only
    when the resource policy permits it; and
-7. records successful client access as a best-effort coordinator demand touch.
-   A demand-write failure never fails the user request.
+7. for a successful `/api/metar` or `/api/airport` response, records client
+   access as a best-effort coordinator demand touch. `/api/airport-location`
+   does not. A demand-write failure never fails the user request.
 
 The cache engine, rather than a resource adapter, writes authoritative envelope
 metadata. On both edge and KV reads it checks envelope identity, resource,

@@ -62,7 +62,7 @@ make ci-e2e
   - `workers/metar-proxy/` (service name: `runway-picker-metar-api`)
   - Uses KV namespace binding `METAR_CACHE`
 
-A lookup crosses the Pages Functions boundary, then the Worker calls the upstream provider for that resource:
+A lookup crosses the Pages Functions boundary. The Worker calls the upstream provider only on a cache miss or a stale refresh:
 
 ```mermaid
 sequenceDiagram
@@ -74,16 +74,22 @@ sequenceDiagram
 
   Browser->>Pages: GET /api/airport
   Pages->>Worker: METAR_API /api/airport
-  Worker->>AirportDb: GET /api/v1/airport/{icao}
+  opt Cache miss or stale refresh
+    Worker->>AirportDb: GET /api/v1/airport/{icao}
+  end
   Browser->>Pages: GET /api/metar
   Pages->>Worker: METAR_API /api/metar
-  Worker->>AvWx: GET /api/data/metar
-  opt No METAR report
-    Worker->>AvWx: GET /api/data/stationinfo
+  opt Cache miss or stale refresh
+    Worker->>AvWx: GET /api/data/metar
+    opt No METAR report
+      Worker->>AvWx: GET /api/data/stationinfo
+    end
   end
   Browser->>Pages: GET /api/airport-location
   Pages->>Worker: METAR_API /api/airport-location
-  Worker->>AirportDb: GET /api/v1/airport/{icao}
+  opt Cache miss or stale refresh
+    Worker->>AirportDb: GET /api/v1/airport/{icao}
+  end
 ```
 
 `/api/airport-location` runs only for the alternate-METAR distance check. That resource is cached, but it stays off the hot scheduler.
