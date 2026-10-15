@@ -167,9 +167,20 @@ export function buildAppUi(root: HTMLElement, buildMetadata: BuildMetadata): App
 
   const footer = createElement('footer', {
     className: 'app-footer',
-    attributes: { 'aria-label': 'Build version' }
+    attributes: { 'aria-label': 'Build version and source' }
   });
-  footer.textContent = `Version ${buildMetadata.footerLabel}`;
+  const versionLabel = document.createTextNode(`Version ${buildMetadata.footerLabel}`);
+  const sourceLink = createElement('a', {
+    className: 'footer-source-link',
+    textContent: 'GitHub',
+    attributes: {
+      href: 'https://github.com/benvon/runway-picker',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      'aria-label': 'Runway Picker source code on GitHub'
+    }
+  });
+  appendChildren(footer, [versionLabel, document.createTextNode(' '), sourceLink]);
 
   appendChildren(appShell, [updateBanner, header, bestSpotlightNode, inputSection, resultsNode, footer]);
   root.appendChild(appShell);

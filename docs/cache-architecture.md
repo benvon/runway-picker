@@ -40,6 +40,40 @@ additional namespace is required.
 
 ## Request path
 
+```mermaid
+flowchart TD
+  normalize["Normalize input and derive versioned key"]
+  edge["Read edge cache"]
+  edgeValid{"Envelope valid?"}
+  kv["Read KV"]
+  kvValid{"Envelope valid?"}
+  lease["Acquire per-key lease from CACHE_COORDINATOR"]
+  owner{"Lease owner?"}
+  provider["Call provider and write KV plus edge cache"]
+  wait["Wait briefly for fresh KV"]
+  fresh{"Fresh entry ready?"}
+  stale{"Policy allows stale?"}
+  serve["Serve validated payload"]
+  serveStale["Serve stale copy"]
+  touch["Best-effort demand touch"]
+
+  normalize --> edge --> edgeValid
+  edgeValid -->|yes| serve
+  edgeValid -->|no| kv --> kvValid
+  kvValid -->|yes| serve
+  kvValid -->|no| lease --> owner
+  owner -->|yes| provider --> serve
+  owner -->|no| wait --> fresh
+  fresh -->|yes| serve
+  fresh -->|no| stale
+  stale -->|yes| serveStale
+  stale -->|no| failClosed["Do not serve an unusable copy"]
+  serve --> touch
+  serveStale --> touch
+```
+
+METAR stays fresh for 30 minutes and is not served at or beyond 90 minutes from trusted `fetchedAt`. Airport freshness follows its adapter and is independent of that hard limit. A demand-write failure never fails the user request.
+
 For a cacheable request, the Worker:
 
 1. normalizes the input and derives a versioned key such as
@@ -86,6 +120,29 @@ contains the canonical resource/key, a coordinator-stamped access time and
 expiry, consecutive upstream-failure count, and optional suppression state.
 It does **not** contain a payload body. There are no `v2:hot:*` demand keys in
 the current design; old keys are ignored and expire naturally.
+
+```mermaid
+flowchart TD
+  cron["Cron every 15 minutes"]
+  schedLease["Acquire CACHE_COORDINATOR scheduler lease"]
+  candidates["Alternate oldest METAR and airport candidates"]
+  keyLease["Acquire per-key refresh lease"]
+  current{"KV envelope still current?"}
+  skip["Satisfy without a provider call"]
+  budget{"Upstream attempt budget remaining?"}
+  attempt["Provider attempt with 10 second timeout"]
+  apply["Apply outcome and renew 60 second lease"]
+  defer["Defer remaining candidates"]
+
+  cron --> schedLease --> candidates --> keyLease --> current
+  current -->|yes| skip --> apply
+  current -->|no| budget
+  budget -->|yes| attempt --> apply
+  budget -->|no| defer
+  apply --> nextCandidate["Continue with the next candidate"]
+```
+
+The default budget is 25 real upstream attempts. Cache hits and contention do not consume it. Three consecutive upstream failures suppress that demand row; later cache hits do not recreate it.
 
 A cron runs every 15 minutes. It obtains the named scheduler lease from
 `CACHE_COORDINATOR`, then:

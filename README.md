@@ -62,6 +62,32 @@ make ci-e2e
   - `workers/metar-proxy/` (service name: `runway-picker-metar-api`)
   - Uses KV namespace binding `METAR_CACHE`
 
+A lookup crosses the Pages Functions boundary, then the Worker calls the upstream provider for that resource:
+
+```mermaid
+sequenceDiagram
+  participant Browser
+  participant Pages as PagesFunctions
+  participant Worker as MetarWorker
+  participant AvWx as AviationWeather
+  participant AirportDb as AirportDB
+
+  Browser->>Pages: GET /api/airport
+  Pages->>Worker: METAR_API /api/airport
+  Worker->>AirportDb: GET /api/v1/airport/{icao}
+  Browser->>Pages: GET /api/metar
+  Pages->>Worker: METAR_API /api/metar
+  Worker->>AvWx: GET /api/data/metar
+  opt No METAR report
+    Worker->>AvWx: GET /api/data/stationinfo
+  end
+  Browser->>Pages: GET /api/airport-location
+  Pages->>Worker: METAR_API /api/airport-location
+  Worker->>AirportDb: GET /api/v1/airport/{icao}
+```
+
+`/api/airport-location` runs only for the alternate-METAR distance check. That resource is cached, but it stays off the hot scheduler.
+
 See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
 Cache design details are documented in [docs/cache-architecture.md](./docs/cache-architecture.md).
 Cache refresher operations runbook is in [docs/cache-refresh-operations.md](./docs/cache-refresh-operations.md).

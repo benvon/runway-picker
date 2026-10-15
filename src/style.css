@@ -336,6 +336,18 @@ th {
   text-align: right;
 }
 
+.footer-source-link {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.footer-source-link:hover,
+.footer-source-link:focus-visible {
+  filter: brightness(1.05);
+  outline: 2px solid #111;
+  outline-offset: 1px;
+}
+
 @media (min-width: 640px) {
   #app {
     padding: 1rem;
