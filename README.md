@@ -62,6 +62,50 @@ make ci-e2e
   - `workers/metar-proxy/` (service name: `runway-picker-metar-api`)
   - Uses KV namespace binding `METAR_CACHE`
 
+Every lookup crosses the Pages Functions boundary to the Worker. The Worker contacts a provider only when it has no fresh cached copy or cached not-found result, and only from the request that holds that key's refresh lease. The 15-minute scheduled refresh also contacts providers for hot METAR and airport entries; see [docs/cache-architecture.md](./docs/cache-architecture.md).
+
+```mermaid
+sequenceDiagram
+  participant Browser
+  participant Pages as PagesFunctions
+  participant Worker as MetarWorker
+  participant AvWx as AviationWeather
+  participant AirportDb as AirportDB
+
+  Browser->>Pages: GET /api/airport?icao={primary}
+  Pages->>Worker: METAR_API /api/airport
+  opt No fresh cached copy
+    Worker->>AirportDb: GET /api/v1/airport/{icao}
+  end
+  opt Four-character primary code
+    Browser->>Pages: GET /api/metar?icao={primary}
+    Pages->>Worker: METAR_API /api/metar
+    opt No fresh cached copy
+      Worker->>AvWx: GET /api/data/metar
+      opt No METAR report
+        Worker->>AvWx: GET /api/data/stationinfo
+      end
+    end
+  end
+  opt User enters an alternate after a three-character code or missing METAR
+    Browser->>Pages: GET /api/metar?icao={alternate}
+    Pages->>Worker: METAR_API /api/metar
+    opt No fresh cached copy
+      Worker->>AvWx: GET /api/data/metar
+      opt No METAR report
+        Worker->>AvWx: GET /api/data/stationinfo
+      end
+    end
+    Browser->>Pages: GET /api/airport-location?icao={reporting station}
+    Pages->>Worker: METAR_API /api/airport-location
+    opt No fresh cached copy
+      Worker->>AirportDb: GET /api/v1/airport/{icao}
+    end
+  end
+```
+
+`/api/airport-location` runs only for the alternate-METAR distance check. That resource is cached, but it stays off the hot scheduler.
+
 See setup details in [docs/cloudflare-setup.md](./docs/cloudflare-setup.md).
 Cache design details are documented in [docs/cache-architecture.md](./docs/cache-architecture.md).
 Cache refresher operations runbook is in [docs/cache-refresh-operations.md](./docs/cache-refresh-operations.md).

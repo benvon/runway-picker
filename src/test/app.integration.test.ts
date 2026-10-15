@@ -185,6 +185,13 @@ describe('app integration', () => {
     expect(root.textContent).toContain('Calculation Notes & Disclaimer');
     expect(root.textContent).toContain('Technical Details');
     expect(root.textContent).toContain('Version v9.9.9 (abcdef1)');
+    const sourceLink = root.querySelector<HTMLAnchorElement>('footer a');
+    expect(sourceLink?.textContent).toBe('GitHub');
+    expect(sourceLink?.getAttribute('href')).toBe('https://github.com/benvon/runway-picker');
+    expect(sourceLink?.getAttribute('aria-label')).toBe('Runway Picker source code on GitHub');
+    expect(sourceLink?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(sourceLink?.getAttribute('target')).toBe('_blank');
+    expect(root.querySelector('footer')?.getAttribute('aria-label')).toBe('Build version and source');
   });
 
   it('renders wind-sector component ranges and withholds a changing best-runway recommendation', async () => {
