@@ -44,35 +44,41 @@ additional namespace is required.
 flowchart TD
   normalize["Normalize input and derive versioned key"]
   edge["Read edge cache"]
-  edgeValid{"Envelope valid?"}
+  edgeFresh{"Edge copy fresh?"}
   kv["Read KV"]
-  kvValid{"Envelope valid?"}
+  kvFresh{"KV copy fresh?"}
+  hold["Retain copy only while inside payload age"]
   lease["Acquire per-key lease from CACHE_COORDINATOR"]
   owner{"Lease owner?"}
   provider["Call provider and write KV plus edge cache"]
+  swr{"Stale-while-revalidate allows fallback?"}
   wait["Wait briefly for fresh KV"]
-  fresh{"Fresh entry ready?"}
-  stale{"Policy allows stale?"}
-  serve["Serve validated payload"]
-  serveStale["Serve stale copy"]
+  freshReady{"Fresh entry ready?"}
+  soe{"Stale-on-error allows fallback?"}
+  serve["Serve fresh payload"]
+  serveStale["Serve retained stale copy"]
   touch["Best-effort demand touch"]
 
-  normalize --> edge --> edgeValid
-  edgeValid -->|yes| serve
-  edgeValid -->|no| kv --> kvValid
-  kvValid -->|yes| serve
-  kvValid -->|no| lease --> owner
-  owner -->|yes| provider --> serve
-  owner -->|no| wait --> fresh
-  fresh -->|yes| serve
-  fresh -->|no| stale
-  stale -->|yes| serveStale
-  stale -->|no| failClosed["Do not serve an unusable copy"]
+  normalize --> edge --> edgeFresh
+  edgeFresh -->|yes| serve
+  edgeFresh -->|no| hold --> kv --> kvFresh
+  kvFresh -->|yes| serve
+  kvFresh -->|no| lease --> owner
+  owner -->|yes| provider
+  provider -->|success| serve
+  provider -->|upstream failure| soe
+  owner -->|no| swr
+  swr -->|yes| serveStale
+  swr -->|no| wait --> freshReady
+  freshReady -->|yes| serve
+  freshReady -->|no| soe
+  soe -->|yes| serveStale
+  soe -->|no| failClosed["Do not serve an unusable copy"]
   serve --> touch
   serveStale --> touch
 ```
 
-METAR stays fresh for 30 minutes and is not served at or beyond 90 minutes from trusted `fetchedAt`. Airport freshness follows its adapter and is independent of that hard limit. A demand-write failure never fails the user request.
+A validated envelope is served immediately only while it is still fresh. A stale copy is retained as a fallback and does not skip refresh. METAR stays fresh for 30 minutes and is not served at or beyond 90 minutes from trusted `fetchedAt`. Airport freshness follows its adapter and is independent of that hard limit. A demand-write failure never fails the user request.
 
 For a cacheable request, the Worker:
 
@@ -80,11 +86,12 @@ For a cacheable request, the Worker:
    `v1:metar:KJFK`;
 2. checks the edge cache, then KV;
 3. validates every reusable envelope before delivery;
-4. on a miss or unusable copy, obtains a token-bound, per-key single-flight
-   lease from `CACHE_COORDINATOR`;
+4. on a miss or copy that is not fresh, obtains a token-bound, per-key
+   single-flight lease from `CACHE_COORDINATOR`;
 5. lets only the lease owner call the provider and write the new envelope;
-6. lets other requests wait briefly for the fresh KV entry or use stale data
-   only when the resource policy permits it; and
+6. lets other requests serve a policy-allowed stale copy while refresh is in
+   progress, or wait briefly for the fresh KV entry and use stale data only
+   when the resource policy permits it; and
 7. records successful client access as a best-effort coordinator demand touch.
    A demand-write failure never fails the user request.
 
