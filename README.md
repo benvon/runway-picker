@@ -62,7 +62,7 @@ make ci-e2e
   - `workers/metar-proxy/` (service name: `runway-picker-metar-api`)
   - Uses KV namespace binding `METAR_CACHE`
 
-A lookup crosses the Pages Functions boundary. The Worker calls the upstream provider only on a cache miss or a stale refresh:
+Every lookup crosses the Pages Functions boundary to the Worker. The Worker contacts a provider only when it has no fresh cached copy or cached not-found result, and only from the request that holds that key's refresh lease. The 15-minute scheduled refresh also contacts providers for hot METAR and airport entries; see [docs/cache-architecture.md](./docs/cache-architecture.md).
 
 ```mermaid
 sequenceDiagram
@@ -72,23 +72,35 @@ sequenceDiagram
   participant AvWx as AviationWeather
   participant AirportDb as AirportDB
 
-  Browser->>Pages: GET /api/airport
+  Browser->>Pages: GET /api/airport?icao={primary}
   Pages->>Worker: METAR_API /api/airport
-  opt Cache miss or stale refresh
+  opt No fresh cached copy
     Worker->>AirportDb: GET /api/v1/airport/{icao}
   end
-  Browser->>Pages: GET /api/metar
-  Pages->>Worker: METAR_API /api/metar
-  opt Cache miss or stale refresh
-    Worker->>AvWx: GET /api/data/metar
-    opt No METAR report
-      Worker->>AvWx: GET /api/data/stationinfo
+  opt Four-character primary code
+    Browser->>Pages: GET /api/metar?icao={primary}
+    Pages->>Worker: METAR_API /api/metar
+    opt No fresh cached copy
+      Worker->>AvWx: GET /api/data/metar
+      opt No METAR report
+        Worker->>AvWx: GET /api/data/stationinfo
+      end
     end
   end
-  Browser->>Pages: GET /api/airport-location
-  Pages->>Worker: METAR_API /api/airport-location
-  opt Cache miss or stale refresh
-    Worker->>AirportDb: GET /api/v1/airport/{icao}
+  opt User enters an alternate after a three-character code or missing METAR
+    Browser->>Pages: GET /api/metar?icao={alternate}
+    Pages->>Worker: METAR_API /api/metar
+    opt No fresh cached copy
+      Worker->>AvWx: GET /api/data/metar
+      opt No METAR report
+        Worker->>AvWx: GET /api/data/stationinfo
+      end
+    end
+    Browser->>Pages: GET /api/airport-location?icao={reporting station}
+    Pages->>Worker: METAR_API /api/airport-location
+    opt No fresh cached copy
+      Worker->>AirportDb: GET /api/v1/airport/{icao}
+    end
   end
 ```
 

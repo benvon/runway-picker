@@ -43,44 +43,54 @@ additional namespace is required.
 ```mermaid
 flowchart TD
   normalize["Normalize input and derive versioned key"]
-  edge["Read edge cache"]
-  edgeFresh{"Edge copy fresh?"}
-  kv["Read KV"]
-  kvFresh{"KV copy fresh?"}
-  hold["Retain copy only while inside payload age"]
-  lease["Acquire per-key lease from CACHE_COORDINATOR"]
+  edge{"Edge cache entry"}
+  kv{"KV entry"}
+  promote["Copy KV payload to edge cache"]
+  keepStale["Keep the freshest stale copy still inside payload age"]
+  lease["Request per-key lease from CACHE_COORDINATOR"]
   owner{"Lease owner?"}
-  provider["Call provider and write KV plus edge cache"]
-  swr{"Stale-while-revalidate allows fallback?"}
-  wait["Wait briefly for fresh KV"]
-  freshReady{"Fresh entry ready?"}
-  soe{"Stale-on-error allows fallback?"}
+  provider{"Provider call and validation"}
+  writePayload["Write KV and edge cache"]
+  writeNegative["Cache not-found result"]
+  swr{"Stale copy inside stale-while-revalidate window?"}
+  wait{"Poll KV briefly"}
+  soe{"Stale copy inside stale-on-error window?"}
   serve["Serve fresh payload"]
-  serveStale["Serve retained stale copy"]
-  hot{"METAR or airport?"}
+  serveStale["Serve stale copy"]
+  cachedError["Return cached not-found error"]
+  errorOut["Return error"]
+  hot{"/api/metar or /api/airport?"}
   touch["Best-effort demand touch"]
+  noTouch["No demand row"]
 
-  normalize --> edge --> edgeFresh
-  edgeFresh -->|yes| serve
-  edgeFresh -->|no| hold --> kv --> kvFresh
-  kvFresh -->|yes| serve
-  kvFresh -->|no| lease --> owner
+  normalize --> edge
+  edge -->|fresh payload| serve
+  edge -->|unexpired not-found| cachedError
+  edge -->|"missing, stale, or invalid"| kv
+  kv -->|fresh payload| promote --> serve
+  kv -->|unexpired not-found| cachedError
+  kv -->|"missing, stale, or invalid"| keepStale --> lease --> owner
   owner -->|yes| provider
-  provider -->|success| serve
-  provider -->|upstream failure| soe
+  provider -->|valid payload| writePayload --> serve
+  provider -->|not found| writeNegative --> errorOut
+  provider -->|other provider failure| soe
   owner -->|no| swr
   swr -->|yes| serveStale
-  swr -->|no| wait --> freshReady
-  freshReady -->|yes| serve
-  freshReady -->|no| soe
+  swr -->|no| wait
+  wait -->|fresh payload appears| serve
+  wait -->|not-found appears| cachedError
+  wait -->|timed out| soe
   soe -->|yes| serveStale
-  soe -->|no| failClosed["Do not serve an unusable copy"]
+  soe -->|no| errorOut
   serve --> hot
   serveStale --> hot
   hot -->|yes| touch
+  hot -->|"no (/api/airport-location)"| noTouch
 ```
 
-A validated envelope is served immediately only while it is still fresh. A stale copy is retained as a fallback and does not skip refresh. METAR stays fresh for 30 minutes and is not served at or beyond 90 minutes from trusted `fetchedAt`. Airport freshness follows its adapter and is independent of that hard limit. A demand-write failure never fails the user request.
+A validated envelope is served immediately only while it is still fresh. A stale copy is a fallback and never skips refresh. Copies past the payload-age limit, or with malformed metadata, are removed instead of kept. Without a `CACHE_COORDINATOR` binding the request acts as the lease owner. A cache infrastructure failure, such as a failed KV write, returns an error rather than a stale copy. Demand touches run only when the cache refresher is enabled, and a demand-write failure never fails the user request.
+
+METAR freshness ends at the earlier of 30 minutes after `fetchedAt` and 60 minutes after the observation time. If the observation is already older than 60 minutes when fetched, the copy is fresh for only 2 minutes. METAR is never served at or beyond 90 minutes from trusted `fetchedAt`. Airport freshness follows its adapter and is independent of that hard limit.
 
 For a cacheable request, the Worker:
 
@@ -115,9 +125,10 @@ Fresh response headers are derived from remaining freshness and cap downstream
 `max-age` at 60 seconds. Stale and zero-remaining responses are `no-store`, so
 a downstream cache cannot lengthen the Worker policy.
 
-METAR has a 30-minute fresh interval and a strict 90-minute payload-age limit
-measured from trusted `fetchedAt`. At or beyond that hard limit, METAR data is
-not served—even during an upstream outage. The Worker removes payload copies
+METAR freshness ends at the earlier of 30 minutes after `fetchedAt` and 60
+minutes after the observation time, and METAR has a strict 90-minute
+payload-age limit measured from trusted `fetchedAt`. At or beyond that hard
+limit, METAR data is not served—even during an upstream outage. The Worker removes payload copies
 from KV and edge cache when possible, while retaining demand metadata so a
 later scheduler run or client request can recover the entry. Airport policies
 are defined by their adapter and are independent of METAR's hard limit.
@@ -134,25 +145,45 @@ the current design; old keys are ignored and expire naturally.
 ```mermaid
 flowchart TD
   cron["Cron every 15 minutes"]
-  schedLease["Acquire CACHE_COORDINATOR scheduler lease"]
-  candidates["Alternate oldest METAR and airport candidates"]
-  keyLease["Acquire per-key refresh lease"]
-  current{"KV envelope still current?"}
-  skip["Satisfy without a provider call"]
-  budget{"Upstream attempt budget remaining?"}
-  attempt["Provider attempt with 10 second timeout"]
-  apply["Apply outcome and renew 60 second lease"]
-  defer["Defer remaining candidates"]
+  enabled{"Refresher enabled?"}
+  runLease{"300 second scheduler run lease acquired?"}
+  skipRun["Skip this run"]
+  claim["Expire inactive rows and claim unsuppressed candidates"]
+  order["Alternate METAR and airport candidates"]
+  budget{"Candidate left and attempt budget not spent?"}
+  keyLease{"Per-key refresh lease"}
+  current{"KV copy current or unexpired not-found?"}
+  satisfied["Satisfied outcome"]
+  attempt{"Provider attempt with 10 second timeout"}
+  failed["Failure outcome; suppress after 3 in a row"]
+  neutral["Neutral outcome"]
+  apply["Apply outcome and renew 60 second run lease"]
+  complete["Complete run; unprocessed candidates wait for a later run"]
+  abort["Abort run"]
 
-  cron --> schedLease --> candidates --> keyLease --> current
-  current -->|yes| skip --> apply
-  current -->|no| budget
-  budget -->|yes| attempt --> apply
-  budget -->|no| defer
-  apply --> nextCandidate["Continue with the next candidate"]
+  cron --> enabled
+  enabled -->|no| skipRun
+  enabled -->|yes| runLease
+  runLease -->|"no (busy or unavailable)"| skipRun
+  runLease -->|yes| claim --> order --> budget
+  budget -->|no| complete
+  budget -->|yes| keyLease
+  keyLease -->|contended| neutral
+  keyLease -->|coordinator unavailable| abort
+  keyLease -->|acquired| current
+  current -->|yes| satisfied
+  current -->|KV read failure| abort
+  current -->|no| attempt
+  attempt -->|"payload or not-found cached"| satisfied
+  attempt -->|provider failure| failed
+  attempt -->|KV write failure| abort
+  satisfied --> apply
+  failed --> apply
+  neutral --> apply
+  apply --> budget
 ```
 
-The default budget is 25 real upstream attempts. Cache hits and contention do not consume it. Three consecutive upstream failures suppress that demand row; later cache hits do not recreate it.
+The budget check runs before each candidate's key lease and KV read. Once the attempt budget (25 upstream attempts by default) is spent, the run ends there, so later candidates wait for a future run even if they would have been cache hits. Cache hits and contention do not use the budget. A KV copy is current when it is still fresh and was fetched within the resource refresh interval (30 minutes for METAR, 24 hours for airport). Client cache hits do not clear suppression; a client request that completes a successful upstream refresh does.
 
 A cron runs every 15 minutes. It obtains the named scheduler lease from
 `CACHE_COORDINATOR`, then:
