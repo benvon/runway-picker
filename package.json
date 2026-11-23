@@ -35,19 +35,19 @@
   "homepage": "https://github.com/benvon/runway-picker#readme",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.65.0",
+    "@playwright/test": "^1.65.1",
     "@types/node": "^26.6.6",
     "@typescript-eslint/eslint-plugin": "^8.72.1",
     "@typescript-eslint/parser": "^8.70.1",
     "@typescript/compiler": "npm:typescript@^7.0.2",
-    "@vitest/coverage-v8": "^5.1.0",
-    "eslint": "^10.14.0",
+    "@vitest/coverage-v8": "^5.1.1",
+    "eslint": "^10.15.0",
     "jsdom": "^31.0.1",
     "jsonc-parser": "^3.3.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "vite": "^8.3.6",
+    "vite": "^8.3.8",
     "vitest": "^5.0.3",
-    "wrangler": "^4.158.0"
+    "wrangler": "^4.166.0"
   },
   "overrides": {
     "brace-expansion": "^5.0.12"
