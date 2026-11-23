@@ -26,6 +26,14 @@ updates:
         patterns:
           - vitest
           - "@vitest/*"
+      # Keep parser and plugin updates together, separate from the other minor and patch updates.
+      typescript-eslint:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "@typescript-eslint/*"
       npm-minor-patch:
         applies-to: version-updates
         update-types:
@@ -34,7 +42,7 @@ updates:
         patterns:
           - "*"
     ignore:
-      # TypeScript 7 has no JavaScript API. The compiler is @typescript/native;
+      # TypeScript 7 has no JavaScript API. The compiler is @typescript/compiler;
       # the typescript alias stays on @typescript/typescript6 for typescript-eslint.
       - dependency-name: typescript
         update-types:
